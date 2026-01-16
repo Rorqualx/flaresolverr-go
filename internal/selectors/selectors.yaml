@@ -1,0 +1,39 @@
+# FlareSolverr Challenge Detection Patterns
+# This file contains patterns used to detect various Cloudflare challenge types.
+# Patterns are matched case-insensitively against page HTML.
+
+# Access denied patterns - must also contain "cloudflare" to match
+access_denied:
+  - "access denied"
+  - "error 1015"
+  - "error 1012"
+  - "error 1020"
+  - "you have been blocked"
+  - "ray id:"
+
+# Turnstile challenge patterns
+turnstile:
+  - "cf-turnstile"
+  - "challenges.cloudflare.com/turnstile"
+  - "turnstile-wrapper"
+
+# JavaScript challenge patterns
+javascript:
+  - "just a moment"
+  - "checking your browser"
+  - "please wait"
+  - "ddos-guard"
+  - "__cf_chl_opt"
+  - "_cf_chl_opt"
+  - "cf-challenge"
+  - "cf_chl_prog"
+
+# Turnstile checkbox selectors (in order of preference)
+turnstile_selectors:
+  - "input[type='checkbox']"
+  - ".cf-turnstile-response"
+  - "#cf-turnstile-response"
+  - "[data-testid='cf-turnstile-response']"
+
+# Turnstile frame URL pattern
+turnstile_frame_pattern: "challenges.cloudflare.com"

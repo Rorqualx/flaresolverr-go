@@ -1,0 +1,55 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Build outputs
+/bin
+/dist
+*.exe
+flaresolverr
+
+# Test artifacts
+coverage.out
+*.test
+/tests/integration
+
+# Documentation (except README for reference)
+*.md
+!README.md
+docs/
+
+# Docker (don't need these in the build context)
+Dockerfile*
+docker-compose*.yml
+.docker
+
+# CI/CD
+.github
+.gitlab-ci.yml
+.travis.yml
+Makefile
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Misc
+*.log
+tmp/
+.DS_Store
+Thumbs.db
+
+# Go specific
+vendor/
+go.work
+go.work.sum

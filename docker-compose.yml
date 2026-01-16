@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  flaresolverr:
+    build:
+      context: .
+      args:
+        VERSION: "3.0.0-go"
+    image: flaresolverr:latest
+    container_name: flaresolverr
+    ports:
+      - "8191:8191"
+      # Uncomment to expose Prometheus metrics
+      # - "8192:8192"
+    environment:
+      # Server
+      - HOST=0.0.0.0
+      - PORT=8191
+
+      # Browser pool
+      - HEADLESS=true
+      - BROWSER_POOL_SIZE=3
+      - BROWSER_POOL_TIMEOUT=30s
+      - MAX_MEMORY_MB=2048
+
+      # Sessions
+      - SESSION_TTL=30m
+      - SESSION_CLEANUP_INTERVAL=1m
+      - MAX_SESSIONS=100
+
+      # Timeouts
+      - DEFAULT_TIMEOUT=60s
+      - MAX_TIMEOUT=300s
+
+      # Logging
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+
+      # Metrics (Prometheus)
+      - PROMETHEUS_ENABLED=false
+      - PROMETHEUS_PORT=8192
+
+      # Security
+      - RATE_LIMIT_ENABLED=true
+      - RATE_LIMIT_RPM=60
+
+      # Proxy (optional)
+      # - PROXY_URL=http://proxy:8080
+      # - PROXY_USERNAME=
+      # - PROXY_PASSWORD=
+
+    restart: unless-stopped
+
+    # Resource limits for memory efficiency
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+
+    # Temp filesystem for browser cache
+    tmpfs:
+      - /tmp:size=128M
+      - /home/flaresolverr/.cache:size=256M
+
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8191/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Optional: Prometheus for metrics collection
+  # Uncomment to enable monitoring
+  #
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - prometheus_data:/prometheus
+  #   command:
+  #     - '--config.file=/etc/prometheus/prometheus.yml'
+  #     - '--storage.tsdb.path=/prometheus'
+  #   depends_on:
+  #     - flaresolverr
+  #   restart: unless-stopped
+
+# volumes:
+#   prometheus_data:

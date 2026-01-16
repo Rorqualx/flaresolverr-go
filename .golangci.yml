@@ -1,0 +1,178 @@
+# GolangCI-Lint Configuration
+# https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  issues-exit-code: 1
+  tests: true
+  skip-dirs:
+    - vendor
+    - third_party
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters:
+  enable:
+    # Default linters
+    - errcheck          # Check for unchecked errors
+    - gosimple          # Simplify code
+    - govet             # Reports suspicious constructs
+    - ineffassign       # Detects unused assignments
+    - staticcheck       # Static analysis
+    - unused            # Checks for unused code
+
+    # Additional safety linters
+    - bodyclose         # Checks HTTP response body is closed
+    - contextcheck      # Check context propagation
+    - durationcheck     # Check for two durations multiplied
+    - errname           # Checks error naming convention
+    - errorlint         # Find issues with error wrapping
+    - exhaustive        # Check exhaustiveness of enum switch
+    - exportloopref     # Checks for pointers to loop variables
+    - gocritic          # Comprehensive linter
+    - gofmt             # Check formatting
+    - goimports         # Check imports
+    - gosec             # Security issues
+    - makezero          # Finds slice declarations not initialized to zero
+    - nilerr            # Finds returning nil when err is not nil
+    - noctx             # Finds http requests without context
+    - prealloc          # Find slice preallocation opportunities
+    - predeclared       # Find shadowed predeclared identifiers
+    - reassign          # Checks that package variables are not reassigned
+    - rowserrcheck      # Checks sql.Rows.Err is checked
+    - sqlclosecheck     # Checks sql.Rows and sql.Stmt are closed
+    - unconvert         # Remove unnecessary type conversions
+    - unparam           # Reports unused function parameters
+    - wastedassign      # Finds wasted assignment statements
+
+    # Style linters
+    - misspell          # Finds commonly misspelled words
+    - revive            # Replacement for golint
+    - stylecheck        # Style checks
+    - whitespace        # Whitespace issues
+
+  disable:
+    - gochecknoglobals  # We use some globals for config
+    - gochecknoinits    # We use init() sparingly
+    - lll               # Line length - too restrictive
+    - wsl               # Whitespace linter - too opinionated
+    - funlen            # Function length - handled by review
+    - gocognit          # Cognitive complexity - handled by review
+    - godox             # TODO/FIXME comments - we use these
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false  # Allow _ = ... for intentional ignores
+    exclude-functions:
+      - (io.Closer).Close
+      - (net/http.ResponseWriter).Write
+
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment  # Too noisy
+
+  gofmt:
+    simplify: true
+
+  goimports:
+    local-prefixes: github.com/user/flaresolverr-go
+
+  gosec:
+    excludes:
+      - G104  # Audit errors not checked - we use errcheck
+      - G304  # File path from variable - needed for config
+    config:
+      G301: "0750"  # Directory permissions
+      G302: "0640"  # File permissions
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - hugeParam       # Sometimes needed for clarity
+      - rangeValCopy    # Sometimes intentional
+
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+  stylecheck:
+    checks:
+      - all
+      - -ST1000  # Package comments - not required
+      - -ST1003  # Underscores in names - we follow Go convention
+
+  misspell:
+    locale: US
+
+  prealloc:
+    simple: true
+    range-loops: true
+    for-loops: false  # Can be noisy
+
+  nolintlint:
+    require-explanation: true
+    require-specific: true
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10
+
+  exclude-rules:
+    # Allow long lines in tests
+    - path: _test\.go
+      linters:
+        - lll
+        - funlen
+
+    # Allow dot imports in tests for testify
+    - path: _test\.go
+      linters:
+        - revive
+      text: "dot-imports"
+
+    # Allow unused parameters in interface implementations
+    - linters:
+        - unparam
+      text: "always receives"
+
+    # Allow magic numbers in tests
+    - path: _test\.go
+      linters:
+        - gomnd
+
+  exclude-use-default: false
+  exclude:
+    # Allow fmt.Errorf without %w when not wrapping
+    - "fmt.Errorf can be replaced with errors.New"
