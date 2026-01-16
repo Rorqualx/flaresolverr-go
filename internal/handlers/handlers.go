@@ -12,13 +12,13 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/user/flaresolverr-go/internal/browser"
-	"github.com/user/flaresolverr-go/internal/config"
-	"github.com/user/flaresolverr-go/internal/security"
-	"github.com/user/flaresolverr-go/internal/session"
-	"github.com/user/flaresolverr-go/internal/solver"
-	"github.com/user/flaresolverr-go/internal/types"
-	"github.com/user/flaresolverr-go/pkg/version"
+	"github.com/Rorqualx/flaresolverr-go/internal/browser"
+	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/security"
+	"github.com/Rorqualx/flaresolverr-go/internal/session"
+	"github.com/Rorqualx/flaresolverr-go/internal/solver"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/pkg/version"
 )
 
 // sensitiveParams contains query parameter names that may contain secrets

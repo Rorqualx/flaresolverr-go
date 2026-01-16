@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/user/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 // BenchmarkJSONDecode measures JSON request parsing performance.

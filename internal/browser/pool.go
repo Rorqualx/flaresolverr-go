@@ -17,8 +17,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/user/flaresolverr-go/internal/config"
-	"github.com/user/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 // Pool manages a pool of reusable browser instances.

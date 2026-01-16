@@ -12,7 +12,7 @@ Thank you for your interest in contributing! This document provides a quick star
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/flaresolverr-go.git
+git clone https://github.com/Rorqualx/flaresolverr-go.git
 cd flaresolverr-go
 
 # Install tools

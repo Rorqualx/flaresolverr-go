@@ -466,15 +466,15 @@ import (
     "github.com/go-rod/rod"
     "github.com/rs/zerolog/log"
 
-    "github.com/user/flaresolverr-go/internal/config"
-    "github.com/user/flaresolverr-go/internal/types"
+    "github.com/Rorqualx/flaresolverr-go/internal/config"
+    "github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 // BAD: Mixed, no organization
 import (
     "github.com/go-rod/rod"
     "context"
-    "github.com/user/flaresolverr-go/internal/config"
+    "github.com/Rorqualx/flaresolverr-go/internal/config"
     "fmt"
     "sync"
 )

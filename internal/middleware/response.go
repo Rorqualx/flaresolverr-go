@@ -7,7 +7,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/user/flaresolverr-go/pkg/version"
+	"github.com/Rorqualx/flaresolverr-go/pkg/version"
 )
 
 // errorResponse represents a consistent error response format.

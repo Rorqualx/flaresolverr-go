@@ -17,10 +17,10 @@ import (
 	"github.com/go-rod/stealth"
 	"github.com/rs/zerolog/log"
 
-	"github.com/user/flaresolverr-go/internal/browser"
-	"github.com/user/flaresolverr-go/internal/security"
-	"github.com/user/flaresolverr-go/internal/selectors"
-	"github.com/user/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/internal/browser"
+	"github.com/Rorqualx/flaresolverr-go/internal/security"
+	"github.com/Rorqualx/flaresolverr-go/internal/selectors"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 // ChallengeType represents the type of challenge detected.

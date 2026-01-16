@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/user/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 // Route represents a single API route.

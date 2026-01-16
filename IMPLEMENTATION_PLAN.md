@@ -341,7 +341,7 @@ if cfg.PrometheusEnabled {
 
 Add metrics instrumentation:
 ```go
-import "github.com/user/flaresolverr-go/internal/metrics"
+import "github.com/Rorqualx/flaresolverr-go/internal/metrics"
 
 // In ServeHTTP
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -433,7 +433,7 @@ import (
     "net/http/httptest"
     "testing"
 
-    "github.com/user/flaresolverr-go/internal/types"
+    "github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 func TestHealthEndpoint(t *testing.T) {

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/flaresolverr-go/internal/config"
-	"github.com/user/flaresolverr-go/internal/session"
-	"github.com/user/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/session"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 // mockHandler creates a handler without a real browser pool for testing

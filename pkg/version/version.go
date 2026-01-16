@@ -1,6 +1,6 @@
 // Package version provides build version information.
 // Version is set at build time via ldflags:
-// go build -ldflags "-X github.com/user/flaresolverr-go/pkg/version.Version=1.0.0"
+// go build -ldflags "-X github.com/Rorqualx/flaresolverr-go/pkg/version.Version=1.0.0"
 package version
 
 import "runtime"

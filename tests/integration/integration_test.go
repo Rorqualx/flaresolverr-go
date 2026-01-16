@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/flaresolverr-go/internal/browser"
-	"github.com/user/flaresolverr-go/internal/config"
-	"github.com/user/flaresolverr-go/internal/handlers"
-	"github.com/user/flaresolverr-go/internal/session"
-	"github.com/user/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/internal/browser"
+	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/handlers"
+	"github.com/Rorqualx/flaresolverr-go/internal/session"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 var testHandler *handlers.Handler

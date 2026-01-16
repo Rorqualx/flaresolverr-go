@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/config"
 )
 
 // testConfig returns a configuration suitable for testing.

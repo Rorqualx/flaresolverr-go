@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-rod/rod"
 
-	"github.com/user/flaresolverr-go/internal/config"
-	"github.com/user/flaresolverr-go/internal/types"
+	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
 // testConfig returns a configuration suitable for testing.
