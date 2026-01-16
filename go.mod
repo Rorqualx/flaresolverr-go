@@ -1,4 +1,4 @@
-module github.com/user/flaresolverr-go
+module github.com/Rorqualx/flaresolverr-go
 
 go 1.24.0
 

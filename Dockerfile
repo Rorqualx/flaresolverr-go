@@ -1,5 +1,10 @@
-# Build stage
-FROM golang:1.24-alpine AS builder
+# Build stage - use BUILDPLATFORM for native compilation speed
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+
+# Target architecture arguments for cross-compilation
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
@@ -13,10 +18,10 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
+# Build the application for target architecture
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags "-s -w -X github.com/user/flaresolverr-go/pkg/version.Version=${VERSION}" \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
+    -ldflags "-s -w -X github.com/Rorqualx/flaresolverr-go/pkg/version.Version=${VERSION}" \
     -o /flaresolverr \
     ./cmd/flaresolverr
 

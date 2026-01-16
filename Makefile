@@ -8,7 +8,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 BINARY_NAME := flaresolverr
 BUILD_DIR := bin
 GO_FILES := $(shell find . -type f -name '*.go' -not -path "./vendor/*")
-LDFLAGS := -ldflags "-s -w -X github.com/user/flaresolverr-go/pkg/version.Version=$(VERSION)"
+LDFLAGS := -ldflags "-s -w -X github.com/Rorqualx/flaresolverr-go/pkg/version.Version=$(VERSION)"
 
 # Colors for output
 GREEN := \033[0;32m
@@ -85,7 +85,7 @@ lint-fix: ## Run linter with auto-fix
 fmt: ## Format code
 	@echo "$(GREEN)Formatting code...$(NC)"
 	gofmt -s -w $(GO_FILES)
-	goimports -w -local github.com/user/flaresolverr-go $(GO_FILES)
+	goimports -w -local github.com/Rorqualx/flaresolverr-go $(GO_FILES)
 
 vet: ## Run go vet
 	@echo "$(GREEN)Running go vet...$(NC)"
