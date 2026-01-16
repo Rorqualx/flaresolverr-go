@@ -5,7 +5,7 @@ version: 2
 
 before:
   hooks:
-    - go mod tidy
+    - go mod download
 
 builds:
   - id: flaresolverr
