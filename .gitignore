@@ -1,5 +1,5 @@
-# Binaries
-flaresolverr
+# Binaries (at root only, not cmd/flaresolverr/)
+/flaresolverr
 *.exe
 *.exe~
 *.dll
