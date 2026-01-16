@@ -29,10 +29,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	switch {
-	case req.URL.Path == "/health" || req.URL.Path == "/v1":
+	case req.URL.Path == "/health":
 		r.handler.HandleHealth(w, req)
 
-	case req.URL.Path == "/" || req.URL.Path == "/api":
+	case req.URL.Path == "/" || req.URL.Path == "/api" || req.URL.Path == "/v1":
 		if req.Method != http.MethodPost {
 			r.handler.HandleMethodNotAllowed(w, req)
 			return

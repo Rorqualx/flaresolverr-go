@@ -67,7 +67,12 @@ func TestV1Endpoint(t *testing.T) {
 	h := mockHandler()
 	defer h.sessions.Close()
 
-	req := httptest.NewRequest("GET", "/v1", nil)
+	// /v1 is the main API endpoint (POST only) - matching original FlareSolverr
+	// Test that POST /v1 works as the API endpoint
+	body := types.Request{Cmd: types.CmdSessionsList}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest("POST", "/v1", bytes.NewReader(bodyBytes))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -81,6 +86,28 @@ func TestV1Endpoint(t *testing.T) {
 
 	if resp.Status != types.StatusOK {
 		t.Errorf("Expected status 'ok', got %q", resp.Status)
+	}
+}
+
+func TestV1EndpointRejectsGet(t *testing.T) {
+	h := mockHandler()
+	defer h.sessions.Close()
+
+	// GET /v1 should return "Method not allowed" since /v1 is POST-only API endpoint
+	req := httptest.NewRequest("GET", "/v1", nil)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	var resp types.Response
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp.Status != types.StatusError {
+		t.Errorf("Expected error status for GET /v1, got %q", resp.Status)
+	}
+
+	if resp.Message != "Method not allowed" {
+		t.Errorf("Expected 'Method not allowed', got %q", resp.Message)
 	}
 }
 

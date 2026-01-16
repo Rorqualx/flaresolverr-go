@@ -106,7 +106,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle health check
-	if r.URL.Path == "/health" || r.URL.Path == "/v1" {
+	if r.URL.Path == "/health" {
 		h.handleHealth(w, startTime)
 		return
 	}
@@ -248,7 +248,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		Proxy:      req.Proxy,
 		PostData:   req.PostData,
 		IsPost:     isPost,
-		Screenshot: req.Screenshot,
+		Screenshot: req.ReturnScreenshot,
 	}
 
 	var result *solver.Result

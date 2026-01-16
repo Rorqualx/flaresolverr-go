@@ -11,8 +11,8 @@ type Request struct {
 	Cookies           []RequestCookie `json:"cookies,omitempty"`
 	ReturnOnlyCookies bool            `json:"returnOnlyCookies,omitempty"`
 	Proxy             *Proxy          `json:"proxy,omitempty"`
-	PostData          string          `json:"postData,omitempty"`
-	Screenshot        bool            `json:"screenshot,omitempty"` // Capture screenshot and return as base64
+	PostData         string          `json:"postData,omitempty"`
+	ReturnScreenshot bool            `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
 }
 
 // RequestCookie represents a cookie to be set before navigation.
@@ -52,8 +52,8 @@ type Solution struct {
 	Response       string            `json:"response"`
 	Cookies        []Cookie          `json:"cookies"`
 	UserAgent      string            `json:"userAgent"`
-	Screenshot     string            `json:"screenshot,omitempty"`     // Base64 encoded PNG screenshot
-	TurnstileToken string            `json:"turnstileToken,omitempty"` // cf-turnstile-response token if present
+	Screenshot     string `json:"screenshot,omitempty"`      // Base64 encoded PNG screenshot
+	TurnstileToken string `json:"turnstile_token,omitempty"` // cf-turnstile-response token if present
 }
 
 // Cookie represents a browser cookie.
