@@ -47,13 +47,15 @@ type Result struct {
 
 // SolveOptions contains options for a solve request.
 type SolveOptions struct {
-	URL        string
-	Timeout    time.Duration
-	Cookies    []types.RequestCookie
-	Proxy      *types.Proxy
-	PostData   string
-	IsPost     bool
-	Screenshot bool // Capture screenshot after solve
+	URL           string
+	Timeout       time.Duration
+	Cookies       []types.RequestCookie
+	Proxy         *types.Proxy
+	PostData      string
+	IsPost        bool
+	Screenshot    bool // Capture screenshot after solve
+	DisableMedia  bool // Disable loading of media (images, CSS, fonts)
+	WaitInSeconds int  // Wait N seconds before returning the response
 }
 
 // Solver handles Cloudflare challenge resolution.
@@ -81,6 +83,33 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// setupMediaBlocking enables request interception to block media resources.
+// This reduces bandwidth and speeds up page loads by blocking images, stylesheets, fonts, and media.
+// Returns a cleanup function that should be deferred.
+func setupMediaBlocking(page *rod.Page) func() {
+	router := page.HijackRequests()
+
+	router.MustAdd("*", func(ctx *rod.Hijack) {
+		resourceType := ctx.Request.Type()
+		// Block images, stylesheets, fonts, and media
+		switch resourceType {
+		case proto.NetworkResourceTypeImage,
+			proto.NetworkResourceTypeStylesheet,
+			proto.NetworkResourceTypeFont,
+			proto.NetworkResourceTypeMedia:
+			ctx.Response.Fail(proto.NetworkErrorReasonBlockedByClient)
+			return
+		}
+		ctx.ContinueRequest(&proto.FetchContinueRequest{})
+	})
+
+	go router.Run()
+
+	return func() {
+		_ = router.Stop()
+	}
+}
+
 // Solve navigates to a URL and attempts to solve any Cloudflare challenges.
 // It returns the page content after challenge resolution.
 func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error) {
@@ -102,6 +131,8 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 		Bool("is_post", opts.IsPost).
 		Int("cookies_count", len(opts.Cookies)).
 		Bool("has_proxy", opts.Proxy != nil).
+		Bool("disable_media", opts.DisableMedia).
+		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve attempt")
 
 	// Acquire browser from pool
@@ -138,6 +169,13 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 		// Set viewport
 		if err := browser.SetViewport(page, 1920, 1080); err != nil {
 			log.Warn().Err(err).Msg("Failed to set viewport")
+		}
+
+		// Set up media blocking if requested
+		if opts.DisableMedia {
+			mediaCleanup := setupMediaBlocking(page)
+			defer mediaCleanup()
+			log.Debug().Msg("Media blocking enabled")
 		}
 
 		// Set up proxy authentication if needed
@@ -186,6 +224,13 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 			log.Warn().Err(err).Msg("Failed to set viewport")
 		}
 
+		// Set up media blocking if requested
+		if opts.DisableMedia {
+			mediaCleanup := setupMediaBlocking(page)
+			defer mediaCleanup()
+			log.Debug().Msg("Media blocking enabled")
+		}
+
 		// Set up proxy authentication if needed
 		// Bug 1: Capture cleanup function to prevent goroutine leaks
 		var proxyCleanup func()
@@ -226,6 +271,15 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot)
 	if err != nil {
 		return nil, err
+	}
+
+	// Wait additional time if requested (waitInSeconds)
+	if opts.WaitInSeconds > 0 {
+		waitDuration := time.Duration(opts.WaitInSeconds) * time.Second
+		log.Debug().Int("seconds", opts.WaitInSeconds).Msg("Waiting additional time before returning")
+		if !sleepWithContext(solveCtx, waitDuration) {
+			log.Warn().Msg("Wait interrupted by context cancellation")
+		}
 	}
 
 	return result, nil
@@ -832,11 +886,22 @@ func (s *Solver) captureScreenshot(page *rod.Page) ([]byte, error) {
 
 // SolveWithPage solves a challenge using an existing page (for session support).
 func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveOptions) (*Result, error) {
-	log.Info().Str("url", opts.URL).Msg("Starting solve with existing page")
+	log.Info().
+		Str("url", opts.URL).
+		Bool("disable_media", opts.DisableMedia).
+		Int("wait_seconds", opts.WaitInSeconds).
+		Msg("Starting solve with existing page")
 
 	// Apply stealth patches
 	if err := browser.ApplyStealthToPage(page); err != nil {
 		log.Warn().Err(err).Msg("Failed to apply stealth patches")
+	}
+
+	// Set up media blocking if requested
+	if opts.DisableMedia {
+		mediaCleanup := setupMediaBlocking(page)
+		defer mediaCleanup()
+		log.Debug().Msg("Media blocking enabled")
 	}
 
 	// Set cookies if provided
@@ -867,5 +932,19 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		log.Warn().Err(err).Msg("WaitLoad failed, continuing anyway")
 	}
 
-	return s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot)
+	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait additional time if requested (waitInSeconds)
+	if opts.WaitInSeconds > 0 {
+		waitDuration := time.Duration(opts.WaitInSeconds) * time.Second
+		log.Debug().Int("seconds", opts.WaitInSeconds).Msg("Waiting additional time before returning")
+		if !sleepWithContext(solveCtx, waitDuration) {
+			log.Warn().Msg("Wait interrupted by context cancellation")
+		}
+	}
+
+	return result, nil
 }

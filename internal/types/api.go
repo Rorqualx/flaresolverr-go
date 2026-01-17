@@ -11,8 +11,10 @@ type Request struct {
 	Cookies           []RequestCookie `json:"cookies,omitempty"`
 	ReturnOnlyCookies bool            `json:"returnOnlyCookies,omitempty"`
 	Proxy             *Proxy          `json:"proxy,omitempty"`
-	PostData         string          `json:"postData,omitempty"`
-	ReturnScreenshot bool            `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
+	PostData         string `json:"postData,omitempty"`
+	ReturnScreenshot bool   `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
+	DisableMedia     bool   `json:"disableMedia,omitempty"`     // Disable loading of media (images, CSS, fonts)
+	WaitInSeconds    int    `json:"waitInSeconds,omitempty"`    // Wait N seconds before returning the response
 }
 
 // RequestCookie represents a cookie to be set before navigation.

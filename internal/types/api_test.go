@@ -17,6 +17,8 @@ func TestRequestJSONFieldNames(t *testing.T) {
 		ReturnOnlyCookies: true,
 		PostData:          "key=value",
 		ReturnScreenshot:  true,
+		DisableMedia:      true,
+		WaitInSeconds:     5,
 	}
 
 	data, err := json.Marshal(req)
@@ -36,6 +38,8 @@ func TestRequestJSONFieldNames(t *testing.T) {
 		`"returnOnlyCookies"`,
 		`"postData"`,
 		`"returnScreenshot"`,
+		`"disableMedia"`,
+		`"waitInSeconds"`,
 	}
 
 	for _, field := range expectedFields {
@@ -46,10 +50,12 @@ func TestRequestJSONFieldNames(t *testing.T) {
 
 	// Verify incorrect field names are NOT present
 	incorrectFields := []string{
-		`"screenshot"`,         // Should be returnScreenshot
-		`"session_ttl"`,        // Should be session_ttl_minutes
-		`"return_screenshot"`,  // Should be returnScreenshot (camelCase)
+		`"screenshot"`,          // Should be returnScreenshot
+		`"session_ttl"`,         // Should be session_ttl_minutes
+		`"return_screenshot"`,   // Should be returnScreenshot (camelCase)
 		`"return_only_cookies"`, // Should be returnOnlyCookies (camelCase)
+		`"disable_media"`,       // Should be disableMedia (camelCase)
+		`"wait_in_seconds"`,     // Should be waitInSeconds (camelCase)
 	}
 
 	for _, field := range incorrectFields {
@@ -158,11 +164,13 @@ func TestResponseJSONFieldNames(t *testing.T) {
 // TestRequestDeserialization verifies requests from original FlareSolverr clients can be parsed
 func TestRequestDeserialization(t *testing.T) {
 	tests := []struct {
-		name     string
-		json     string
-		wantCmd  string
-		wantURL  string
-		wantSS   bool
+		name            string
+		json            string
+		wantCmd         string
+		wantURL         string
+		wantSS          bool
+		wantDisable     bool
+		wantWaitSeconds int
 	}{
 		{
 			name:    "basic request.get",
@@ -176,6 +184,29 @@ func TestRequestDeserialization(t *testing.T) {
 			wantCmd: "request.get",
 			wantURL: "https://example.com",
 			wantSS:  true,
+		},
+		{
+			name:        "request with disableMedia",
+			json:        `{"cmd":"request.get","url":"https://example.com","disableMedia":true}`,
+			wantCmd:     "request.get",
+			wantURL:     "https://example.com",
+			wantDisable: true,
+		},
+		{
+			name:            "request with waitInSeconds",
+			json:            `{"cmd":"request.get","url":"https://example.com","waitInSeconds":5}`,
+			wantCmd:         "request.get",
+			wantURL:         "https://example.com",
+			wantWaitSeconds: 5,
+		},
+		{
+			name:            "request with all options",
+			json:            `{"cmd":"request.get","url":"https://example.com","returnScreenshot":true,"disableMedia":true,"waitInSeconds":10}`,
+			wantCmd:         "request.get",
+			wantURL:         "https://example.com",
+			wantSS:          true,
+			wantDisable:     true,
+			wantWaitSeconds: 10,
 		},
 		{
 			name:    "request.post with postData",
@@ -215,6 +246,12 @@ func TestRequestDeserialization(t *testing.T) {
 			}
 			if req.ReturnScreenshot != tt.wantSS {
 				t.Errorf("ReturnScreenshot = %v, want %v", req.ReturnScreenshot, tt.wantSS)
+			}
+			if req.DisableMedia != tt.wantDisable {
+				t.Errorf("DisableMedia = %v, want %v", req.DisableMedia, tt.wantDisable)
+			}
+			if req.WaitInSeconds != tt.wantWaitSeconds {
+				t.Errorf("WaitInSeconds = %v, want %v", req.WaitInSeconds, tt.wantWaitSeconds)
 			}
 		})
 	}

@@ -240,15 +240,31 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		}
 	}
 
+	// Validate and cap WaitInSeconds to prevent abuse
+	// Maximum wait is 60 seconds or remaining timeout, whichever is smaller
+	const maxWaitSeconds = 60
+	waitInSeconds := req.WaitInSeconds
+	if waitInSeconds < 0 {
+		waitInSeconds = 0
+	} else if waitInSeconds > maxWaitSeconds {
+		log.Warn().
+			Int("requested", req.WaitInSeconds).
+			Int("capped_to", maxWaitSeconds).
+			Msg("WaitInSeconds exceeds maximum, capping")
+		waitInSeconds = maxWaitSeconds
+	}
+
 	// Build solve options
 	opts := &solver.SolveOptions{
-		URL:        req.URL,
-		Timeout:    timeout,
-		Cookies:    req.Cookies,
-		Proxy:      req.Proxy,
-		PostData:   req.PostData,
-		IsPost:     isPost,
-		Screenshot: req.ReturnScreenshot,
+		URL:           req.URL,
+		Timeout:       timeout,
+		Cookies:       req.Cookies,
+		Proxy:         req.Proxy,
+		PostData:      req.PostData,
+		IsPost:        isPost,
+		Screenshot:    req.ReturnScreenshot,
+		DisableMedia:  req.DisableMedia,
+		WaitInSeconds: waitInSeconds,
 	}
 
 	var result *solver.Result
