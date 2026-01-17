@@ -217,6 +217,9 @@ Supported proxy schemes: `http`, `https`, `socks4`, `socks5`
 | `userAgent` | string | Browser user agent |
 | `screenshot` | string | Base64 PNG (if requested) |
 | `turnstile_token` | string | Cloudflare Turnstile token (if present) |
+| `localStorage` | object | All localStorage key-value pairs (for debugging) |
+| `sessionStorage` | object | All sessionStorage key-value pairs (for debugging) |
+| `responseHeaders` | object | Extracted response metadata (cf-ray, etc.) |
 | `responseTruncated` | bool | `true` if HTML was truncated due to 10MB size limit (optional) |
 | `cookieError` | string | Error message if cookies could not be retrieved (optional) |
 | `rateLimited` | bool | `true` if rate limiting detected (optional) |

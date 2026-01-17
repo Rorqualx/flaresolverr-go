@@ -46,6 +46,11 @@ type Result struct {
 	URL            string
 	Screenshot     string // Base64 encoded PNG screenshot
 	TurnstileToken string // cf-turnstile-response token if present
+
+	// Extended extraction for debugging/advanced use
+	LocalStorage    map[string]string // All localStorage key-value pairs
+	SessionStorage  map[string]string // All sessionStorage key-value pairs
+	ResponseHeaders map[string]string // Headers from the final navigation response
 }
 
 // SolveOptions contains options for a solve request.
@@ -815,6 +820,13 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		log.Debug().Str("token_prefix", turnstileToken[:min(20, len(turnstileToken))]).Msg("Extracted Turnstile token")
 	}
 
+	// Extract localStorage and sessionStorage for debugging
+	localStorage := s.extractLocalStorage(page)
+	sessionStorage := s.extractSessionStorage(page)
+
+	// Extract response headers/metadata
+	responseHeaders := s.extractResponseHeaders(page)
+
 	// Capture screenshot if requested
 	var screenshotBase64 string
 	if captureScreenshot {
@@ -834,19 +846,24 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		Bool("html_truncated", htmlTruncated).
 		Bool("has_turnstile_token", turnstileToken != "").
 		Bool("has_screenshot", screenshotBase64 != "").
+		Int("localStorage_count", len(localStorage)).
+		Int("sessionStorage_count", len(sessionStorage)).
 		Msg("Solve completed successfully")
 
 	return &Result{
-		Success:        true,
-		StatusCode:     200, // Assume success if we got here
-		HTML:           html,
-		HTMLTruncated:  htmlTruncated, // Fix #15: Include truncation flag
-		Cookies:        cookies,
-		CookieError:    cookieError, // Include cookie retrieval error if any
-		UserAgent:      s.userAgent,
-		URL:            currentURL,
-		TurnstileToken: turnstileToken,
-		Screenshot:     screenshotBase64,
+		Success:         true,
+		StatusCode:      200, // Assume success if we got here
+		HTML:            html,
+		HTMLTruncated:   htmlTruncated, // Fix #15: Include truncation flag
+		Cookies:         cookies,
+		CookieError:     cookieError, // Include cookie retrieval error if any
+		UserAgent:       s.userAgent,
+		URL:             currentURL,
+		TurnstileToken:  turnstileToken,
+		Screenshot:      screenshotBase64,
+		LocalStorage:    localStorage,
+		SessionStorage:  sessionStorage,
+		ResponseHeaders: responseHeaders,
 	}, nil
 }
 
@@ -890,6 +907,151 @@ func (s *Solver) extractTurnstileToken(page *rod.Page) string {
 	}
 
 	return ""
+}
+
+// extractLocalStorage extracts all localStorage key-value pairs from the page.
+func (s *Solver) extractLocalStorage(page *rod.Page) map[string]string {
+	result, err := proto.RuntimeEvaluate{
+		Expression: `(function() {
+			var data = {};
+			try {
+				for (var i = 0; i < localStorage.length; i++) {
+					var key = localStorage.key(i);
+					data[key] = localStorage.getItem(key);
+				}
+			} catch(e) {
+				// localStorage might not be available
+			}
+			return JSON.stringify(data);
+		})()`,
+		ReturnByValue: true,
+	}.Call(page)
+
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to extract localStorage")
+		return nil
+	}
+
+	if result.Result.Type == proto.RuntimeRemoteObjectTypeString {
+		jsonStr := result.Result.Value.Str()
+		var data map[string]string
+		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			log.Debug().Err(err).Msg("Failed to parse localStorage JSON")
+			return nil
+		}
+		if len(data) > 0 {
+			log.Debug().Int("count", len(data)).Msg("Extracted localStorage items")
+		}
+		return data
+	}
+
+	return nil
+}
+
+// extractSessionStorage extracts all sessionStorage key-value pairs from the page.
+func (s *Solver) extractSessionStorage(page *rod.Page) map[string]string {
+	result, err := proto.RuntimeEvaluate{
+		Expression: `(function() {
+			var data = {};
+			try {
+				for (var i = 0; i < sessionStorage.length; i++) {
+					var key = sessionStorage.key(i);
+					data[key] = sessionStorage.getItem(key);
+				}
+			} catch(e) {
+				// sessionStorage might not be available
+			}
+			return JSON.stringify(data);
+		})()`,
+		ReturnByValue: true,
+	}.Call(page)
+
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to extract sessionStorage")
+		return nil
+	}
+
+	if result.Result.Type == proto.RuntimeRemoteObjectTypeString {
+		jsonStr := result.Result.Value.Str()
+		var data map[string]string
+		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			log.Debug().Err(err).Msg("Failed to parse sessionStorage JSON")
+			return nil
+		}
+		if len(data) > 0 {
+			log.Debug().Int("count", len(data)).Msg("Extracted sessionStorage items")
+		}
+		return data
+	}
+
+	return nil
+}
+
+// extractResponseHeaders gets the response headers from the page's main document.
+// Note: This uses the Performance API to get resource timing info, but headers
+// are not directly accessible. For full headers, we'd need to intercept network requests.
+func (s *Solver) extractResponseHeaders(page *rod.Page) map[string]string {
+	// Try to get headers from the document's response
+	// This is limited - full header access requires network interception
+	result, err := proto.RuntimeEvaluate{
+		Expression: `(function() {
+			var headers = {};
+			try {
+				// Check for any Cloudflare-specific meta tags or data
+				var cfRay = document.querySelector('meta[name="cf-ray"]');
+				if (cfRay) headers['cf-ray'] = cfRay.content;
+
+				// Check for any server timing info
+				var entries = performance.getEntriesByType('navigation');
+				if (entries.length > 0) {
+					var nav = entries[0];
+					if (nav.serverTiming) {
+						nav.serverTiming.forEach(function(t) {
+							headers['server-timing-' + t.name] = t.description || String(t.duration);
+						});
+					}
+				}
+
+				// Check for Cloudflare challenge tokens in the page
+				var cfChallenge = document.querySelector('[data-cf-challenge]');
+				if (cfChallenge) headers['cf-challenge-present'] = 'true';
+
+				// Check for any cf_ prefixed inputs (challenge forms)
+				var cfInputs = document.querySelectorAll('input[name^="cf"]');
+				if (cfInputs.length > 0) {
+					headers['cf-inputs-count'] = String(cfInputs.length);
+				}
+
+				// Check document.cookie for cf_ cookies (visible ones)
+				var cookieStr = document.cookie;
+				if (cookieStr.indexOf('cf_') !== -1) {
+					headers['cf-cookie-present'] = 'true';
+				}
+
+			} catch(e) {
+				headers['extraction-error'] = e.message;
+			}
+			return JSON.stringify(headers);
+		})()`,
+		ReturnByValue: true,
+	}.Call(page)
+
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to extract response headers")
+		return nil
+	}
+
+	if result.Result.Type == proto.RuntimeRemoteObjectTypeString {
+		jsonStr := result.Result.Value.Str()
+		var data map[string]string
+		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			log.Debug().Err(err).Msg("Failed to parse response headers JSON")
+			return nil
+		}
+		return data
+	}
+
+	return nil
 }
 
 // captureScreenshot captures a PNG screenshot of the page.

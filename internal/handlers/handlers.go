@@ -606,13 +606,16 @@ func (h *Handler) writeSuccess(w http.ResponseWriter, result *solver.Result, coo
 	}
 
 	solution := &types.Solution{
-		URL:            result.URL,
-		Status:         result.StatusCode,
-		Response:       response,
-		Cookies:        cookies,
-		UserAgent:      result.UserAgent,
-		Screenshot:     result.Screenshot,
-		TurnstileToken: result.TurnstileToken,
+		URL:             result.URL,
+		Status:          result.StatusCode,
+		Response:        response,
+		Cookies:         cookies,
+		UserAgent:       result.UserAgent,
+		Screenshot:      result.Screenshot,
+		TurnstileToken:  result.TurnstileToken,
+		LocalStorage:    result.LocalStorage,
+		SessionStorage:  result.SessionStorage,
+		ResponseHeaders: result.ResponseHeaders,
 	}
 
 	// Add response metadata if applicable

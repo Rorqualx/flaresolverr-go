@@ -57,6 +57,11 @@ type Solution struct {
 	Screenshot     string            `json:"screenshot,omitempty"`      // Base64 encoded PNG screenshot
 	TurnstileToken string            `json:"turnstile_token,omitempty"` // cf-turnstile-response token if present
 
+	// Extended extraction for debugging (omitted when empty)
+	LocalStorage    map[string]string `json:"localStorage,omitempty"`    // All localStorage key-value pairs
+	SessionStorage  map[string]string `json:"sessionStorage,omitempty"`  // All sessionStorage key-value pairs
+	ResponseHeaders map[string]string `json:"responseHeaders,omitempty"` // Extracted response metadata
+
 	// Response metadata (omitted when not applicable)
 	ResponseTruncated *bool   `json:"responseTruncated,omitempty"` // true if HTML response was truncated due to size limit
 	CookieError       *string `json:"cookieError,omitempty"`       // error message if cookies could not be retrieved

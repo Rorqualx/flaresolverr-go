@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **API key authentication** - Optional API key authentication via `API_KEY_ENABLED` and `API_KEY` environment variables. Supports `X-API-Key` header or `api_key` query parameter.
 - **LRU eviction for domain stats** - Domain statistics are now limited to 10,000 entries with LRU eviction to prevent unbounded memory growth.
 - **Cookie error tracking** - Result now includes `cookieError` field when cookies cannot be retrieved.
+- **Extended browser state extraction** - API response now includes `localStorage`, `sessionStorage`, and `responseHeaders` fields for debugging sites that use browser storage instead of cookies for authentication state.
 
 ### Changed
 - Response `solution` object now has optional rate limit fields (backward compatible - only present when rate limiting detected).
