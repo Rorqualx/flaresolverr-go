@@ -230,18 +230,36 @@ const stealthScript = `
         if (typeof Proxy !== 'undefined' && typeof Reflect !== 'undefined') {
             const getParameterProxyHandler = {
                 apply: function(target, thisArg, args) {
-                    const param = args[0];
+                    try {
+                        // Safety check: ensure target and args are valid
+                        if (typeof target !== 'function' || !args || args.length === 0) {
+                            return null;
+                        }
+                        const param = args[0];
 
-                    // UNMASKED_VENDOR_WEBGL
-                    if (param === 37445) {
-                        return 'Intel Inc.';
-                    }
-                    // UNMASKED_RENDERER_WEBGL
-                    if (param === 37446) {
-                        return 'Intel Iris OpenGL Engine';
-                    }
+                        // UNMASKED_VENDOR_WEBGL
+                        if (param === 37445) {
+                            return 'Intel Inc.';
+                        }
+                        // UNMASKED_RENDERER_WEBGL
+                        if (param === 37446) {
+                            return 'Intel Iris OpenGL Engine';
+                        }
 
-                    return Reflect.apply(target, thisArg, args);
+                        // Safety check: ensure Reflect.apply is available
+                        if (typeof Reflect !== 'undefined' && typeof Reflect.apply === 'function') {
+                            return Reflect.apply(target, thisArg, args);
+                        }
+                        // Fallback to direct call
+                        return target.apply(thisArg, args);
+                    } catch (e) {
+                        // If anything fails, try direct call or return null
+                        try {
+                            return target.apply(thisArg, args);
+                        } catch (e2) {
+                            return null;
+                        }
+                    }
                 }
             };
 
@@ -249,8 +267,14 @@ const stealthScript = `
             ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(ctx => {
                 try {
                     if (window[ctx] && window[ctx].prototype && typeof window[ctx].prototype.getParameter === 'function') {
+                        // Check if already proxied to avoid double-wrapping
+                        if (window[ctx].prototype.getParameter.__isStealthProxy) {
+                            return;
+                        }
                         const getParameter = window[ctx].prototype.getParameter;
-                        window[ctx].prototype.getParameter = new Proxy(getParameter, getParameterProxyHandler);
+                        const proxiedFn = new Proxy(getParameter, getParameterProxyHandler);
+                        proxiedFn.__isStealthProxy = true;
+                        window[ctx].prototype.getParameter = proxiedFn;
                     }
                 } catch (e) {
                     // Skip this context if it fails
