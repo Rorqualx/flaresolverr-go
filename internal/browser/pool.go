@@ -192,8 +192,12 @@ func (p *Pool) createLauncher() *launcher.Launcher {
 
 	// 5. WebGL with SwiftShader - provides realistic GPU fingerprint
 	// Without this, WebGL returns empty/null values which is a detection signal
-	l = l.Set("use-gl", "swiftshader")
-	l = l.Set("use-angle", "swiftshader")
+	// SwiftShader provides software-rendered WebGL that works on all platforms including ARM
+	l = l.Set("use-gl", "swiftshader").
+		Set("use-angle", "swiftshader").
+		Set("enable-unsafe-swiftshader"). // Allow SwiftShader for WebGL
+		Set("enable-webgl").              // Explicitly enable WebGL
+		Set("enable-webgl2")              // Enable WebGL 2.0 as well
 
 	// 6. Ignore certificate errors (like original FlareSolverr)
 	// Required for some proxies and helps avoid SSL-related detection
@@ -237,9 +241,13 @@ func (p *Pool) createLauncher() *launcher.Launcher {
 	// GPU sandbox - required for container environments
 	l = l.Set("disable-gpu-sandbox")
 
-	// ARM-specific: disable GPU entirely on ARM
+	// ARM-specific: Use software rendering flags
+	// IMPORTANT: Do NOT use --disable-gpu on ARM as it breaks WebGL/SwiftShader
+	// SwiftShader provides software WebGL rendering which is critical for anti-detection
 	if isARM() {
-		l = l.Set("disable-gpu")
+		// Use software compositing for ARM
+		l = l.Set("disable-gpu-compositing")
+		log.Debug().Msg("ARM detected: using software rendering with SwiftShader for WebGL")
 	}
 
 	return l

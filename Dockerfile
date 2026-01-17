@@ -29,7 +29,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
 FROM alpine:3.19
 
 # Install Chromium, xvfb, and required dependencies
-# mesa-gl and mesa-dri-gallium provide OpenGL/WebGL software rendering
+# mesa-* packages provide OpenGL/WebGL software rendering via SwiftShader/llvmpipe
 RUN apk add --no-cache \
     chromium \
     chromium-chromedriver \
@@ -44,8 +44,10 @@ RUN apk add --no-cache \
     xvfb \
     xvfb-run \
     mesa-gl \
+    mesa-gles \
     mesa-dri-gallium \
     mesa-egl \
+    mesa-gbm \
     libxcomposite \
     libxdamage \
     libxrandr \
@@ -56,7 +58,9 @@ RUN apk add --no-cache \
     at-spi2-core \
     cups-libs \
     libdrm \
-    libxkbcommon
+    libxkbcommon \
+    # Optional packages that may not exist on all architectures
+    && apk add --no-cache chromium-swiftshader mesa-vulkan-swrast libva libva-glx 2>/dev/null || true
 
 # Create non-root user
 RUN addgroup -g 1000 flaresolverr && \
@@ -105,6 +109,12 @@ ENV RATE_LIMIT_ENABLED=true \
 
 # Display settings for xvfb
 ENV DISPLAY=:99
+
+# WebGL/SwiftShader settings
+# Force software rendering via SwiftShader for consistent WebGL support
+ENV LIBGL_ALWAYS_SOFTWARE=1 \
+    GALLIUM_DRIVER=llvmpipe \
+    LP_NUM_THREADS=4
 
 # Create directories and set permissions
 RUN mkdir -p /home/flaresolverr/.cache /tmp/.X11-unix && \
