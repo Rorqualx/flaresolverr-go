@@ -75,6 +75,14 @@ type Handler struct {
 	userAgent string
 }
 
+// Fix #11: closeBody closes an io.ReadCloser and logs any error at debug level.
+// This helper prevents silent errors when closing request bodies.
+func closeBody(body io.ReadCloser) {
+	if err := body.Close(); err != nil {
+		log.Debug().Err(err).Msg("Error closing request body")
+	}
+}
+
 // New creates a new Handler.
 func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Handler {
 	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -90,16 +98,16 @@ func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Han
 
 // ServeHTTP handles incoming requests (implements http.Handler).
 // This delegates to the Router for path-based routing.
+// Note: CORS headers are handled by middleware.CORS(), not here.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	// Set CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	// Set response content type (CORS is handled by middleware)
 	w.Header().Set("Content-Type", "application/json")
 
-	// Handle preflight
+	// Handle preflight - delegate to middleware
+	// Note: CORS middleware handles OPTIONS, but we still need to return
+	// early here if an OPTIONS request reaches the handler
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -120,7 +128,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Limit request body size to prevent memory exhaustion (1MB max)
 	const maxBodySize = 1 << 20 // 1MB
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
-	defer r.Body.Close() // Bug 10: Explicitly close request body
+	defer closeBody(r.Body) // Fix #11: Use helper to log close errors
 
 	// Parse request using pooled buffer to reduce GC pressure
 	buf := getBuffer()
@@ -136,6 +144,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(buf.Bytes(), &req); err != nil {
 		log.Warn().Err(err).Msg("Failed to decode request")
 		h.writeError(w, "Invalid JSON request", startTime)
+		return
+	}
+
+	// Validate cmd field length to prevent memory abuse
+	const maxCmdLength = 64
+	if len(req.Cmd) > maxCmdLength {
+		log.Warn().Int("len", len(req.Cmd)).Msg("Command too long")
+		h.writeError(w, "Invalid command", startTime)
 		return
 	}
 
@@ -161,7 +177,7 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	// Limit request body size to prevent memory exhaustion (1MB max)
 	const maxBodySize = 1 << 20 // 1MB
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
-	defer r.Body.Close() // Bug 10: Explicitly close request body
+	defer closeBody(r.Body) // Fix #11: Use helper to log close errors
 
 	// Parse request using pooled buffer to reduce GC pressure
 	buf := getBuffer()
@@ -177,6 +193,14 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(buf.Bytes(), &req); err != nil {
 		log.Warn().Err(err).Msg("Failed to decode request")
 		h.writeError(w, "Invalid JSON request", startTime)
+		return
+	}
+
+	// Validate cmd field length to prevent memory abuse
+	const maxCmdLength = 64
+	if len(req.Cmd) > maxCmdLength {
+		log.Warn().Int("len", len(req.Cmd)).Msg("Command too long")
+		h.writeError(w, "Invalid command", startTime)
 		return
 	}
 
@@ -218,11 +242,98 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 
-	// Validate URL for SSRF protection
-	if err := security.ValidateURL(req.URL); err != nil {
+	// Validate URL for SSRF protection with DNS resolution for audit trail
+	// Fix #8: Note on DNS pinning limitation:
+	// The resolvedIP is logged for audit purposes to help detect DNS rebinding attacks,
+	// but it is NOT used to enforce DNS pinning. True DNS rebinding protection would require
+	// a custom DNS resolver that pins the IP for the entire request lifecycle, which is
+	// not implemented here. The browser may re-resolve DNS and get a different IP.
+	// The response URL is re-validated after navigation as a secondary defense.
+	validatedURL, resolvedIP, err := security.ValidateAndResolveURL(req.URL)
+	if err != nil {
 		log.Warn().Err(err).Str("url", sanitizeURLForLogging(req.URL)).Msg("URL validation failed")
 		h.writeError(w, "Invalid URL: "+err.Error(), startTime)
 		return
+	}
+	// Log resolved IP for audit trail (helps detect DNS rebinding attempts)
+	if resolvedIP != nil {
+		log.Debug().
+			Str("url", sanitizeURLForLogging(validatedURL)).
+			Str("resolved_ip", resolvedIP.String()).
+			Msg("URL validated with DNS resolution")
+	}
+
+	// Validate proxy URL if provided
+	var proxyURL string
+	if req.Proxy != nil && req.Proxy.URL != "" {
+		proxyURL = req.Proxy.URL
+	} else if h.config.HasDefaultProxy() {
+		proxyURL = h.config.ProxyURL
+	}
+	if proxyURL != "" {
+		if err := security.ValidateProxyURL(proxyURL, h.config.AllowLocalProxies); err != nil {
+			log.Warn().Err(err).Msg("Proxy URL validation failed")
+			h.writeError(w, "Invalid proxy URL: "+err.Error(), startTime)
+			return
+		}
+	}
+
+	// Validate proxy credentials size
+	const (
+		maxProxyUsernameLength = 256
+		maxProxyPasswordLength = 256
+	)
+	if req.Proxy != nil {
+		if len(req.Proxy.Username) > maxProxyUsernameLength {
+			log.Warn().Int("len", len(req.Proxy.Username)).Msg("Proxy username too long")
+			h.writeError(w, "Proxy username exceeds maximum length of 256 characters", startTime)
+			return
+		}
+		if len(req.Proxy.Password) > maxProxyPasswordLength {
+			log.Warn().Msg("Proxy password too long") // Don't log password length
+			h.writeError(w, "Proxy password exceeds maximum length of 256 characters", startTime)
+			return
+		}
+	}
+
+	// Validate cookies to prevent resource exhaustion
+	const (
+		maxCookieCount        = 100
+		maxCookieNameLength   = 256
+		maxCookieValueLength  = 4096
+		maxCookieDomainLength = 256
+		maxCookiePathLength   = 2048
+	)
+	if len(req.Cookies) > maxCookieCount {
+		log.Warn().Int("count", len(req.Cookies)).Msg("Too many cookies in request")
+		h.writeError(w, "Too many cookies (maximum 100)", startTime)
+		return
+	}
+	for _, cookie := range req.Cookies {
+		if len(cookie.Name) > maxCookieNameLength {
+			truncName := cookie.Name
+			if len(truncName) > 50 {
+				truncName = truncName[:50]
+			}
+			log.Warn().Str("name", truncName).Msg("Cookie name too long")
+			h.writeError(w, "Cookie name exceeds maximum length of 256 characters", startTime)
+			return
+		}
+		if len(cookie.Value) > maxCookieValueLength {
+			log.Warn().Str("name", cookie.Name).Msg("Cookie value too long")
+			h.writeError(w, "Cookie value exceeds maximum length of 4096 characters", startTime)
+			return
+		}
+		if len(cookie.Domain) > maxCookieDomainLength {
+			log.Warn().Str("name", cookie.Name).Int("len", len(cookie.Domain)).Msg("Cookie domain too long")
+			h.writeError(w, "Cookie domain exceeds maximum length of 256 characters", startTime)
+			return
+		}
+		if len(cookie.Path) > maxCookiePathLength {
+			log.Warn().Str("name", cookie.Name).Int("len", len(cookie.Path)).Msg("Cookie path too long")
+			h.writeError(w, "Cookie path exceeds maximum length of 2048 characters", startTime)
+			return
+		}
 	}
 
 	// Validate POST requirements
@@ -231,7 +342,22 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 
-	// Determine timeout
+	// Validate postData size to prevent memory exhaustion
+	const maxPostDataSize = 256 * 1024 // 256KB
+	if len(req.PostData) > maxPostDataSize {
+		log.Warn().
+			Int("size", len(req.PostData)).
+			Int("max_size", maxPostDataSize).
+			Msg("postData exceeds maximum size")
+		h.writeError(w, "postData exceeds maximum size of 256KB", startTime)
+		return
+	}
+
+	// Validate and determine timeout
+	if req.MaxTimeout < 0 {
+		h.writeError(w, "maxTimeout cannot be negative", startTime)
+		return
+	}
 	timeout := h.config.DefaultTimeout
 	if req.MaxTimeout > 0 {
 		timeout = time.Duration(req.MaxTimeout) * time.Millisecond
@@ -268,24 +394,30 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 	}
 
 	var result *solver.Result
-	var err error
+	var solveErr error
 
 	// Use session if provided
 	if req.Session != "" {
 		sess, sessErr := h.sessions.Get(req.Session)
 		if sessErr != nil {
 			log.Warn().Err(sessErr).Str("session", req.Session).Msg("Session lookup failed")
-			h.writeError(w, "Session not found: "+req.Session, startTime)
+			h.writeError(w, "Session not found or expired", startTime)
 			return
 		}
-		result, err = h.solver.SolveWithPage(ctx, sess.Page, opts)
+		// Fix #6: Check if session page is nil (may have been closed or corrupted)
+		if sess.Page == nil {
+			log.Error().Str("session", req.Session).Msg("Session page is nil")
+			h.writeError(w, "Session page is no longer available", startTime)
+			return
+		}
+		result, solveErr = h.solver.SolveWithPage(ctx, sess.Page, opts)
 	} else {
-		result, err = h.solver.Solve(ctx, opts)
+		result, solveErr = h.solver.Solve(ctx, opts)
 	}
 
-	if err != nil {
-		log.Error().Err(err).Str("url", sanitizeURLForLogging(req.URL)).Msg("Solve failed")
-		h.writeError(w, err.Error(), startTime)
+	if solveErr != nil {
+		log.Error().Err(solveErr).Str("url", sanitizeURLForLogging(req.URL)).Msg("Solve failed")
+		h.writeError(w, solveErr.Error(), startTime)
 		return
 	}
 
@@ -294,6 +426,13 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 
 // handleSessionCreate creates a new session.
 func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context, req *types.Request, startTime time.Time) {
+	// Warn if unsupported field is provided
+	if req.SessionTTL != 0 {
+		log.Warn().
+			Int("session_ttl", req.SessionTTL).
+			Msg("session_ttl_minutes field is not currently supported, using server default")
+	}
+
 	sessionID := req.Session
 
 	// Validate session ID
@@ -355,7 +494,7 @@ func (h *Handler) handleSessionDestroy(w http.ResponseWriter, req *types.Request
 	}
 
 	if err := h.sessions.Destroy(req.Session); err != nil {
-		h.writeError(w, "Failed to destroy session: "+err.Error(), startTime)
+		h.writeError(w, "Session not found or already destroyed", startTime)
 		return
 	}
 

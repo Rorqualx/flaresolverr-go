@@ -8,6 +8,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Fix #2: Maximum buffer capacity to keep in pool.
+// Buffers larger than this are discarded to prevent memory bloat.
+// bytes.Buffer.Reset() only resets length, not capacity, so large buffers
+// would otherwise waste memory indefinitely.
+const maxPoolBufferCap = 64 * 1024 // 64KB
+
 // jsonBufferPool provides reusable byte buffers for JSON decoding.
 // This reduces GC pressure by avoiding frequent allocation of buffers.
 var jsonBufferPool = sync.Pool{
@@ -31,7 +37,12 @@ func getBuffer() *bytes.Buffer {
 }
 
 // putBuffer returns a buffer to the pool after resetting it.
+// Fix #2: Discard oversized buffers to prevent memory bloat.
 func putBuffer(buf *bytes.Buffer) {
+	if buf.Cap() > maxPoolBufferCap {
+		// Discard oversized buffer - let GC collect it
+		return
+	}
 	buf.Reset()
 	jsonBufferPool.Put(buf)
 }
@@ -58,7 +69,12 @@ func getResponseBuffer() *bytes.Buffer {
 }
 
 // putResponseBuffer returns a response buffer to the pool after resetting it.
+// Fix #2: Discard oversized buffers to prevent memory bloat.
 func putResponseBuffer(buf *bytes.Buffer) {
+	if buf.Cap() > maxPoolBufferCap {
+		// Discard oversized buffer - let GC collect it
+		return
+	}
 	buf.Reset()
 	responseBufferPool.Put(buf)
 }

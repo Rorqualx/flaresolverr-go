@@ -317,6 +317,81 @@ func ValidateAndResolveURL(rawURL string) (string, net.IP, error) {
 	return rawURL, normalizeIPv4Mapped(ips[0]), nil
 }
 
+// Proxy URL validation errors.
+var (
+	ErrInvalidProxyURL    = errors.New("invalid proxy URL")
+	ErrBlockedProxyScheme = errors.New("proxy URL scheme not allowed (must be http, https, socks4, or socks5)")
+)
+
+// AllowedProxySchemes defines the permitted schemes for proxy URLs.
+var AllowedProxySchemes = map[string]bool{
+	"http":   true,
+	"https":  true,
+	"socks4": true,
+	"socks5": true,
+}
+
+// ValidateProxyURL validates a proxy URL for safe use.
+// Unlike ValidateURL, this allows socks4/socks5 schemes and optionally
+// allows private IPs (since local proxies are a common use case).
+//
+// Parameters:
+//   - proxyURL: The proxy URL to validate
+//   - allowPrivateIPs: If true, allows private/localhost IPs (for local proxies)
+//
+// Returns an error if the proxy URL is invalid or uses a blocked scheme.
+func ValidateProxyURL(proxyURL string, allowPrivateIPs bool) error {
+	if proxyURL == "" {
+		return nil // Empty proxy is valid (means no proxy)
+	}
+
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return ErrInvalidProxyURL
+	}
+
+	// Validate scheme
+	scheme := strings.ToLower(parsed.Scheme)
+	if !AllowedProxySchemes[scheme] {
+		return ErrBlockedProxyScheme
+	}
+
+	// Validate host is present
+	if parsed.Host == "" {
+		return ErrInvalidProxyURL
+	}
+
+	// If we allow private IPs, we're done
+	if allowPrivateIPs {
+		return nil
+	}
+
+	// Otherwise, check for private/localhost IPs
+	hostname := strings.ToLower(parsed.Hostname())
+
+	// Check for blocked hostnames
+	if BlockedHosts[hostname] {
+		return ErrLocalhostBlocked
+	}
+
+	// Check for localhost hostname variations
+	if isLocalhostHostname(hostname) {
+		return ErrLocalhostBlocked
+	}
+
+	// Try to parse as IP address
+	ip := parseIPWithNormalization(hostname)
+	if ip != nil {
+		ip = normalizeIPv4Mapped(ip)
+		if err := validateIP(ip); err != nil {
+			return err
+		}
+	}
+	// For hostnames, we don't resolve since the browser will do that through the proxy
+
+	return nil
+}
+
 // SanitizeCookieDomain validates and sanitizes a cookie domain.
 // Returns the target host if the domain is invalid or potentially malicious.
 func SanitizeCookieDomain(domain string, targetHost string) string {

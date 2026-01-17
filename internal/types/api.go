@@ -6,7 +6,7 @@ type Request struct {
 	Cmd               string          `json:"cmd"`
 	URL               string          `json:"url,omitempty"`
 	Session           string          `json:"session,omitempty"`
-	SessionTTL        int             `json:"session_ttl_minutes,omitempty"`
+	SessionTTL        int             `json:"session_ttl_minutes,omitempty"` // Reserved for future use - currently ignored
 	MaxTimeout        int             `json:"maxTimeout,omitempty"`
 	Cookies           []RequestCookie `json:"cookies,omitempty"`
 	ReturnOnlyCookies bool            `json:"returnOnlyCookies,omitempty"`
