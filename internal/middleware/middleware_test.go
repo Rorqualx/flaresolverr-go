@@ -94,7 +94,8 @@ func TestCORSMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := CORS(innerHandler)
+	// Use empty config for wildcard CORS (backward compatible)
+	handler := CORS(CORSConfig{})(innerHandler)
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	w := httptest.NewRecorder()
@@ -121,7 +122,8 @@ func TestCORSMiddlewareOptionsPreflight(t *testing.T) {
 		called = true
 	})
 
-	handler := CORS(innerHandler)
+	// Use empty config for wildcard CORS (backward compatible)
+	handler := CORS(CORSConfig{})(innerHandler)
 
 	req := httptest.NewRequest("OPTIONS", "/test", nil)
 	w := httptest.NewRecorder()

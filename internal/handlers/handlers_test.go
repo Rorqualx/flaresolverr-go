@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/middleware"
 	"github.com/Rorqualx/flaresolverr-go/internal/session"
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
@@ -115,16 +116,20 @@ func TestOptionsMethod(t *testing.T) {
 	h := mockHandler()
 	defer h.sessions.Close()
 
+	// CORS is handled by middleware, so wrap handler with CORS middleware
+	// Empty config means allow all origins (backward compatible)
+	corsHandler := middleware.CORS(middleware.CORSConfig{})(h)
+
 	req := httptest.NewRequest("OPTIONS", "/v1", nil)
 	w := httptest.NewRecorder()
 
-	h.ServeHTTP(w, req)
+	corsHandler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200 for OPTIONS, got %d", w.Code)
 	}
 
-	// Check CORS headers
+	// Check CORS headers (set by middleware)
 	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
 		t.Error("Missing CORS Allow-Origin header")
 	}

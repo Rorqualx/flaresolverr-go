@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof" // Import for side effects - registers pprof handlers
@@ -24,6 +25,15 @@ import (
 )
 
 func main() {
+	// Handle --version flag early, before any initialization
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("FlareSolverr %s\n", version.Full())
+		return
+	}
+
 	// Load configuration
 	cfg := config.Load()
 
@@ -56,9 +66,14 @@ func main() {
 	// 1. Recovery (outermost - catches panics from everything)
 	// 2. Logging (logs all requests)
 	// 3. Rate limiting (if enabled)
-	// 4. CORS (handles preflight)
+	// 4. Security headers
+	// 5. CORS (handles preflight)
 
-	finalHandler = middleware.CORS(finalHandler)
+	finalHandler = middleware.CORS(middleware.CORSConfig{
+		AllowedOrigins: cfg.CORSAllowedOrigins,
+	})(finalHandler)
+
+	finalHandler = middleware.SecurityHeaders(finalHandler)
 
 	if cfg.RateLimitEnabled {
 		log.Info().

@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -53,10 +54,12 @@ type Config struct {
 	PProfBindAddr string // Bind address for pprof server (default: localhost only)
 
 	// Security
-	RateLimitEnabled bool
-	RateLimitRPM     int  // Requests per minute per IP
-	TrustProxy       bool // Trust X-Forwarded-For headers (only enable behind a reverse proxy)
-	IgnoreCertErrors bool // Ignore TLS certificate errors (required for some proxies)
+	RateLimitEnabled     bool
+	RateLimitRPM         int      // Requests per minute per IP
+	TrustProxy           bool     // Trust X-Forwarded-For headers (only enable behind a reverse proxy)
+	IgnoreCertErrors     bool     // Ignore TLS certificate errors (required for some proxies)
+	CORSAllowedOrigins   []string // Allowed CORS origins (empty = allow all with warning)
+	AllowLocalProxies    bool     // Allow localhost/private IP proxies (default: true for backward compatibility)
 }
 
 // Load loads configuration from environment variables.
@@ -104,10 +107,12 @@ func Load() *Config {
 		PProfBindAddr: getEnvString("PPROF_BIND_ADDR", "127.0.0.1"), // Localhost only by default
 
 		// Security
-		RateLimitEnabled: getEnvBool("RATE_LIMIT_ENABLED", true),
-		RateLimitRPM:     getEnvInt("RATE_LIMIT_RPM", 60), // 60 requests per minute per IP
-		TrustProxy:       getEnvBool("TRUST_PROXY", false),
-		IgnoreCertErrors: getEnvBool("IGNORE_CERT_ERRORS", false),
+		RateLimitEnabled:   getEnvBool("RATE_LIMIT_ENABLED", true),
+		RateLimitRPM:       getEnvInt("RATE_LIMIT_RPM", 60), // 60 requests per minute per IP
+		TrustProxy:         getEnvBool("TRUST_PROXY", false),
+		IgnoreCertErrors:   getEnvBool("IGNORE_CERT_ERRORS", false),
+		CORSAllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", nil),
+		AllowLocalProxies:  getEnvBool("ALLOW_LOCAL_PROXIES", true), // Default true for backward compatibility
 	}
 }
 
@@ -177,6 +182,33 @@ func (c *Config) Validate() {
 			Str("addr", c.PProfBindAddr).
 			Msg("WARNING: pprof exposed on non-localhost address - this is a security risk")
 	}
+
+	// CORS security warning
+	if len(c.CORSAllowedOrigins) == 0 {
+		log.Warn().Msg("CORS_ALLOWED_ORIGINS not set - allowing all origins (potential CSRF risk)")
+	}
+
+	// Certificate validation warning
+	if c.IgnoreCertErrors {
+		if c.ProxyURL == "" {
+			log.Warn().Msg("WARNING: IGNORE_CERT_ERRORS enabled without a proxy - this exposes you to MITM attacks")
+		} else {
+			log.Info().Msg("IGNORE_CERT_ERRORS enabled for proxy compatibility")
+		}
+	}
+
+	// Fix #17: Proxy credential validation
+	// Warn if username is set without password or vice versa
+	if c.ProxyUsername != "" && c.ProxyPassword == "" {
+		log.Warn().Msg("PROXY_USERNAME set but PROXY_PASSWORD is empty - authentication may fail")
+	}
+	if c.ProxyPassword != "" && c.ProxyUsername == "" {
+		log.Warn().Msg("PROXY_PASSWORD set but PROXY_USERNAME is empty - authentication may fail")
+	}
+	// Warn if credentials are set but no proxy URL is configured
+	if (c.ProxyUsername != "" || c.ProxyPassword != "") && c.ProxyURL == "" {
+		log.Warn().Msg("Proxy credentials set but PROXY_URL is empty - credentials will not be used")
+	}
 }
 
 // Helper functions for environment variable parsing
@@ -235,6 +267,24 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 			Err(err).
 			Dur("default", defaultValue).
 			Msg("Invalid duration in environment variable, using default")
+	}
+	return defaultValue
+}
+
+func getEnvStringSlice(key string, defaultValue []string) []string {
+	if value := os.Getenv(key); value != "" {
+		// Parse comma-separated values, trimming whitespace
+		parts := strings.Split(value, ",")
+		result := make([]string, 0, len(parts))
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
 	}
 	return defaultValue
 }
