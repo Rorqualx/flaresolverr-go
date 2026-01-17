@@ -223,15 +223,49 @@ func (h *Handler) HandleNotFound(w http.ResponseWriter, _ *http.Request) {
 	h.writeErrorWithStatus(w, http.StatusNotFound, "Not found", time.Now())
 }
 
+// PoolStats holds pool statistics for the health endpoint.
+type PoolStats struct {
+	Size      int   `json:"size"`
+	Available int   `json:"available"`
+	Acquired  int64 `json:"acquired"`
+	Released  int64 `json:"released"`
+	Recycled  int64 `json:"recycled"`
+	Errors    int64 `json:"errors"`
+}
+
+// HealthResponse is the response format for the /health endpoint.
+type HealthResponse struct {
+	Status    string     `json:"status"`
+	Message   string     `json:"message,omitempty"`
+	StartTime int64      `json:"startTimestamp,omitempty"`
+	EndTime   int64      `json:"endTimestamp,omitempty"`
+	Version   string     `json:"version,omitempty"`
+	Pool      *PoolStats `json:"pool,omitempty"`
+}
+
 // handleHealth returns service health information.
 func (h *Handler) handleHealth(w http.ResponseWriter, startTime time.Time) {
-	resp := types.Response{
+	resp := HealthResponse{
 		Status:    types.StatusOK,
 		Message:   "FlareSolverr is ready",
 		StartTime: startTime.UnixMilli(),
 		EndTime:   time.Now().UnixMilli(),
 		Version:   version.Full(),
 	}
+
+	// Include pool stats if pool is available
+	if h.pool != nil {
+		stats := h.pool.Stats()
+		resp.Pool = &PoolStats{
+			Size:      h.pool.Size(),
+			Available: h.pool.Available(),
+			Acquired:  stats.Acquired,
+			Released:  stats.Released,
+			Recycled:  stats.Recycled,
+			Errors:    stats.Errors,
+		}
+	}
+
 	h.writeJSONResponse(w, http.StatusOK, resp)
 }
 

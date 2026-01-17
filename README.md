@@ -329,9 +329,64 @@ curl http://localhost:8191/health
 Returns:
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "message": "FlareSolverr is ready",
+  "version": "1.0.0",
+  "pool": {
+    "size": 3,
+    "available": 2,
+    "acquired": 150,
+    "released": 148,
+    "recycled": 5,
+    "errors": 2
+  }
 }
 ```
+
+### Pool Statistics
+
+| Field | Description |
+|-------|-------------|
+| `size` | Configured pool size (number of browser instances) |
+| `available` | Browsers currently idle and ready for requests |
+| `acquired` | Total browsers acquired from pool |
+| `released` | Total browsers returned to pool |
+| `recycled` | Browsers recycled due to memory or errors |
+| `errors` | Total browser operation errors |
+
+## Performance Tuning
+
+### Understanding Concurrency
+
+FlareSolverr uses a browser pool to handle concurrent requests efficiently:
+
+- **`BROWSER_POOL_SIZE`** controls how many requests can be processed simultaneously
+- **`RATE_LIMIT_RPM`** controls the maximum requests per minute per IP
+
+**Example behavior with defaults (`BROWSER_POOL_SIZE=3`, `RATE_LIMIT_RPM=60`):**
+
+- 3 requests can be processed in parallel
+- Additional requests queue until a browser becomes available
+- Rate limiting kicks in at 60 requests/minute per client IP
+
+### Tuning for Your Use Case
+
+| Scenario | Recommended Settings |
+|----------|---------------------|
+| Low volume, fast response | `BROWSER_POOL_SIZE=2`, `RATE_LIMIT_RPM=30` |
+| Medium volume | `BROWSER_POOL_SIZE=3`, `RATE_LIMIT_RPM=60` (defaults) |
+| High volume, more memory | `BROWSER_POOL_SIZE=5`, `RATE_LIMIT_RPM=120` |
+| Single client, max throughput | `BROWSER_POOL_SIZE=5`, `RATE_LIMIT_ENABLED=false` |
+
+### Memory Considerations
+
+Each browser instance consumes approximately:
+- **100-150MB** base memory
+- **+50-100MB** per active page (during request processing)
+
+For a pool size of 3 with 5 active pages, expect **500-700MB** total memory usage.
+
+Use `MAX_MEMORY_MB` to set a memory ceiling. When exceeded, browsers are automatically recycled.
 
 ## Attribution
 

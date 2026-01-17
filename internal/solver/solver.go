@@ -789,8 +789,14 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 
 	cookies, err := page.Cookies(nil)
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to get cookies")
-		cookies = nil
+		// Chrome 114+ returns partitionKey as string which causes unmarshal warning
+		// Cookies are still returned successfully, so only log at debug level for this case
+		if strings.Contains(err.Error(), "partitionKey") {
+			log.Debug().Msg("Cookie partitionKey field type mismatch (harmless)")
+		} else {
+			log.Warn().Err(err).Msg("Failed to get cookies")
+			cookies = nil
+		}
 	}
 
 	// Get current URL (may have been redirected)
