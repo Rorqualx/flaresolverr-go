@@ -150,7 +150,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleHealth handles the /health and /v1 endpoints.
-func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleHealth(w http.ResponseWriter, _ *http.Request) {
 	h.handleHealth(w, time.Now())
 }
 
@@ -190,12 +190,12 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleMethodNotAllowed handles requests with unsupported HTTP methods.
-func (h *Handler) HandleMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleMethodNotAllowed(w http.ResponseWriter, _ *http.Request) {
 	h.writeErrorWithStatus(w, http.StatusMethodNotAllowed, "Method not allowed", time.Now())
 }
 
 // HandleNotFound handles requests to unknown paths.
-func (h *Handler) HandleNotFound(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleNotFound(w http.ResponseWriter, _ *http.Request) {
 	h.writeErrorWithStatus(w, http.StatusNotFound, "Not found", time.Now())
 }
 

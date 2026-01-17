@@ -14,11 +14,11 @@ var defaultSelectorsFS embed.FS
 
 // Selectors contains all challenge detection patterns.
 type Selectors struct {
-	AccessDenied         []string `yaml:"access_denied"`
-	Turnstile            []string `yaml:"turnstile"`
-	JavaScript           []string `yaml:"javascript"`
-	TurnstileSelectors   []string `yaml:"turnstile_selectors"`
-	TurnstileFramePattern string  `yaml:"turnstile_frame_pattern"`
+	AccessDenied          []string `yaml:"access_denied"`
+	Turnstile             []string `yaml:"turnstile"`
+	JavaScript            []string `yaml:"javascript"`
+	TurnstileSelectors    []string `yaml:"turnstile_selectors"`
+	TurnstileFramePattern string   `yaml:"turnstile_frame_pattern"`
 }
 
 var (

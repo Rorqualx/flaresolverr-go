@@ -184,7 +184,7 @@ func TestPoolContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	// Try to acquire with context that will be cancelled
+	// Try to acquire with context that will be canceled
 	start := time.Now()
 	_, err = pool.Acquire(ctx)
 	elapsed := time.Since(start)
@@ -193,7 +193,7 @@ func TestPoolContextCancellation(t *testing.T) {
 		t.Error("Expected error, got nil")
 	}
 
-	// Should have been cancelled quickly
+	// Should have been canceled quickly
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("Expected quick cancellation, got %v", elapsed)
 	}
@@ -377,4 +377,3 @@ func BenchmarkPoolConcurrent(b *testing.B) {
 		}
 	})
 }
-

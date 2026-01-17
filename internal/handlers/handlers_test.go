@@ -198,7 +198,7 @@ func TestSessionsList(t *testing.T) {
 	}
 
 	// Sessions can be nil or empty slice when no sessions exist
-	if resp.Sessions != nil && len(resp.Sessions) != 0 {
+	if len(resp.Sessions) != 0 {
 		t.Errorf("Expected empty sessions list, got %d", len(resp.Sessions))
 	}
 }

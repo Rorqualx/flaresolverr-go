@@ -221,7 +221,7 @@ func TestTimeoutMiddlewareTimesOut(t *testing.T) {
 	slowHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
-			// Context cancelled - this is expected
+			// Context canceled - this is expected
 			return
 		case <-time.After(5 * time.Second):
 			w.WriteHeader(http.StatusOK)

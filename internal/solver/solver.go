@@ -26,6 +26,7 @@ import (
 // ChallengeType represents the type of challenge detected.
 type ChallengeType int
 
+// Challenge type values.
 const (
 	ChallengeNone ChallengeType = iota
 	ChallengeJavaScript
@@ -72,7 +73,7 @@ func New(pool *browser.Pool, userAgent string) *Solver {
 	}
 }
 
-// sleepWithContext sleeps for the specified duration or until context is cancelled.
+// sleepWithContext sleeps for the specified duration or until context is canceled.
 // Returns true if the sleep completed normally, false if interrupted by context cancellation.
 func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	select {
@@ -354,7 +355,7 @@ func (s *Solver) navigatePost(page *rod.Page, targetURL string, postData string)
 
 	// Give the page time to fully initialize, but respect context cancellation
 	if !sleepWithContext(page.GetContext(), 500*time.Millisecond) {
-		return fmt.Errorf("context cancelled during POST navigation: %w", page.GetContext().Err())
+		return fmt.Errorf("context canceled during POST navigation: %w", page.GetContext().Err())
 	}
 
 	// Build form fields JavaScript
@@ -597,7 +598,7 @@ func (s *Solver) detectChallenge(html string) ChallengeType {
 // solveTurnstile attempts to solve the Turnstile challenge.
 // Uses the same approach as Python FlareSolverr: keyboard navigation.
 // Properly releases DOM element references to prevent memory leaks.
-func (s *Solver) solveTurnstile(ctx context.Context, page *rod.Page) error {
+func (s *Solver) solveTurnstile(_ context.Context, page *rod.Page) error {
 	log.Debug().Msg("Attempting to solve Turnstile challenge")
 
 	// Method 1: Try keyboard navigation (Python FlareSolverr approach)
@@ -619,7 +620,7 @@ func (s *Solver) solveTurnstileKeyboard(page *rod.Page) error {
 
 	// Wait a moment for Turnstile to fully load, but respect context (Bug 2)
 	if !sleepWithContext(ctx, 2*time.Second) {
-		return fmt.Errorf("context cancelled during Turnstile solve")
+		return fmt.Errorf("context canceled during Turnstile solve")
 	}
 
 	keyboard := page.Keyboard
@@ -633,7 +634,7 @@ func (s *Solver) solveTurnstileKeyboard(page *rod.Page) error {
 		}
 		// Context-aware sleep (Bug 2)
 		if !sleepWithContext(ctx, 200*time.Millisecond) {
-			return fmt.Errorf("context cancelled during Turnstile solve")
+			return fmt.Errorf("context canceled during Turnstile solve")
 		}
 	}
 
@@ -647,7 +648,7 @@ func (s *Solver) solveTurnstileKeyboard(page *rod.Page) error {
 
 	// Wait a moment for the click to register, but respect context (Bug 2)
 	if !sleepWithContext(ctx, 1*time.Second) {
-		return fmt.Errorf("context cancelled during Turnstile solve")
+		return fmt.Errorf("context canceled during Turnstile solve")
 	}
 
 	// Try to find and click "Verify you are human" button
@@ -819,13 +820,13 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 
 	return &Result{
 		Success:        true,
-		StatusCode:    200, // Assume success if we got here
-		HTML:          html,
-		Cookies:       cookies,
-		UserAgent:     s.userAgent,
-		URL:           currentURL,
+		StatusCode:     200, // Assume success if we got here
+		HTML:           html,
+		Cookies:        cookies,
+		UserAgent:      s.userAgent,
+		URL:            currentURL,
 		TurnstileToken: turnstileToken,
-		Screenshot:    screenshotBase64,
+		Screenshot:     screenshotBase64,
 	}, nil
 }
 

@@ -9,8 +9,8 @@ func TestRedactURL(t *testing.T) {
 	tests := []struct {
 		name     string
 		url      string
-		contains []string    // strings that should be in output
-		excludes []string    // strings that should NOT be in output
+		contains []string // strings that should be in output
+		excludes []string // strings that should NOT be in output
 	}{
 		{
 			name:     "no sensitive data",

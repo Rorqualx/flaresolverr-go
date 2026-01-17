@@ -33,9 +33,9 @@ func TestValidateURL(t *testing.T) {
 		{"0.0.0.0", "http://0.0.0.0", ErrPrivateIPBlocked}, // Unspecified address
 
 		// SSRF bypass attempts - decimal IP encoding
-		{"decimal loopback", "http://2130706433/", ErrLocalhostBlocked},     // 127.0.0.1
-		{"decimal private", "http://3232235777/", ErrPrivateIPBlocked},      // 192.168.1.1
-		{"decimal metadata", "http://2852039166/", ErrPrivateIPBlocked},     // 169.254.169.254
+		{"decimal loopback", "http://2130706433/", ErrLocalhostBlocked}, // 127.0.0.1
+		{"decimal private", "http://3232235777/", ErrPrivateIPBlocked},  // 192.168.1.1
+		{"decimal metadata", "http://2852039166/", ErrPrivateIPBlocked}, // 169.254.169.254
 
 		// SSRF bypass attempts - alternative loopback range
 		{"alt loopback 127.0.0.2", "http://127.0.0.2/", ErrLocalhostBlocked},
@@ -43,7 +43,7 @@ func TestValidateURL(t *testing.T) {
 		{"alt loopback 127.255.255.254", "http://127.255.255.254/", ErrLocalhostBlocked},
 
 		// SSRF bypass attempts - shortened IP forms
-		{"shortened loopback", "http://127.1/", ErrLocalhostBlocked},        // 127.0.0.1
+		{"shortened loopback", "http://127.1/", ErrLocalhostBlocked}, // 127.0.0.1
 
 		// SSRF bypass attempts - localhost variations
 		{"localhost subdomain", "http://foo.localhost/", ErrLocalhostBlocked},

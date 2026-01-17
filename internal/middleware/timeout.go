@@ -11,8 +11,8 @@ import (
 // Once timedOut is set, all writes are discarded to prevent panics and races.
 type timeoutWriter struct {
 	http.ResponseWriter
-	mu         sync.Mutex
-	timedOut   bool
+	mu          sync.Mutex
+	timedOut    bool
 	wroteHeader bool
 }
 

@@ -193,7 +193,7 @@ func RecordChallengeFailed(reason string) {
 }
 
 // UpdatePoolMetrics updates browser pool metrics.
-func UpdatePoolMetrics(size, available int, acquired, recycled int64) {
+func UpdatePoolMetrics(size, available int, _, _ int64) {
 	BrowserPoolSize.Set(float64(size))
 	BrowserPoolAvailable.Set(float64(available))
 	// Note: counters are incremental, so we use direct counter methods in the code

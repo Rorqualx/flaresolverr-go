@@ -11,10 +11,10 @@ type Request struct {
 	Cookies           []RequestCookie `json:"cookies,omitempty"`
 	ReturnOnlyCookies bool            `json:"returnOnlyCookies,omitempty"`
 	Proxy             *Proxy          `json:"proxy,omitempty"`
-	PostData         string `json:"postData,omitempty"`
-	ReturnScreenshot bool   `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
-	DisableMedia     bool   `json:"disableMedia,omitempty"`     // Disable loading of media (images, CSS, fonts)
-	WaitInSeconds    int    `json:"waitInSeconds,omitempty"`    // Wait N seconds before returning the response
+	PostData          string          `json:"postData,omitempty"`
+	ReturnScreenshot  bool            `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
+	DisableMedia      bool            `json:"disableMedia,omitempty"`     // Disable loading of media (images, CSS, fonts)
+	WaitInSeconds     int             `json:"waitInSeconds,omitempty"`    // Wait N seconds before returning the response
 }
 
 // RequestCookie represents a cookie to be set before navigation.
@@ -37,13 +37,13 @@ type Proxy struct {
 // Response represents an API response.
 // This matches the FlareSolverr API specification.
 type Response struct {
-	Status    string     `json:"status"`
-	Message   string     `json:"message"`
-	StartTime int64      `json:"startTimestamp"`
-	EndTime   int64      `json:"endTimestamp"`
-	Version   string     `json:"version"`
-	Solution  *Solution  `json:"solution,omitempty"`
-	Sessions  []string   `json:"sessions,omitempty"`
+	Status    string    `json:"status"`
+	Message   string    `json:"message"`
+	StartTime int64     `json:"startTimestamp"`
+	EndTime   int64     `json:"endTimestamp"`
+	Version   string    `json:"version"`
+	Solution  *Solution `json:"solution,omitempty"`
+	Sessions  []string  `json:"sessions,omitempty"`
 }
 
 // Solution contains the result of a successful solve.
@@ -54,8 +54,8 @@ type Solution struct {
 	Response       string            `json:"response"`
 	Cookies        []Cookie          `json:"cookies"`
 	UserAgent      string            `json:"userAgent"`
-	Screenshot     string `json:"screenshot,omitempty"`      // Base64 encoded PNG screenshot
-	TurnstileToken string `json:"turnstile_token,omitempty"` // cf-turnstile-response token if present
+	Screenshot     string            `json:"screenshot,omitempty"`      // Base64 encoded PNG screenshot
+	TurnstileToken string            `json:"turnstile_token,omitempty"` // cf-turnstile-response token if present
 }
 
 // Cookie represents a browser cookie.
@@ -74,10 +74,10 @@ type Cookie struct {
 
 // Commands supported by the API.
 const (
-	CmdRequestGet     = "request.get"
-	CmdRequestPost    = "request.post"
-	CmdSessionsCreate = "sessions.create"
-	CmdSessionsList   = "sessions.list"
+	CmdRequestGet      = "request.get"
+	CmdRequestPost     = "request.post"
+	CmdSessionsCreate  = "sessions.create"
+	CmdSessionsList    = "sessions.list"
 	CmdSessionsDestroy = "sessions.destroy"
 )
 

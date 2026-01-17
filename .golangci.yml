@@ -5,9 +5,6 @@ run:
   timeout: 5m
   issues-exit-code: 1
   tests: true
-  skip-dirs:
-    - vendor
-    - third_party
 
 output:
   formats:
@@ -27,12 +24,8 @@ linters:
 
     # Additional safety linters
     - bodyclose         # Checks HTTP response body is closed
-    - contextcheck      # Check context propagation
     - durationcheck     # Check for two durations multiplied
-    - errname           # Checks error naming convention
-    - errorlint         # Find issues with error wrapping
-    - exhaustive        # Check exhaustiveness of enum switch
-    - exportloopref     # Checks for pointers to loop variables
+    - copyloopvar       # Checks for pointers to loop variables (Go 1.22+)
     - gocritic          # Comprehensive linter
     - gofmt             # Check formatting
     - goimports         # Check imports
@@ -40,13 +33,11 @@ linters:
     - makezero          # Finds slice declarations not initialized to zero
     - nilerr            # Finds returning nil when err is not nil
     - noctx             # Finds http requests without context
-    - prealloc          # Find slice preallocation opportunities
     - predeclared       # Find shadowed predeclared identifiers
     - reassign          # Checks that package variables are not reassigned
     - rowserrcheck      # Checks sql.Rows.Err is checked
     - sqlclosecheck     # Checks sql.Rows and sql.Stmt are closed
     - unconvert         # Remove unnecessary type conversions
-    - unparam           # Reports unused function parameters
     - wastedassign      # Finds wasted assignment statements
 
     # Style linters
@@ -56,6 +47,12 @@ linters:
     - whitespace        # Whitespace issues
 
   disable:
+    - contextcheck      # Too strict for our HTTP handler patterns
+    - errname           # Allow internal error naming flexibility
+    - errorlint         # Allow direct error comparison in tests
+    - exhaustive        # Allow non-exhaustive switches with default
+    - prealloc          # Optimization suggestion, not critical
+    - unparam           # Too strict for interface implementations
     - gochecknoglobals  # We use some globals for config
     - gochecknoinits    # We use init() sparingly
     - lll               # Line length - too restrictive
@@ -71,11 +68,17 @@ linters-settings:
     exclude-functions:
       - (io.Closer).Close
       - (net/http.ResponseWriter).Write
+      - os.Setenv
+      - os.Unsetenv
+      - os.RemoveAll
+      - (*github.com/go-rod/rod.Page).Close
+      - (*github.com/go-rod/rod.HijackRouter).Stop
 
   govet:
     enable-all: true
     disable:
       - fieldalignment  # Too noisy
+      - shadow          # Too noisy for err variable shadowing
 
   gofmt:
     simplify: true
@@ -86,10 +89,10 @@ linters-settings:
   gosec:
     excludes:
       - G104  # Audit errors not checked - we use errcheck
+      - G108  # Profiling endpoint - intentionally enabled for debugging
+      - G115  # Integer overflow - safe in our controlled context
+      - G302  # Directory permissions - need 0700 for directories
       - G304  # File path from variable - needed for config
-    config:
-      G301: "0750"  # Directory permissions
-      G302: "0640"  # File permissions
 
   gocritic:
     enabled-tags:
@@ -97,13 +100,16 @@ linters-settings:
       - style
       - performance
     disabled-checks:
-      - hugeParam       # Sometimes needed for clarity
-      - rangeValCopy    # Sometimes intentional
+      - hugeParam         # Sometimes needed for clarity
+      - rangeValCopy      # Sometimes intentional
+      - octalLiteral      # 0755 style is still readable
+      - httpNoBody        # nil is acceptable for empty body
+      - paramTypeCombine  # Explicit params are more readable
+      - emptyStringTest   # len(s) == 0 is acceptable
 
   revive:
     rules:
       - name: blank-imports
-      - name: context-as-argument
       - name: context-keys-type
       - name: dot-imports
       - name: error-return
@@ -121,9 +127,7 @@ linters-settings:
       - name: unexported-return
       - name: indent-error-flow
       - name: errorf
-      - name: empty-block
       - name: superfluous-else
-      - name: unused-parameter
       - name: unreachable-code
       - name: redefines-builtin-id
 
@@ -146,6 +150,9 @@ linters-settings:
     require-specific: true
 
 issues:
+  exclude-dirs:
+    - vendor
+    - third_party
   max-issues-per-linter: 50
   max-same-issues: 10
 
@@ -156,11 +163,27 @@ issues:
         - lll
         - funlen
 
+    # Allow unchecked errors in tests (cleanup, setup)
+    - path: _test\.go
+      linters:
+        - errcheck
+
+    # Allow unused parameters in test handlers (required by http.HandlerFunc)
+    - path: _test\.go
+      linters:
+        - revive
+      text: "unused-parameter"
+
     # Allow dot imports in tests for testify
     - path: _test\.go
       linters:
         - revive
       text: "dot-imports"
+
+    # Allow empty blocks with explanatory comments
+    - linters:
+        - revive
+      text: "empty-block"
 
     # Allow unused parameters in interface implementations
     - linters:

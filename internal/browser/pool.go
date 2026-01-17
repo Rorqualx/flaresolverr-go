@@ -89,7 +89,9 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 		if err != nil {
 			// Clean up any browsers we've already created
 			log.Error().Err(err).Int("browser_index", i).Msg("Failed to spawn browser during pool initialization")
-			pool.Close()
+			if closeErr := pool.Close(); closeErr != nil {
+				log.Error().Err(closeErr).Msg("Failed to close pool during cleanup")
+			}
 			return nil, fmt.Errorf("failed to spawn browser %d: %w", i, err)
 		}
 
@@ -213,7 +215,7 @@ func (p *Pool) spawnBrowser() (*rod.Browser, error) {
 }
 
 // Acquire obtains a browser from the pool.
-// It blocks until a browser is available, the context is cancelled,
+// It blocks until a browser is available, the context is canceled,
 // or the pool timeout is reached.
 //
 // The caller MUST call Release() when done with the browser.
@@ -345,7 +347,7 @@ func (p *Pool) isHealthy(browser *rod.Browser) bool {
 		return false
 	}
 
-	// Check context wasn't cancelled
+	// Check context wasn't canceled
 	select {
 	case <-ctx.Done():
 		_ = page.Close()

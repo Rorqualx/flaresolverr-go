@@ -9,6 +9,7 @@ import (
 	"strings"
 )
 
+// URL validation errors.
 var (
 	ErrInvalidURL       = errors.New("invalid URL")
 	ErrBlockedScheme    = errors.New("URL scheme not allowed")
@@ -299,9 +300,9 @@ func ValidateAndResolveURL(rawURL string) (string, net.IP, error) {
 	}
 
 	// For hostnames, resolve and validate all IPs
-	ips, err := net.LookupIP(hostname)
-	if err != nil {
-		// DNS resolution failed - allow it, browser will handle
+	// If DNS resolution fails, allow it - browser will handle the error
+	ips, _ := net.LookupIP(hostname)
+	if len(ips) == 0 {
 		return rawURL, nil, nil
 	}
 
@@ -313,11 +314,7 @@ func ValidateAndResolveURL(rawURL string) (string, net.IP, error) {
 	}
 
 	// Return first resolved IP for DNS pinning
-	if len(ips) > 0 {
-		return rawURL, normalizeIPv4Mapped(ips[0]), nil
-	}
-
-	return rawURL, nil, nil
+	return rawURL, normalizeIPv4Mapped(ips[0]), nil
 }
 
 // SanitizeCookieDomain validates and sanitizes a cookie domain.
