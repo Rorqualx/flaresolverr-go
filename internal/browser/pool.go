@@ -88,7 +88,7 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 	log.Info().Int("count", cfg.BrowserPoolSize).Msg("Pre-warming browser pool")
 
 	for i := 0; i < cfg.BrowserPoolSize; i++ {
-		browser, err := pool.spawnBrowser()
+		browser, err := pool.spawnBrowser(context.Background())
 		if err != nil {
 			// Clean up any browsers we've already created
 			log.Error().Err(err).Int("browser_index", i).Msg("Failed to spawn browser during pool initialization")
@@ -248,7 +248,16 @@ func (p *Pool) createLauncher() *launcher.Launcher {
 // spawnBrowser launches a new browser instance.
 // This is an internal method - external code should use Acquire/Release.
 // Each call creates a fresh launcher since launchers can only be used once.
-func (p *Pool) spawnBrowser() (*rod.Browser, error) {
+// The context parameter allows for cancellation during shutdown.
+func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
+	// Check context before starting expensive operation
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
 	log.Debug().Msg("Spawning new browser instance")
 
 	// Create a fresh launcher for this browser instance
@@ -494,10 +503,14 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 	var newBrowser *rod.Browser
 	var spawnErr error
 
+	// Create context with timeout for spawn operation
+	spawnCtx, spawnCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer spawnCancel()
+
 	spawnDone := make(chan struct{})
 	go func() {
 		defer close(spawnDone)
-		newBrowser, spawnErr = p.spawnBrowser()
+		newBrowser, spawnErr = p.spawnBrowser(spawnCtx)
 	}()
 
 	// Fix #4: Add shutdown awareness to spawn timeout

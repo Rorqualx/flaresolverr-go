@@ -333,16 +333,33 @@ func (s *Session) LastUsedTime() time.Time {
 	return time.Unix(0, s.lastUsed.Load())
 }
 
+// SafeGetPage returns the session's page reference while holding the lock.
+// This prevents race conditions when accessing the page from multiple goroutines.
+// Returns nil if the page has been closed or is unavailable.
+func (s *Session) SafeGetPage() *rod.Page {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Page
+}
+
 // GetCookies retrieves all cookies from the session's page.
+// Returns an error if the session page is nil (closed or corrupted).
 func (s *Session) GetCookies() ([]*proto.NetworkCookie, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.Page == nil {
+		return nil, types.ErrSessionPageNil
+	}
 	return s.Page.Cookies(nil)
 }
 
 // SetCookies sets cookies on the session's page.
+// Returns an error if the session page is nil (closed or corrupted).
 func (s *Session) SetCookies(cookies []*proto.NetworkCookieParam) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.Page == nil {
+		return types.ErrSessionPageNil
+	}
 	return s.Page.SetCookies(cookies)
 }

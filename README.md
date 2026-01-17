@@ -217,6 +217,8 @@ Supported proxy schemes: `http`, `https`, `socks4`, `socks5`
 | `userAgent` | string | Browser user agent |
 | `screenshot` | string | Base64 PNG (if requested) |
 | `turnstile_token` | string | Cloudflare Turnstile token (if present) |
+| `responseTruncated` | bool | `true` if HTML was truncated due to 10MB size limit (optional) |
+| `cookieError` | string | Error message if cookies could not be retrieved (optional) |
 | `rateLimited` | bool | `true` if rate limiting detected (optional) |
 | `suggestedDelayMs` | int | Recommended delay before retry in ms (optional) |
 | `errorCode` | string | Specific error code like `CF_1015` (optional) |
@@ -320,6 +322,32 @@ All configuration is done via environment variables.
 | `CORS_ALLOWED_ORIGINS` | (all) | Comma-separated allowed origins |
 | `ALLOW_LOCAL_PROXIES` | `true` | Allow localhost/private IP proxies |
 | `IGNORE_CERT_ERRORS` | `false` | Ignore TLS certificate errors |
+| `API_KEY_ENABLED` | `false` | Enable API key authentication |
+| `API_KEY` | (none) | Required API key (use 16+ chars) |
+
+### API Key Authentication
+
+When enabled, all requests (except `/health` and `/metrics`) require authentication:
+
+```bash
+# Via header (recommended)
+curl -X POST http://localhost:8191/v1 \
+  -H "X-API-Key: your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "sessions.list"}'
+
+# Via query parameter
+curl -X POST "http://localhost:8191/v1?api_key=your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "sessions.list"}'
+```
+
+**Enable in Docker:**
+```yaml
+environment:
+  - API_KEY_ENABLED=true
+  - API_KEY=your-secret-key-at-least-16-chars
+```
 
 ### Logging & Monitoring
 

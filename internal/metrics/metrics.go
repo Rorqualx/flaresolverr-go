@@ -4,11 +4,16 @@ package metrics
 import (
 	"net/http"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// registerOnce ensures metrics are only registered once to prevent panics
+// during tests or if init() is called multiple times.
+var registerOnce sync.Once
 
 var (
 	// RequestsTotal counts total requests by command and status.
@@ -123,22 +128,25 @@ var (
 )
 
 func init() {
-	// Register all metrics
-	prometheus.MustRegister(
-		RequestsTotal,
-		RequestDuration,
-		BrowserPoolSize,
-		BrowserPoolAvailable,
-		BrowserPoolAcquired,
-		BrowserPoolRecycled,
-		ActiveSessions,
-		ChallengesSolved,
-		ChallengesFailed,
-		MemoryUsageBytes,
-		MemorySysBytes,
-		GoroutineCount,
-		BuildInfo,
-	)
+	// Use sync.Once to prevent panics if metrics are already registered
+	// This can happen during tests or if the package is imported multiple times
+	registerOnce.Do(func() {
+		prometheus.MustRegister(
+			RequestsTotal,
+			RequestDuration,
+			BrowserPoolSize,
+			BrowserPoolAvailable,
+			BrowserPoolAcquired,
+			BrowserPoolRecycled,
+			ActiveSessions,
+			ChallengesSolved,
+			ChallengesFailed,
+			MemoryUsageBytes,
+			MemorySysBytes,
+			GoroutineCount,
+			BuildInfo,
+		)
+	})
 }
 
 // Handler returns the Prometheus HTTP handler.

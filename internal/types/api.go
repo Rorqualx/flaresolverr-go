@@ -57,6 +57,10 @@ type Solution struct {
 	Screenshot     string            `json:"screenshot,omitempty"`      // Base64 encoded PNG screenshot
 	TurnstileToken string            `json:"turnstile_token,omitempty"` // cf-turnstile-response token if present
 
+	// Response metadata (omitted when not applicable)
+	ResponseTruncated *bool   `json:"responseTruncated,omitempty"` // true if HTML response was truncated due to size limit
+	CookieError       *string `json:"cookieError,omitempty"`       // error message if cookies could not be retrieved
+
 	// Rate limit detection fields (omitted when not applicable)
 	RateLimited      *bool   `json:"rateLimited,omitempty"`      // true if rate limiting detected
 	SuggestedDelayMs *int    `json:"suggestedDelayMs,omitempty"` // recommended delay before retry in ms

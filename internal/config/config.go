@@ -60,6 +60,10 @@ type Config struct {
 	IgnoreCertErrors   bool     // Ignore TLS certificate errors (required for some proxies)
 	CORSAllowedOrigins []string // Allowed CORS origins (empty = allow all with warning)
 	AllowLocalProxies  bool     // Allow localhost/private IP proxies (default: true for backward compatibility)
+
+	// API Key Authentication
+	APIKeyEnabled bool   // Enable API key authentication
+	APIKey        string // Required API key for requests (only used if APIKeyEnabled is true)
 }
 
 // Load loads configuration from environment variables.
@@ -113,6 +117,10 @@ func Load() *Config {
 		IgnoreCertErrors:   getEnvBool("IGNORE_CERT_ERRORS", false),
 		CORSAllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", nil),
 		AllowLocalProxies:  getEnvBool("ALLOW_LOCAL_PROXIES", true), // Default true for backward compatibility
+
+		// API Key Authentication
+		APIKeyEnabled: getEnvBool("API_KEY_ENABLED", false),
+		APIKey:        getEnvString("API_KEY", ""),
 	}
 }
 
@@ -208,6 +216,47 @@ func (c *Config) Validate() {
 	// Warn if credentials are set but no proxy URL is configured
 	if (c.ProxyUsername != "" || c.ProxyPassword != "") && c.ProxyURL == "" {
 		log.Warn().Msg("Proxy credentials set but PROXY_URL is empty - credentials will not be used")
+	}
+
+	// Port conflict validation
+	usedPorts := make(map[int]string)
+	if c.Port > 0 {
+		usedPorts[c.Port] = "PORT"
+	}
+	if c.PrometheusEnabled {
+		if existingName, exists := usedPorts[c.PrometheusPort]; exists {
+			log.Error().
+				Int("port", c.PrometheusPort).
+				Str("conflicts_with", existingName).
+				Msg("PROMETHEUS_PORT conflicts with another port, adjusting")
+			// Find next available port
+			c.PrometheusPort = c.Port + 1
+			for _, exists := usedPorts[c.PrometheusPort]; exists; _, exists = usedPorts[c.PrometheusPort] {
+				c.PrometheusPort++
+			}
+		}
+		usedPorts[c.PrometheusPort] = "PROMETHEUS_PORT"
+	}
+	if c.PProfEnabled {
+		if existingName, exists := usedPorts[c.PProfPort]; exists {
+			log.Error().
+				Int("port", c.PProfPort).
+				Str("conflicts_with", existingName).
+				Msg("PPROF_PORT conflicts with another port, adjusting")
+			// Find next available port
+			c.PProfPort = 6060
+			for _, exists := usedPorts[c.PProfPort]; exists; _, exists = usedPorts[c.PProfPort] {
+				c.PProfPort++
+			}
+		}
+	}
+
+	// API key validation
+	if c.APIKeyEnabled && c.APIKey == "" {
+		log.Warn().Msg("API_KEY_ENABLED is true but API_KEY is empty - authentication will always fail")
+	}
+	if c.APIKeyEnabled && len(c.APIKey) < 16 {
+		log.Warn().Msg("API_KEY is shorter than 16 characters - consider using a stronger key")
 	}
 }
 

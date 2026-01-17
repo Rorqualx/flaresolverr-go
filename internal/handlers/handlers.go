@@ -466,13 +466,15 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			h.writeError(w, "Session not found or expired", startTime)
 			return
 		}
-		// Fix #6: Check if session page is nil (may have been closed or corrupted)
-		if sess.Page == nil {
+		// Fix #6: Use SafeGetPage to prevent TOCTOU race condition
+		// This atomically checks and retrieves the page reference under lock
+		page := sess.SafeGetPage()
+		if page == nil {
 			log.Error().Str("session", req.Session).Msg("Session page is nil")
 			h.writeError(w, "Session page is no longer available", startTime)
 			return
 		}
-		result, solveErr = h.solver.SolveWithPage(ctx, sess.Page, opts)
+		result, solveErr = h.solver.SolveWithPage(ctx, page, opts)
 	} else {
 		result, solveErr = h.solver.Solve(ctx, opts)
 	}
@@ -611,6 +613,15 @@ func (h *Handler) writeSuccess(w http.ResponseWriter, result *solver.Result, coo
 		UserAgent:      result.UserAgent,
 		Screenshot:     result.Screenshot,
 		TurnstileToken: result.TurnstileToken,
+	}
+
+	// Add response metadata if applicable
+	if result.HTMLTruncated {
+		truncated := true
+		solution.ResponseTruncated = &truncated
+	}
+	if result.CookieError != "" {
+		solution.CookieError = &result.CookieError
 	}
 
 	// Detect rate limiting in the response

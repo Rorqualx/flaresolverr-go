@@ -18,6 +18,7 @@ var (
 	ErrSessionAlreadyExists = errors.New("session already exists")
 	ErrSessionExpired       = errors.New("session has expired")
 	ErrTooManySessions      = errors.New("maximum number of sessions reached")
+	ErrSessionPageNil       = errors.New("session page is nil or has been closed")
 
 	// Challenge errors
 	ErrAccessDenied        = errors.New("access denied by target site")

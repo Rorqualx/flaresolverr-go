@@ -2,6 +2,8 @@ package browser
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,9 @@ import (
 //
 // The stealth patches modify JavaScript properties that are commonly
 // used to detect headless browsers and automation tools.
+//
+// Returns an error for critical failures (e.g., syntax errors in stealth script),
+// but logs and continues for non-critical issues (e.g., APIs not available on about:blank).
 func ApplyStealthToPage(page *rod.Page) error {
 	log.Debug().Msg("Applying stealth patches to page")
 
@@ -22,10 +27,19 @@ func ApplyStealthToPage(page *rod.Page) error {
 	// Use MustEval wrapped in recover to prevent crashes
 	_, err := page.Evaluate(rod.Eval(stealthScript))
 	if err != nil {
-		// Log at debug level - stealth failures don't block functionality
+		errStr := err.Error()
+
+		// Critical errors that indicate broken stealth script - return error
+		if strings.Contains(errStr, "SyntaxError") {
+			return fmt.Errorf("stealth script syntax error: %w", err)
+		}
+		if strings.Contains(errStr, "ReferenceError") {
+			return fmt.Errorf("stealth script reference error: %w", err)
+		}
+
+		// Non-critical errors - log and continue
 		// Common on about:blank pages where some APIs don't exist yet
-		log.Debug().Err(err).Msg("Stealth script had non-fatal errors")
-		// Don't return error - stealth is best-effort
+		log.Warn().Err(err).Msg("Stealth script had non-fatal errors, continuing")
 		return nil
 	}
 

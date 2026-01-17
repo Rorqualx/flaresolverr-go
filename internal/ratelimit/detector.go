@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// maxBodyLenForRegex limits the body size for regex matching to prevent ReDoS attacks.
+// 100KB is sufficient for detecting rate limit messages while preventing abuse.
+const maxBodyLenForRegex = 100 * 1024
+
 // ErrorCategory represents the broad category of a detected error.
 type ErrorCategory string
 
@@ -36,59 +40,61 @@ type Info struct {
 }
 
 // patterns contains all detection patterns, ordered by specificity.
+// Patterns use [^<]{0,N} instead of .{0,N} to prevent backtracking on HTML content
+// and reduce ReDoS vulnerability while still matching across element boundaries.
 var patterns = []ErrorPattern{
 	// Cloudflare-specific errors (most specific first)
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1015`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1015`),
 		ErrorCode:   "CF_1015",
 		Category:    CategoryRateLimit,
 		BaseDelayMs: 60000,
 		Description: "Cloudflare rate limit exceeded",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1020`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1020`),
 		ErrorCode:   "CF_1020",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 30000,
 		Description: "Cloudflare access denied - suspicious request",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1006`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1006`),
 		ErrorCode:   "CF_1006",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 30000,
 		Description: "Cloudflare access denied",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1007`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1007`),
 		ErrorCode:   "CF_1007",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 30000,
 		Description: "Cloudflare access denied",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1008`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1008`),
 		ErrorCode:   "CF_1008",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 30000,
 		Description: "Cloudflare access denied",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1009`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1009`),
 		ErrorCode:   "CF_1009",
 		Category:    CategoryGeoBlocked,
 		BaseDelayMs: 0, // No retry will help
 		Description: "Cloudflare geo-restriction",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1010`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1010`),
 		ErrorCode:   "CF_1010",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 30000,
 		Description: "Cloudflare browser signature rejected",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)error.{0,10}code.{0,5}:?\s*1012`),
+		Pattern:     regexp.MustCompile(`(?i)error[^<]{0,10}code[^<]{0,5}:?\s{0,5}1012`),
 		ErrorCode:   "CF_1012",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 30000,
@@ -97,28 +103,28 @@ var patterns = []ErrorPattern{
 
 	// Generic patterns (less specific, checked after Cloudflare codes)
 	{
-		Pattern:     regexp.MustCompile(`(?i)access\s+denied`),
+		Pattern:     regexp.MustCompile(`(?i)access\s{1,5}denied`),
 		ErrorCode:   "ACCESS_DENIED",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 5000,
 		Description: "Generic access denied",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)rate\s*limit`),
+		Pattern:     regexp.MustCompile(`(?i)rate\s{0,3}limit`),
 		ErrorCode:   "RATE_LIMITED",
 		Category:    CategoryRateLimit,
 		BaseDelayMs: 10000,
 		Description: "Generic rate limit",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)too\s+many\s+requests`),
+		Pattern:     regexp.MustCompile(`(?i)too\s{1,5}many\s{1,5}requests`),
 		ErrorCode:   "TOO_MANY_REQUESTS",
 		Category:    CategoryRateLimit,
 		BaseDelayMs: 10000,
 		Description: "Too many requests",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)you\s+(have\s+been\s+)?blocked`),
+		Pattern:     regexp.MustCompile(`(?i)you\s{1,5}(have\s{1,5}been\s{1,5})?blocked`),
 		ErrorCode:   "BLOCKED",
 		Category:    CategoryAccessDenied,
 		BaseDelayMs: 15000,
@@ -135,8 +141,14 @@ var patterns = []ErrorPattern{
 
 // Detect analyzes HTTP status code and response body for rate limiting indicators.
 // It returns information about any detected rate limiting, including a suggested delay.
+// Body is truncated to maxBodyLenForRegex to prevent ReDoS attacks with large inputs.
 func Detect(statusCode int, body string) Info {
 	info := Info{}
+
+	// Truncate body to prevent ReDoS attacks with large inputs
+	if len(body) > maxBodyLenForRegex {
+		body = body[:maxBodyLenForRegex]
+	}
 
 	// Check HTTP status first
 	switch statusCode {

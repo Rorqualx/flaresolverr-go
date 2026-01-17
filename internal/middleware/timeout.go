@@ -41,15 +41,12 @@ func (tw *timeoutWriter) WriteHeader(code int) {
 }
 
 // Header implements http.ResponseWriter.
-// Fix #9: Note on thread safety: http.Header is a map[string][]string.
-// The underlying ResponseWriter.Header() returns a reference that is
-// typically accessed only before WriteHeader is called. Since handlers
-// set headers before writing the response, and our mutex protects
-// Write/WriteHeader, concurrent header access from the handler goroutine
-// and timeout goroutine is avoided in practice. The timeout path only
-// writes headers after marking timedOut, at which point the handler's
-// writes are discarded.
+// Fix #9: Synchronize header access to prevent races between handler
+// and timeout goroutines. While the typical pattern is to set headers
+// before Write/WriteHeader, this ensures thread safety in all cases.
 func (tw *timeoutWriter) Header() http.Header {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
 	return tw.ResponseWriter.Header()
 }
 

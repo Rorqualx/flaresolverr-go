@@ -100,8 +100,28 @@ func (e *ProxyExtension) createManifest() error {
 }
 
 // createBackgroundScript creates the extension's background.js file.
+// Security: Uses json.Marshal for proper escaping of credentials to prevent JS injection.
 func (e *ProxyExtension) createBackgroundScript() error {
+	// Use json.Marshal for proper escaping of all values to prevent JavaScript injection
+	hostJSON, err := json.Marshal(e.host)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy host: %w", err)
+	}
+	portJSON, err := json.Marshal(e.port)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy port: %w", err)
+	}
+	usernameJSON, err := json.Marshal(e.username)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy username: %w", err)
+	}
+	passwordJSON, err := json.Marshal(e.password)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy password: %w", err)
+	}
+
 	// JavaScript that handles proxy configuration and authentication
+	// All values are JSON-encoded to prevent injection attacks
 	script := fmt.Sprintf(`
 // Proxy configuration
 const config = {
@@ -109,8 +129,8 @@ const config = {
     rules: {
         singleProxy: {
             scheme: "http",
-            host: "%s",
-            port: parseInt("%s")
+            host: %s,
+            port: parseInt(%s)
         },
         bypassList: []
     }
@@ -128,15 +148,15 @@ chrome.webRequest.onAuthRequired.addListener(
     function(details, callbackFn) {
         callbackFn({
             authCredentials: {
-                username: "%s",
-                password: "%s"
+                username: %s,
+                password: %s
             }
         });
     },
     {urls: ["<all_urls>"]},
     ["asyncBlocking"]
 );
-`, e.host, e.port, e.username, e.password)
+`, hostJSON, portJSON, usernameJSON, passwordJSON)
 
 	scriptPath := filepath.Join(e.dir, "background.js")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
@@ -234,8 +254,28 @@ func (e *ProxyExtensionMV2) createManifest() error {
 }
 
 // createBackgroundScript creates the Manifest V2 background.js file.
+// Security: Uses json.Marshal for proper escaping of credentials to prevent JS injection.
 func (e *ProxyExtensionMV2) createBackgroundScript() error {
+	// Use json.Marshal for proper escaping of all values to prevent JavaScript injection
+	hostJSON, err := json.Marshal(e.host)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy host: %w", err)
+	}
+	portJSON, err := json.Marshal(e.port)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy port: %w", err)
+	}
+	usernameJSON, err := json.Marshal(e.username)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy username: %w", err)
+	}
+	passwordJSON, err := json.Marshal(e.password)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy password: %w", err)
+	}
+
 	// JavaScript that handles proxy configuration and authentication (MV2 style)
+	// All values are JSON-encoded to prevent injection attacks
 	script := fmt.Sprintf(`
 // Proxy configuration
 var config = {
@@ -243,8 +283,8 @@ var config = {
     rules: {
         singleProxy: {
             scheme: "http",
-            host: "%s",
-            port: parseInt("%s")
+            host: %s,
+            port: parseInt(%s)
         },
         bypassList: []
     }
@@ -258,15 +298,15 @@ chrome.webRequest.onAuthRequired.addListener(
     function(details) {
         return {
             authCredentials: {
-                username: "%s",
-                password: "%s"
+                username: %s,
+                password: %s
             }
         };
     },
     {urls: ["<all_urls>"]},
     ["blocking"]
 );
-`, e.host, e.port, e.username, e.password)
+`, hostJSON, portJSON, usernameJSON, passwordJSON)
 
 	scriptPath := filepath.Join(e.dir, "background.js")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {

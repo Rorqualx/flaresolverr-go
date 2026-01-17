@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// maxDomains is the maximum number of domains to track before LRU eviction.
+const maxDomains = 10000
+
 // DomainStats tracks request statistics for a single domain.
 type DomainStats struct {
 	mu sync.RWMutex
@@ -25,6 +28,7 @@ type DomainStats struct {
 	LastRequestTime time.Time `json:"lastRequestTime,omitempty"`
 	LastSuccessTime time.Time `json:"lastSuccessTime,omitempty"`
 	LastRateLimited time.Time `json:"lastRateLimited,omitempty"`
+	LastAccess      time.Time `json:"-"` // For LRU eviction, not serialized
 
 	// Configuration (optional overrides)
 	CrawlDelay    *int `json:"crawlDelay,omitempty"`    // Seconds, from robots.txt
@@ -178,16 +182,43 @@ func ExtractDomain(rawURL string) string {
 }
 
 // getOrCreate returns the stats for a domain, creating if needed.
+// Implements LRU eviction when the domain count exceeds maxDomains.
 func (m *Manager) getOrCreate(domain string) *DomainStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	stats, exists := m.domains[domain]
 	if !exists {
-		stats = &DomainStats{}
+		// Evict oldest domain if at capacity
+		if len(m.domains) >= maxDomains {
+			m.evictOldestLocked()
+		}
+		stats = &DomainStats{
+			LastAccess: time.Now(),
+		}
 		m.domains[domain] = stats
+	} else {
+		stats.LastAccess = time.Now()
 	}
 	return stats
+}
+
+// evictOldestLocked removes the least recently accessed domain.
+// Must be called with m.mu held.
+func (m *Manager) evictOldestLocked() {
+	var oldestDomain string
+	var oldestTime time.Time
+
+	for domain, stats := range m.domains {
+		if oldestDomain == "" || stats.LastAccess.Before(oldestTime) {
+			oldestDomain = domain
+			oldestTime = stats.LastAccess
+		}
+	}
+
+	if oldestDomain != "" {
+		delete(m.domains, oldestDomain)
+	}
 }
 
 // Get returns the stats for a domain (nil if not tracked).

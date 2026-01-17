@@ -13,9 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Enhanced health endpoint** - `/health` now includes `domainStats` with per-domain metrics and `suggestedDelayMs` for each tracked domain.
 - **Domain statistics headers** - Responses include `X-Domain-Suggested-Delay`, `X-Domain-Error-Rate`, and `X-Domain-Request-Count` headers for quick client access.
 - **Cookie migration docs** - README now documents the `expires` vs `expiry` difference from Python FlareSolverr with code examples for multiple languages.
+- **API key authentication** - Optional API key authentication via `API_KEY_ENABLED` and `API_KEY` environment variables. Supports `X-API-Key` header or `api_key` query parameter.
+- **LRU eviction for domain stats** - Domain statistics are now limited to 10,000 entries with LRU eviction to prevent unbounded memory growth.
+- **Cookie error tracking** - Result now includes `cookieError` field when cookies cannot be retrieved.
 
 ### Changed
 - Response `solution` object now has optional rate limit fields (backward compatible - only present when rate limiting detected).
+
+### Security
+- **CRITICAL: Fixed JavaScript injection vulnerability** - Proxy credentials in browser extension now use `json.Marshal` for proper escaping, preventing XSS/injection attacks via malicious proxy credentials.
+- **Fixed metrics registration panic** - Prometheus metrics now use `sync.Once` to prevent panics when metrics are already registered (e.g., during tests).
+- **Fixed race condition in session page access** - Added `SafeGetPage()` method with proper mutex synchronization to prevent TOCTOU races.
+- **Fixed header access race** - Timeout middleware now synchronizes header access to prevent races between handler and timeout goroutines.
+- **Fixed context cancellation in browser pool** - `spawnBrowser()` now accepts context for proper cancellation during shutdown.
+- **ReDoS prevention** - Rate limit detector regex patterns rewritten to use `[^<]{0,N}` instead of `.{0,N}` and body truncated to 100KB before regex matching.
+- **Port conflict validation** - Configuration now validates and auto-adjusts conflicting ports for Prometheus and pprof.
+- **Improved stealth error handling** - Critical stealth script errors (syntax/reference) now return errors instead of being silently swallowed.
 
 ## [0.2.3] - 2025-01-17
 

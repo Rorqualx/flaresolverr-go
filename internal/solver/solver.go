@@ -41,6 +41,7 @@ type Result struct {
 	HTML           string
 	HTMLTruncated  bool // Fix #15: Flag indicating HTML was truncated due to size limit
 	Cookies        []*proto.NetworkCookie
+	CookieError    string // Non-empty if cookies could not be retrieved
 	UserAgent      string
 	URL            string
 	Screenshot     string // Base64 encoded PNG screenshot
@@ -787,6 +788,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		htmlTruncated = true
 	}
 
+	var cookieError string
 	cookies, err := page.Cookies(nil)
 	if err != nil {
 		// Chrome 114+ returns partitionKey as string which causes unmarshal warning
@@ -795,6 +797,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 			log.Debug().Msg("Cookie partitionKey field type mismatch (harmless)")
 		} else {
 			log.Warn().Err(err).Msg("Failed to get cookies")
+			cookieError = err.Error()
 			cookies = nil
 		}
 	}
@@ -839,6 +842,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		HTML:           html,
 		HTMLTruncated:  htmlTruncated, // Fix #15: Include truncation flag
 		Cookies:        cookies,
+		CookieError:    cookieError, // Include cookie retrieval error if any
 		UserAgent:      s.userAgent,
 		URL:            currentURL,
 		TurnstileToken: turnstileToken,
