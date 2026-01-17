@@ -388,6 +388,53 @@ For a pool size of 3 with 5 active pages, expect **500-700MB** total memory usag
 
 Use `MAX_MEMORY_MB` to set a memory ceiling. When exceeded, browsers are automatically recycled.
 
+## Troubleshooting
+
+### Common Issues
+
+#### "Access denied" errors
+- **IP blocked**: The target site may have blocked your IP. Try using a proxy.
+- **Bot detection**: Some sites have aggressive bot detection. Session reuse can help maintain cookies.
+- **Rate limiting**: Reduce request frequency or use `RATE_LIMIT_RPM` to self-throttle.
+
+#### Session requests failing
+- Sessions auto-expire after `SESSION_TTL` (default: 30 minutes)
+- Always check if session exists with `sessions.list` before using
+- Destroy and recreate sessions if they become stale
+
+#### High memory usage
+- Reduce `BROWSER_POOL_SIZE` (each browser uses 100-150MB)
+- Enable `disableMedia: true` in requests to skip images/CSS
+- Set `MAX_MEMORY_MB` to trigger automatic browser recycling
+
+#### Browser pool exhaustion
+- Increase `BROWSER_POOL_SIZE` for higher concurrency
+- Increase `BROWSER_POOL_TIMEOUT` if requests timeout waiting for browsers
+- Check `/health` endpoint to monitor pool stats
+
+#### Container crashes
+- Ensure adequate memory (minimum 512MB recommended)
+- Check Docker logs for OOM kills
+- Reduce `BROWSER_POOL_SIZE` if memory constrained
+
+### Debug Mode
+
+Enable debug logging to see detailed information:
+
+```bash
+docker run -e LOG_LEVEL=debug -p 8191:8191 rorqualx/flaresolverr-go:latest
+```
+
+### Getting Help
+
+- [GitHub Issues](https://github.com/Rorqualx/flaresolverr-go/issues) - Bug reports and feature requests
+- Check `/health` endpoint for pool statistics
+- Review container logs for error messages
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
+
 ## Attribution
 
 Built with [Claude Code](https://claude.ai/code) by Anthropic
