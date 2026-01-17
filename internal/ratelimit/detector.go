@@ -131,7 +131,9 @@ var patterns = []ErrorPattern{
 		Description: "Request blocked",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(captcha|hcaptcha|recaptcha|challenge)`),
+		// More specific patterns for actual CAPTCHA challenges, not just script presence
+		// Avoid matching pages that just have reCAPTCHA scripts loaded
+		Pattern:     regexp.MustCompile(`(?i)(please\s+complete\s+(the\s+)?captcha|verify\s+you\s+are\s+(not\s+a\s+robot|human)|cf-turnstile-response.*required|captcha[_-]?required|solve\s+the\s+captcha|complete\s+the\s+challenge\s+below)`),
 		ErrorCode:   "CAPTCHA_REQUIRED",
 		Category:    CategoryCaptcha,
 		BaseDelayMs: 0, // Manual intervention needed

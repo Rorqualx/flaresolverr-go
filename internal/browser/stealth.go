@@ -277,14 +277,15 @@ const stealthScript = `
                 const ctx = window[ctxName];
                 if (!ctx || !ctx.prototype) return;
 
+                // Safely get the original function
                 const originalGetParameter = ctx.prototype.getParameter;
-                if (typeof originalGetParameter !== 'function') return;
+                if (!originalGetParameter || typeof originalGetParameter !== 'function') return;
 
                 // Check if already wrapped
                 if (originalGetParameter._stealth) return;
 
-                // Verify the original function has .call method (paranoid check)
-                if (typeof originalGetParameter.call !== 'function') return;
+                // Store a reference to the original in a closure-safe way
+                const origFn = originalGetParameter;
 
                 // Create wrapper function
                 ctx.prototype.getParameter = function(param) {
@@ -295,11 +296,8 @@ const stealthScript = `
                         if (param === UNMASKED_RENDERER_WEBGL) {
                             return 'Intel Iris OpenGL Engine';
                         }
-                        // Extra safety: check originalGetParameter is still valid
-                        if (typeof originalGetParameter === 'function' && typeof originalGetParameter.call === 'function') {
-                            return originalGetParameter.call(this, param);
-                        }
-                        return null;
+                        // Use Function.prototype.call directly to avoid issues
+                        return Function.prototype.call.call(origFn, this, param);
                     } catch (e) {
                         return null;
                     }
