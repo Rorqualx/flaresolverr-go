@@ -26,7 +26,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     ./cmd/flaresolverr
 
 # Final stage
-FROM alpine:3.19
+# Use Alpine 3.21 for newer Chromium (136 vs 124 in 3.19)
+# This provides better compatibility with anti-bot detection
+FROM alpine:3.21
 
 # Install Chromium, xvfb, and required dependencies
 # mesa-* packages provide OpenGL/WebGL software rendering via SwiftShader/llvmpipe

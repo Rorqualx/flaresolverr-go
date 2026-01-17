@@ -161,6 +161,11 @@ func (p *Pool) createLauncher() *launcher.Launcher {
 	// Only use this when Xvfb is not available
 	if p.config.Headless {
 		l = l.Set("headless", "new")
+	} else {
+		// CRITICAL: Rod enables headless by default. We must explicitly disable it
+		// when using Xvfb virtual display for anti-detection.
+		// Without this, Chrome still runs in headless mode which Cloudflare detects.
+		l = l.Headless(false)
 	}
 	// When HEADLESS=false, Chrome uses DISPLAY env var pointing to Xvfb (:99)
 

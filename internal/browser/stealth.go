@@ -268,6 +268,9 @@ const stealthScript = `
     // ========================================
     // Spoof WebGL to avoid detection of VM/headless
     // Using simple function wrapper instead of Proxy for better compatibility
+    // TODO: Fix non-fatal error "Cannot read properties of undefined (reading 'apply')"
+    // This occurs on some pages where WebGL context is not fully initialized.
+    // The error is caught and doesn't break functionality, but should be investigated.
     try {
         const UNMASKED_VENDOR_WEBGL = 37445;
         const UNMASKED_RENDERER_WEBGL = 37446;

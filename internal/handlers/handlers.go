@@ -139,15 +139,13 @@ func getActualUserAgent(pool *browser.Pool) string {
 	// Strip "HeadlessChrome" if present (like Python FlareSolverr does)
 	ua = strings.Replace(ua, "HeadlessChrome", "Chrome", 1)
 
-	// Ensure we have a Linux user agent for Docker containers
-	// The CDP may return a platform-specific UA that doesn't match the container
-	// Also upgrade Chrome version to match Python FlareSolverr for better Cloudflare compatibility
-	if strings.Contains(ua, "Macintosh") || strings.Contains(ua, "Windows") || strings.Contains(ua, "Chrome/") {
-		// Use Chrome 142 to match Python FlareSolverr's success rate
-		// Python FlareSolverr claims Chrome 142 regardless of actual Chromium version
-		ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
-		log.Debug().Str("corrected_ua", ua).Msg("Using optimized user agent (Chrome 142)")
-	}
+	// IMPORTANT: Use the browser's actual user agent to avoid version mismatch detection.
+	// Cloudflare detects when User-Agent claims a different version than the browser's
+	// actual capabilities (detected via JavaScript APIs, Client Hints, etc.)
+	//
+	// Previously this code forced Chrome 142, but if the actual browser is Chrome 124,
+	// this mismatch is detected and triggers Turnstile challenges.
+	log.Debug().Str("browser_ua", ua).Msg("Using browser's actual user agent")
 
 	return ua
 }
