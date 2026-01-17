@@ -336,7 +336,7 @@ func BlockResources(ctx context.Context, page *rod.Page, blockImages, blockCSS, 
 	}
 
 	// Create cancellable context for event listeners
-	// This context is cancelled when cleanup is called OR when parent context is done
+	// This context is canceled when cleanup is called OR when parent context is done
 	listenerCtx, cancel := context.WithCancel(ctx)
 	pageWithCtx := page.Context(listenerCtx)
 
@@ -383,7 +383,7 @@ func BlockResources(ctx context.Context, page *rod.Page, blockImages, blockCSS, 
 				return true // Stop listening
 			default:
 			}
-			// Ignore error: request may have been cancelled or page closed
+			// Ignore error: request may have been canceled or page closed
 			_ = proto.FetchFailRequest{
 				RequestID:   e.RequestID,
 				ErrorReason: proto.NetworkErrorReasonBlockedByClient,

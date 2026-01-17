@@ -72,7 +72,7 @@ func (tw *timeoutWriter) hasWrittenHeader() bool {
 // The handler goroutine continues but its writes are safely discarded.
 //
 // Fix #10: Important behavior note on orphaned handlers:
-// When a timeout occurs, the handler goroutine is NOT cancelled or killed.
+// When a timeout occurs, the handler goroutine is NOT canceled or killed.
 // It continues running until completion, but its writes are silently discarded.
 // Handlers should check ctx.Done() for cooperative cancellation to avoid
 // wasting resources on work that won't be delivered to the client.

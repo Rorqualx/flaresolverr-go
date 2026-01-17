@@ -136,11 +136,11 @@ func setupMediaBlocking(page *rod.Page) func() {
 // It returns the page content after challenge resolution.
 //
 // Fix #12: Timeout validation notes:
-// - Zero or negative timeout is rejected with an error (prevents infinite waits)
-// - Timeouts under 1 second are adjusted to 1 second with a warning (prevents
-//   unrealistic timeouts that would fail before the browser could even navigate)
-// - The timeout should be set appropriately at the handler layer based on config
-//   (DefaultTimeout/MaxTimeout); this validation is a safety net
+//   - Zero or negative timeout is rejected with an error (prevents infinite waits)
+//   - Timeouts under 1 second are adjusted to 1 second with a warning (prevents
+//     unrealistic timeouts that would fail before the browser could even navigate)
+//   - The timeout should be set appropriately at the handler layer based on config
+//     (DefaultTimeout/MaxTimeout); this validation is a safety net
 func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error) {
 	// Validate timeout: reject invalid values
 	if opts.Timeout <= 0 {

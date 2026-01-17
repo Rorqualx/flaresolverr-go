@@ -54,12 +54,12 @@ type Config struct {
 	PProfBindAddr string // Bind address for pprof server (default: localhost only)
 
 	// Security
-	RateLimitEnabled     bool
-	RateLimitRPM         int      // Requests per minute per IP
-	TrustProxy           bool     // Trust X-Forwarded-For headers (only enable behind a reverse proxy)
-	IgnoreCertErrors     bool     // Ignore TLS certificate errors (required for some proxies)
-	CORSAllowedOrigins   []string // Allowed CORS origins (empty = allow all with warning)
-	AllowLocalProxies    bool     // Allow localhost/private IP proxies (default: true for backward compatibility)
+	RateLimitEnabled   bool
+	RateLimitRPM       int      // Requests per minute per IP
+	TrustProxy         bool     // Trust X-Forwarded-For headers (only enable behind a reverse proxy)
+	IgnoreCertErrors   bool     // Ignore TLS certificate errors (required for some proxies)
+	CORSAllowedOrigins []string // Allowed CORS origins (empty = allow all with warning)
+	AllowLocalProxies  bool     // Allow localhost/private IP proxies (default: true for backward compatibility)
 }
 
 // Load loads configuration from environment variables.

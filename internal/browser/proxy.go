@@ -47,7 +47,7 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 		}
 
 		// Create cancellable context for event listeners
-		// This context is cancelled when cleanup is called OR when parent context is done
+		// This context is canceled when cleanup is called OR when parent context is done
 		listenerCtx, cancel := context.WithCancel(ctx)
 		pageWithCtx := page.Context(listenerCtx)
 
@@ -96,7 +96,7 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 				}
 				log.Debug().Msg("Proxy authentication required, providing credentials")
 
-				// Ignore error: request may have been cancelled or timed out
+				// Ignore error: request may have been canceled or timed out
 				_ = proto.FetchContinueWithAuth{
 					RequestID: e.RequestID,
 					AuthChallengeResponse: &proto.FetchAuthChallengeResponse{
@@ -121,7 +121,7 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 				}
 				// Only continue if not an auth challenge (no response status means it's a request)
 				if e.ResponseStatusCode == nil {
-					// Ignore error: request may have been cancelled or timed out
+					// Ignore error: request may have been canceled or timed out
 					_ = proto.FetchContinueRequest{
 						RequestID: e.RequestID,
 					}.Call(page)
