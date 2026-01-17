@@ -217,6 +217,54 @@ Supported proxy schemes: `http`, `https`, `socks4`, `socks5`
 | `userAgent` | string | Browser user agent |
 | `screenshot` | string | Base64 PNG (if requested) |
 | `turnstile_token` | string | Cloudflare Turnstile token (if present) |
+| `rateLimited` | bool | `true` if rate limiting detected (optional) |
+| `suggestedDelayMs` | int | Recommended delay before retry in ms (optional) |
+| `errorCode` | string | Specific error code like `CF_1015` (optional) |
+| `errorCategory` | string | Error category: `rate_limit`, `access_denied`, `captcha`, `geo_blocked` (optional) |
+
+#### Rate Limit Detection
+
+When the target site returns a rate limiting or access denied response, additional fields are included in the solution:
+
+```json
+{
+  "solution": {
+    "url": "https://example.com/",
+    "status": 403,
+    "response": "<html>Access denied...</html>",
+    "rateLimited": true,
+    "suggestedDelayMs": 5000,
+    "errorCode": "ACCESS_DENIED",
+    "errorCategory": "access_denied"
+  }
+}
+```
+
+**Supported Error Codes:**
+
+| Code | Category | Description | Suggested Delay |
+|------|----------|-------------|-----------------|
+| `CF_1015` | rate_limit | Cloudflare rate limit | 60s |
+| `CF_1020` | access_denied | Cloudflare suspicious request | 30s |
+| `CF_1006-1008` | access_denied | Cloudflare access denied | 30s |
+| `CF_1009` | geo_blocked | Cloudflare geo-restriction | N/A |
+| `CF_1010` | access_denied | Browser signature rejected | 30s |
+| `ACCESS_DENIED` | access_denied | Generic access denied | 5s |
+| `RATE_LIMITED` | rate_limit | Generic rate limit | 10s |
+| `TOO_MANY_REQUESTS` | rate_limit | Too many requests | 10s |
+| `HTTP_429` | rate_limit | HTTP 429 status | 60s |
+| `HTTP_503` | rate_limit | Service unavailable | 30s |
+| `CAPTCHA_REQUIRED` | captcha | CAPTCHA challenge | N/A |
+
+#### Response Headers
+
+The following headers are included in responses for domain-level statistics:
+
+| Header | Description |
+|--------|-------------|
+| `X-Domain-Suggested-Delay` | Recommended delay in ms based on domain history |
+| `X-Domain-Error-Rate` | Error rate (0.0-1.0) for this domain |
+| `X-Domain-Request-Count` | Total requests tracked for this domain |
 
 ## Configuration
 
@@ -311,6 +359,45 @@ services:
 
 **No code changes required in your applications.**
 
+### Cookie Format Difference
+
+There is one minor difference in cookie field naming:
+
+| Field | Python FlareSolverr | Go Edition |
+|-------|---------------------|------------|
+| Expiration | `expiry` | `expires` |
+
+Both values are Unix timestamps (seconds since epoch). If your client code explicitly checks for cookie expiration, use this pattern to handle both:
+
+**JavaScript/TypeScript:**
+```javascript
+const expiry = cookie.expiry ?? cookie.expires;
+```
+
+**Python:**
+```python
+expiry = cookie.get('expiry') or cookie.get('expires')
+```
+
+**Go:**
+```go
+expiry := cookie.Expiry
+if expiry == 0 {
+    expiry = cookie.Expires
+}
+```
+
+### Additional Cookie Fields
+
+The Go edition includes extra fields not in Python FlareSolverr:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `size` | int | Cookie size in bytes |
+| `session` | bool | Whether it's a session cookie |
+
+These are optional and can be safely ignored if not needed.
+
 ## Performance Comparison
 
 | Metric | Python FlareSolverr | Go Edition |
@@ -339,6 +426,22 @@ Returns:
     "released": 148,
     "recycled": 5,
     "errors": 2
+  },
+  "domainStats": {
+    "example.com": {
+      "requestCount": 45,
+      "successCount": 42,
+      "errorCount": 3,
+      "rateLimitCount": 2,
+      "avgLatencyMs": 2340,
+      "lastRequestTime": "2025-01-15T10:35:00Z",
+      "lastRateLimited": "2025-01-15T10:30:00Z",
+      "suggestedDelayMs": 5000
+    }
+  },
+  "defaults": {
+    "minDelayMs": 1000,
+    "maxDelayMs": 30000
   }
 }
 ```
@@ -353,6 +456,22 @@ Returns:
 | `released` | Total browsers returned to pool |
 | `recycled` | Browsers recycled due to memory or errors |
 | `errors` | Total browser operation errors |
+
+### Domain Statistics
+
+When requests have been made, the health endpoint includes per-domain statistics:
+
+| Field | Description |
+|-------|-------------|
+| `requestCount` | Total requests to this domain |
+| `successCount` | Successful requests (2xx/3xx, no rate limiting) |
+| `errorCount` | Failed requests |
+| `rateLimitCount` | Requests that were rate limited |
+| `avgLatencyMs` | Average response time |
+| `lastRateLimited` | Timestamp of last rate limit event |
+| `suggestedDelayMs` | Recommended delay between requests |
+
+The `suggestedDelayMs` is calculated using an algorithm inspired by [Scrapy's AutoThrottle](https://docs.scrapy.org/en/latest/topics/autothrottle.html), considering latency, error rates, and recent rate limiting events.
 
 ## Performance Tuning
 

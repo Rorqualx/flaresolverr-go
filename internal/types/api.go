@@ -56,6 +56,12 @@ type Solution struct {
 	UserAgent      string            `json:"userAgent"`
 	Screenshot     string            `json:"screenshot,omitempty"`      // Base64 encoded PNG screenshot
 	TurnstileToken string            `json:"turnstile_token,omitempty"` // cf-turnstile-response token if present
+
+	// Rate limit detection fields (omitted when not applicable)
+	RateLimited      *bool   `json:"rateLimited,omitempty"`      // true if rate limiting detected
+	SuggestedDelayMs *int    `json:"suggestedDelayMs,omitempty"` // recommended delay before retry in ms
+	ErrorCode        *string `json:"errorCode,omitempty"`        // specific error identifier (e.g., CF_1015)
+	ErrorCategory    *string `json:"errorCategory,omitempty"`    // broad category: rate_limit, access_denied, captcha, geo_blocked
 }
 
 // Cookie represents a browser cookie.

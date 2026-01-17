@@ -5,6 +5,18 @@ All notable changes to FlareSolverr Go Edition will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-01-17
+
+### Added
+- **Rate limit detection** - Responses now include `rateLimited`, `suggestedDelayMs`, `errorCode`, and `errorCategory` fields when target sites return rate limiting or access denied responses. Detects Cloudflare errors (1015, 1020, 1006-1010), generic rate limits, and CAPTCHAs.
+- **Per-domain statistics** - Track request counts, success rates, error rates, and latency per domain. Adaptive delay calculation inspired by Scrapy's AutoThrottle algorithm.
+- **Enhanced health endpoint** - `/health` now includes `domainStats` with per-domain metrics and `suggestedDelayMs` for each tracked domain.
+- **Domain statistics headers** - Responses include `X-Domain-Suggested-Delay`, `X-Domain-Error-Rate`, and `X-Domain-Request-Count` headers for quick client access.
+- **Cookie migration docs** - README now documents the `expires` vs `expiry` difference from Python FlareSolverr with code examples for multiple languages.
+
+### Changed
+- Response `solution` object now has optional rate limit fields (backward compatible - only present when rate limiting detected).
+
 ## [0.2.3] - 2025-01-17
 
 ### Fixed

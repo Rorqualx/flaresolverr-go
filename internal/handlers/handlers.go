@@ -4,9 +4,11 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,9 +16,11 @@ import (
 
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/ratelimit"
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
 	"github.com/Rorqualx/flaresolverr-go/internal/session"
 	"github.com/Rorqualx/flaresolverr-go/internal/solver"
+	"github.com/Rorqualx/flaresolverr-go/internal/stats"
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 	"github.com/Rorqualx/flaresolverr-go/pkg/version"
 )
@@ -68,11 +72,12 @@ func sanitizeURLForLogging(rawURL string) string {
 
 // Handler handles all FlareSolverr API requests.
 type Handler struct {
-	pool      *browser.Pool
-	sessions  *session.Manager
-	solver    *solver.Solver
-	config    *config.Config
-	userAgent string
+	pool        *browser.Pool
+	sessions    *session.Manager
+	solver      *solver.Solver
+	config      *config.Config
+	userAgent   string
+	domainStats *stats.Manager
 }
 
 // Fix #11: closeBody closes an io.ReadCloser and logs any error at debug level.
@@ -88,12 +93,18 @@ func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Han
 	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 	return &Handler{
-		pool:      pool,
-		sessions:  sessions,
-		solver:    solver.New(pool, userAgent),
-		config:    cfg,
-		userAgent: userAgent,
+		pool:        pool,
+		sessions:    sessions,
+		solver:      solver.New(pool, userAgent),
+		config:      cfg,
+		userAgent:   userAgent,
+		domainStats: stats.NewManager(),
 	}
+}
+
+// DomainStats returns the domain statistics manager.
+func (h *Handler) DomainStats() *stats.Manager {
+	return h.domainStats
 }
 
 // ServeHTTP handles incoming requests (implements http.Handler).
@@ -235,12 +246,20 @@ type PoolStats struct {
 
 // HealthResponse is the response format for the /health endpoint.
 type HealthResponse struct {
-	Status    string     `json:"status"`
-	Message   string     `json:"message,omitempty"`
-	StartTime int64      `json:"startTimestamp,omitempty"`
-	EndTime   int64      `json:"endTimestamp,omitempty"`
-	Version   string     `json:"version,omitempty"`
-	Pool      *PoolStats `json:"pool,omitempty"`
+	Status      string                           `json:"status"`
+	Message     string                           `json:"message,omitempty"`
+	StartTime   int64                            `json:"startTimestamp,omitempty"`
+	EndTime     int64                            `json:"endTimestamp,omitempty"`
+	Version     string                           `json:"version,omitempty"`
+	Pool        *PoolStats                       `json:"pool,omitempty"`
+	DomainStats map[string]stats.DomainStatsJSON `json:"domainStats,omitempty"`
+	Defaults    *DelayDefaults                   `json:"defaults,omitempty"`
+}
+
+// DelayDefaults contains default delay configuration.
+type DelayDefaults struct {
+	MinDelayMs int `json:"minDelayMs"`
+	MaxDelayMs int `json:"maxDelayMs"`
 }
 
 // handleHealth returns service health information.
@@ -255,14 +274,23 @@ func (h *Handler) handleHealth(w http.ResponseWriter, startTime time.Time) {
 
 	// Include pool stats if pool is available
 	if h.pool != nil {
-		stats := h.pool.Stats()
+		poolStats := h.pool.Stats()
 		resp.Pool = &PoolStats{
 			Size:      h.pool.Size(),
 			Available: h.pool.Available(),
-			Acquired:  stats.Acquired,
-			Released:  stats.Released,
-			Recycled:  stats.Recycled,
-			Errors:    stats.Errors,
+			Acquired:  poolStats.Acquired,
+			Released:  poolStats.Released,
+			Recycled:  poolStats.Recycled,
+			Errors:    poolStats.Errors,
+		}
+	}
+
+	// Include domain stats if any domains have been tracked
+	if h.domainStats != nil && h.domainStats.DomainCount() > 0 {
+		resp.DomainStats = h.domainStats.AllStats()
+		resp.Defaults = &DelayDefaults{
+			MinDelayMs: h.domainStats.DefaultMinDelayMs,
+			MaxDelayMs: h.domainStats.DefaultMaxDelayMs,
 		}
 	}
 
@@ -451,6 +479,15 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 
 	if solveErr != nil {
 		log.Error().Err(solveErr).Str("url", sanitizeURLForLogging(req.URL)).Msg("Solve failed")
+
+		// Check if this is a ChallengeError (access_denied, timeout, etc.)
+		// and include rate limit hints in the response
+		var challengeErr *types.ChallengeError
+		if errors.As(solveErr, &challengeErr) && challengeErr.Type == "access_denied" {
+			h.writeAccessDeniedError(w, req.URL, challengeErr.Message, startTime)
+			return
+		}
+
 		h.writeError(w, solveErr.Error(), startTime)
 		return
 	}
@@ -566,22 +603,117 @@ func (h *Handler) writeSuccess(w http.ResponseWriter, result *solver.Result, coo
 		response = result.HTML
 	}
 
+	solution := &types.Solution{
+		URL:            result.URL,
+		Status:         result.StatusCode,
+		Response:       response,
+		Cookies:        cookies,
+		UserAgent:      result.UserAgent,
+		Screenshot:     result.Screenshot,
+		TurnstileToken: result.TurnstileToken,
+	}
+
+	// Detect rate limiting in the response
+	rateLimitInfo := ratelimit.Detect(result.StatusCode, result.HTML)
+	if rateLimitInfo.Detected {
+		rateLimited := true
+		solution.RateLimited = &rateLimited
+		solution.SuggestedDelayMs = &rateLimitInfo.SuggestedDelay
+		solution.ErrorCode = &rateLimitInfo.ErrorCode
+		category := string(rateLimitInfo.Category)
+		solution.ErrorCategory = &category
+
+		log.Info().
+			Str("error_code", rateLimitInfo.ErrorCode).
+			Str("category", category).
+			Int("suggested_delay_ms", rateLimitInfo.SuggestedDelay).
+			Msg("Rate limiting detected in response")
+	}
+
+	// Extract domain and record stats
+	domain := stats.ExtractDomain(result.URL)
+	if domain != "" && h.domainStats != nil {
+		latencyMs := time.Since(startTime).Milliseconds()
+		success := result.StatusCode >= 200 && result.StatusCode < 400 && !rateLimitInfo.Detected
+		h.domainStats.RecordRequest(domain, latencyMs, success, rateLimitInfo.Detected)
+
+		// Add domain stats headers
+		h.addDomainHeaders(w, domain)
+	}
+
 	resp := types.Response{
 		Status:    types.StatusOK,
 		Message:   "Challenge solved successfully",
 		StartTime: startTime.UnixMilli(),
 		EndTime:   time.Now().UnixMilli(),
 		Version:   version.Full(),
+		Solution:  solution,
+	}
+	h.writeJSONResponse(w, http.StatusOK, resp)
+}
+
+// addDomainHeaders adds X-Domain-* headers to the response.
+func (h *Handler) addDomainHeaders(w http.ResponseWriter, domain string) {
+	if h.domainStats == nil {
+		return
+	}
+
+	suggestedDelay := h.domainStats.SuggestedDelay(domain)
+	w.Header().Set("X-Domain-Suggested-Delay", strconv.Itoa(suggestedDelay))
+
+	errorRate := h.domainStats.ErrorRate(domain)
+	w.Header().Set("X-Domain-Error-Rate", strconv.FormatFloat(errorRate, 'f', 2, 64))
+
+	requestCount := h.domainStats.RequestCount(domain)
+	w.Header().Set("X-Domain-Request-Count", strconv.FormatInt(requestCount, 10))
+}
+
+// writeAccessDeniedError writes an error response with rate limit hints.
+// This provides clients with actionable information about why the request failed
+// and how long to wait before retrying.
+func (h *Handler) writeAccessDeniedError(w http.ResponseWriter, requestURL string, message string, startTime time.Time) {
+	// Extract domain and record stats
+	domain := stats.ExtractDomain(requestURL)
+	if domain != "" && h.domainStats != nil {
+		latencyMs := time.Since(startTime).Milliseconds()
+		h.domainStats.RecordRequest(domain, latencyMs, false, true) // Mark as rate limited
+		h.addDomainHeaders(w, domain)
+	}
+
+	// Build response with rate limit hints
+	rateLimited := true
+	suggestedDelay := 5000 // Default 5 second delay for access denied
+	errorCode := "ACCESS_DENIED"
+	errorCategory := string(ratelimit.CategoryAccessDenied)
+
+	// Adjust suggested delay based on domain history
+	if domain != "" && h.domainStats != nil {
+		suggestedDelay = h.domainStats.SuggestedDelay(domain)
+	}
+
+	resp := types.Response{
+		Status:    types.StatusError,
+		Message:   message,
+		StartTime: startTime.UnixMilli(),
+		EndTime:   time.Now().UnixMilli(),
+		Version:   version.Full(),
 		Solution: &types.Solution{
-			URL:            result.URL,
-			Status:         result.StatusCode,
-			Response:       response,
-			Cookies:        cookies,
-			UserAgent:      result.UserAgent,
-			Screenshot:     result.Screenshot,
-			TurnstileToken: result.TurnstileToken,
+			URL:              requestURL,
+			Status:           403,
+			RateLimited:      &rateLimited,
+			SuggestedDelayMs: &suggestedDelay,
+			ErrorCode:        &errorCode,
+			ErrorCategory:    &errorCategory,
 		},
 	}
+
+	log.Info().
+		Str("error_code", errorCode).
+		Str("category", errorCategory).
+		Int("suggested_delay_ms", suggestedDelay).
+		Str("domain", domain).
+		Msg("Access denied - rate limit hints included in response")
+
 	h.writeJSONResponse(w, http.StatusOK, resp)
 }
 
