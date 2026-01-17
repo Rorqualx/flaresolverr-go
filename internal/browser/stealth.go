@@ -22,7 +22,9 @@ func ApplyStealthToPage(page *rod.Page) error {
 	// Use MustEval wrapped in recover to prevent crashes
 	_, err := page.Evaluate(rod.Eval(stealthScript))
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to apply stealth script")
+		// Log at debug level - stealth failures don't block functionality
+		// Common on about:blank pages where some APIs don't exist yet
+		log.Debug().Err(err).Msg("Stealth script had non-fatal errors")
 		// Don't return error - stealth is best-effort
 		return nil
 	}
@@ -35,6 +37,14 @@ func ApplyStealthToPage(page *rod.Page) error {
 const stealthScript = `
 (() => {
     'use strict';
+
+    // Global flag to prevent re-applying stealth on session page reuse
+    // This survives across navigations within the same page context
+    if (window.__stealthApplied) {
+        console.debug('[Stealth] Already applied, skipping');
+        return;
+    }
+    window.__stealthApplied = true;
 
     // Wrap everything in try-catch to prevent any single failure from breaking the script
     try {
@@ -195,32 +205,49 @@ const stealthScript = `
     // ========================================
     // Some detection scripts check if functions have been modified
     // by calling toString() on them
-    const originalFunctionToString = Function.prototype.toString;
+    try {
+        // Check if already patched to avoid breaking on session reuse
+        if (!Function.prototype.toString._stealth) {
+            const originalFunctionToString = Function.prototype.toString;
 
-    const customFunctionToString = function() {
-        try {
-            if (window.navigator && window.navigator.permissions && this === window.navigator.permissions.query) {
-                return 'function query() { [native code] }';
+            // Verify the original has .call method
+            if (typeof originalFunctionToString !== 'function' || typeof originalFunctionToString.call !== 'function') {
+                throw new Error('toString not patchable');
             }
-            if (window.chrome && window.chrome.runtime) {
-                if (this === window.chrome.runtime.connect) {
-                    return 'function connect() { [native code] }';
+
+            const customFunctionToString = function() {
+                try {
+                    if (window.navigator && window.navigator.permissions && this === window.navigator.permissions.query) {
+                        return 'function query() { [native code] }';
+                    }
+                    if (window.chrome && window.chrome.runtime) {
+                        if (this === window.chrome.runtime.connect) {
+                            return 'function connect() { [native code] }';
+                        }
+                        if (this === window.chrome.runtime.sendMessage) {
+                            return 'function sendMessage() { [native code] }';
+                        }
+                    }
+                } catch (e) {
+                    // Ignore errors during comparison
                 }
-                if (this === window.chrome.runtime.sendMessage) {
-                    return 'function sendMessage() { [native code] }';
+                // Extra safety check before calling
+                if (typeof originalFunctionToString === 'function' && typeof originalFunctionToString.call === 'function') {
+                    return originalFunctionToString.call(this);
                 }
-            }
-        } catch (e) {
-            // Ignore errors during comparison
+                return '[native code]';
+            };
+            customFunctionToString._stealth = true;
+
+            Object.defineProperty(Function.prototype, 'toString', {
+                value: customFunctionToString,
+                writable: true,
+                configurable: true
+            });
         }
-        return originalFunctionToString.call(this);
-    };
-
-    Object.defineProperty(Function.prototype, 'toString', {
-        value: customFunctionToString,
-        writable: true,
-        configurable: true
-    });
+    } catch (e) {
+        // toString patching failed, continue anyway
+    }
 
     // ========================================
     // 10. WebGL vendor/renderer
@@ -242,6 +269,9 @@ const stealthScript = `
                 // Check if already wrapped
                 if (originalGetParameter._stealth) return;
 
+                // Verify the original function has .call method (paranoid check)
+                if (typeof originalGetParameter.call !== 'function') return;
+
                 // Create wrapper function
                 ctx.prototype.getParameter = function(param) {
                     try {
@@ -251,7 +281,11 @@ const stealthScript = `
                         if (param === UNMASKED_RENDERER_WEBGL) {
                             return 'Intel Iris OpenGL Engine';
                         }
-                        return originalGetParameter.call(this, param);
+                        // Extra safety: check originalGetParameter is still valid
+                        if (typeof originalGetParameter === 'function' && typeof originalGetParameter.call === 'function') {
+                            return originalGetParameter.call(this, param);
+                        }
+                        return null;
                     } catch (e) {
                         return null;
                     }

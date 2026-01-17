@@ -909,9 +909,16 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve with existing page")
 
-	// Apply stealth patches
-	if err := browser.ApplyStealthToPage(page); err != nil {
-		log.Warn().Err(err).Msg("Failed to apply stealth patches")
+	// Apply stealth patches only to fresh/blank pages
+	// On session reuse, the page already has content and stealth was already applied
+	// Trying to re-apply stealth to a loaded page causes errors due to stale JS context
+	pageInfo, _ := page.Info()
+	if pageInfo == nil || pageInfo.URL == "" || pageInfo.URL == "about:blank" {
+		if err := browser.ApplyStealthToPage(page); err != nil {
+			log.Warn().Err(err).Msg("Failed to apply stealth patches")
+		}
+	} else {
+		log.Debug().Str("url", pageInfo.URL).Msg("Skipping stealth on reused session page")
 	}
 
 	// Set up media blocking if requested
