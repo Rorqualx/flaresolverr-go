@@ -39,6 +39,7 @@ type Result struct {
 	Success        bool
 	StatusCode     int
 	HTML           string
+	HTMLTruncated  bool // Fix #15: Flag indicating HTML was truncated due to size limit
 	Cookies        []*proto.NetworkCookie
 	UserAgent      string
 	URL            string
@@ -84,6 +85,26 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// Fix #13: setupProxyAuth sets up proxy authentication for a page if needed.
+// Returns a cleanup function that should be deferred. The cleanup function is
+// safe to call even if it's nil (will be a no-op).
+func setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) func() {
+	if proxy == nil || proxy.URL == "" {
+		return func() {}
+	}
+
+	cleanup, err := browser.SetPageProxy(ctx, page, &browser.ProxyConfig{
+		URL:      proxy.URL,
+		Username: proxy.Username,
+		Password: proxy.Password,
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to set up proxy")
+		return func() {}
+	}
+	return cleanup
+}
+
 // setupMediaBlocking enables request interception to block media resources.
 // This reduces bandwidth and speeds up page loads by blocking images, stylesheets, fonts, and media.
 // Returns a cleanup function that should be deferred.
@@ -113,13 +134,20 @@ func setupMediaBlocking(page *rod.Page) func() {
 
 // Solve navigates to a URL and attempts to solve any Cloudflare challenges.
 // It returns the page content after challenge resolution.
+//
+// Fix #12: Timeout validation notes:
+// - Zero or negative timeout is rejected with an error (prevents infinite waits)
+// - Timeouts under 1 second are adjusted to 1 second with a warning (prevents
+//   unrealistic timeouts that would fail before the browser could even navigate)
+// - The timeout should be set appropriately at the handler layer based on config
+//   (DefaultTimeout/MaxTimeout); this validation is a safety net
 func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error) {
-	// Validate timeout (Bug 9: zero timeout validation)
+	// Validate timeout: reject invalid values
 	if opts.Timeout <= 0 {
 		return nil, fmt.Errorf("timeout must be positive, got %v", opts.Timeout)
 	}
 
-	// Ensure minimum timeout of 1 second
+	// Ensure minimum timeout of 1 second for realistic operation
 	timeout := opts.Timeout
 	if timeout < time.Second {
 		log.Warn().Dur("requested", timeout).Msg("Timeout too short, using 1 second minimum")
@@ -179,23 +207,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 			log.Debug().Msg("Media blocking enabled")
 		}
 
-		// Set up proxy authentication if needed
-		// Bug 1: Capture cleanup function to prevent goroutine leaks
-		var proxyCleanup func()
-		if opts.Proxy != nil && opts.Proxy.URL != "" {
-			var proxyErr error
-			proxyCleanup, proxyErr = browser.SetPageProxy(solveCtx, page, &browser.ProxyConfig{
-				URL:      opts.Proxy.URL,
-				Username: opts.Proxy.Username,
-				Password: opts.Proxy.Password,
-			})
-			if proxyErr != nil {
-				log.Warn().Err(proxyErr).Msg("Failed to set up proxy")
-			}
-		}
-		if proxyCleanup != nil {
-			defer proxyCleanup()
-		}
+		// Fix #13: Use helper for proxy setup to reduce duplication
+		proxyCleanup := setupProxyAuth(solveCtx, page, opts.Proxy)
+		defer proxyCleanup()
 
 		// Set cookies before navigation
 		if len(opts.Cookies) > 0 {
@@ -232,23 +246,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 			log.Debug().Msg("Media blocking enabled")
 		}
 
-		// Set up proxy authentication if needed
-		// Bug 1: Capture cleanup function to prevent goroutine leaks
-		var proxyCleanup func()
-		if opts.Proxy != nil && opts.Proxy.URL != "" {
-			var proxyErr error
-			proxyCleanup, proxyErr = browser.SetPageProxy(solveCtx, page, &browser.ProxyConfig{
-				URL:      opts.Proxy.URL,
-				Username: opts.Proxy.Username,
-				Password: opts.Proxy.Password,
-			})
-			if proxyErr != nil {
-				log.Warn().Err(proxyErr).Msg("Failed to set up proxy")
-			}
-		}
-		if proxyCleanup != nil {
-			defer proxyCleanup()
-		}
+		// Fix #13: Use helper for proxy setup to reduce duplication
+		proxyCleanup := setupProxyAuth(solveCtx, page, opts.Proxy)
+		defer proxyCleanup()
 
 		// Set cookies before navigation
 		if len(opts.Cookies) > 0 {
@@ -258,8 +258,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 		}
 
 		// Regular GET request
+		// Fix #7: Wrap navigation error with context for better debugging
 		if err := page.Context(solveCtx).Navigate(opts.URL); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to navigate to %s: %w", opts.URL, err)
 		}
 	}
 
@@ -361,26 +362,29 @@ func (s *Solver) navigatePost(page *rod.Page, targetURL string, postData string)
 	// Build form fields JavaScript
 	fieldsJS := s.buildFormFieldsJS(postData)
 
-	// Escape the URL for JavaScript
-	escapedURL := strings.ReplaceAll(targetURL, "\\", "\\\\")
-	escapedURL = strings.ReplaceAll(escapedURL, "'", "\\'")
-	escapedURL = strings.ReplaceAll(escapedURL, "\n", "\\n")
-	escapedURL = strings.ReplaceAll(escapedURL, "\r", "\\r")
+	// Fix #14: Use JSON.Marshal for proper URL escaping instead of manual escaping.
+	// This safely handles all special characters including quotes, backslashes,
+	// newlines, unicode, and potential injection attempts.
+	targetURLJSON, err := json.Marshal(targetURL)
+	if err != nil {
+		return fmt.Errorf("failed to encode target URL: %w", err)
+	}
 
 	// Use Runtime.evaluate directly via CDP to avoid Rod's wrapper
+	// The URL is now a JSON string which includes quotes, so use it directly
 	evalResult, err := proto.RuntimeEvaluate{
 		Expression: fmt.Sprintf(`
 			(function() {
 				var form = document.createElement('form');
 				form.method = 'POST';
-				form.action = '%s';
+				form.action = %s;
 				form.style.display = 'none';
 				%s
 				document.body.appendChild(form);
 				form.submit();
 				return 'submitted';
 			})()
-		`, escapedURL, fieldsJS),
+		`, targetURLJSON, fieldsJS),
 		ReturnByValue: true,
 	}.Call(page)
 
@@ -770,6 +774,9 @@ func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool)
 // buildResultWithHTML constructs the result using pre-fetched HTML.
 // This avoids redundant HTML fetching when HTML is already available.
 func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, captureScreenshot bool) (*Result, error) {
+	// Fix #15: Track if HTML was truncated
+	htmlTruncated := false
+
 	// Limit response size to prevent memory exhaustion
 	if len(html) > maxResponseSize {
 		log.Warn().
@@ -777,6 +784,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 			Int("max", maxResponseSize).
 			Msg("Response truncated due to size limit")
 		html = html[:maxResponseSize]
+		htmlTruncated = true
 	}
 
 	cookies, err := page.Cookies(nil)
@@ -814,6 +822,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		Str("url", currentURL).
 		Int("cookies_count", len(cookies)).
 		Int("html_length", len(html)).
+		Bool("html_truncated", htmlTruncated).
 		Bool("has_turnstile_token", turnstileToken != "").
 		Bool("has_screenshot", screenshotBase64 != "").
 		Msg("Solve completed successfully")
@@ -822,6 +831,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		Success:        true,
 		StatusCode:     200, // Assume success if we got here
 		HTML:           html,
+		HTMLTruncated:  htmlTruncated, // Fix #15: Include truncation flag
 		Cookies:        cookies,
 		UserAgent:      s.userAgent,
 		URL:            currentURL,

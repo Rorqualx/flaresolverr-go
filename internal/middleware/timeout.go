@@ -41,6 +41,14 @@ func (tw *timeoutWriter) WriteHeader(code int) {
 }
 
 // Header implements http.ResponseWriter.
+// Fix #9: Note on thread safety: http.Header is a map[string][]string.
+// The underlying ResponseWriter.Header() returns a reference that is
+// typically accessed only before WriteHeader is called. Since handlers
+// set headers before writing the response, and our mutex protects
+// Write/WriteHeader, concurrent header access from the handler goroutine
+// and timeout goroutine is avoided in practice. The timeout path only
+// writes headers after marking timedOut, at which point the handler's
+// writes are discarded.
 func (tw *timeoutWriter) Header() http.Header {
 	return tw.ResponseWriter.Header()
 }
@@ -62,6 +70,23 @@ func (tw *timeoutWriter) hasWrittenHeader() bool {
 // Timeout returns middleware that adds a timeout to the request context.
 // When timeout occurs before handler completes, a 504 Gateway Timeout is sent.
 // The handler goroutine continues but its writes are safely discarded.
+//
+// Fix #10: Important behavior note on orphaned handlers:
+// When a timeout occurs, the handler goroutine is NOT cancelled or killed.
+// It continues running until completion, but its writes are silently discarded.
+// Handlers should check ctx.Done() for cooperative cancellation to avoid
+// wasting resources on work that won't be delivered to the client.
+// Example:
+//
+//	select {
+//	case <-ctx.Done():
+//	    return // Request timed out, stop processing
+//	default:
+//	    // Continue work
+//	}
+//
+// The context passed to the handler has the timeout deadline set, so handlers
+// using ctx.Done() or ctx.Err() will be notified when the deadline is reached.
 func Timeout(timeout time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
