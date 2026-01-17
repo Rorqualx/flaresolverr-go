@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// maxClients is the maximum number of tracked clients to prevent memory exhaustion.
+// At approximately 100 bytes per client, 10000 clients = ~1MB memory.
+const maxClients = 10000
+
 // RateLimiter implements a token bucket rate limiter per IP.
 type RateLimiter struct {
 	mu         sync.Mutex
@@ -17,6 +21,7 @@ type RateLimiter struct {
 	cleanup    time.Duration // cleanup interval for stale entries
 	trustProxy bool          // whether to trust X-Forwarded-For headers
 	stopCh     chan struct{}
+	wg         sync.WaitGroup // Track background goroutines for clean shutdown
 }
 
 type client struct {
@@ -38,7 +43,12 @@ func NewRateLimiter(rate int, window time.Duration, trustProxy bool) *RateLimite
 		stopCh:     make(chan struct{}),
 	}
 
-	go rl.cleanupRoutine()
+	// Start cleanup routine with WaitGroup tracking for clean shutdown
+	rl.wg.Add(1)
+	go func() {
+		defer rl.wg.Done()
+		rl.cleanupRoutine()
+	}()
 
 	return rl
 }
@@ -52,6 +62,12 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	c, exists := rl.clients[ip]
 
 	if !exists {
+		// Check if we've reached max clients
+		if len(rl.clients) >= maxClients {
+			// Evict oldest client to make room
+			rl.evictOldest()
+		}
+
 		rl.clients[ip] = &client{
 			tokens:    rl.rate - 1,
 			lastReset: now,
@@ -104,9 +120,28 @@ func (rl *RateLimiter) cleanupStale() {
 	}
 }
 
-// Close stops the cleanup routine.
+// evictOldest removes the oldest client entry to make room for new ones.
+// Must be called while holding rl.mu.
+func (rl *RateLimiter) evictOldest() {
+	var oldestIP string
+	var oldestTime time.Time
+
+	for ip, c := range rl.clients {
+		if oldestIP == "" || c.lastReset.Before(oldestTime) {
+			oldestIP = ip
+			oldestTime = c.lastReset
+		}
+	}
+
+	if oldestIP != "" {
+		delete(rl.clients, oldestIP)
+	}
+}
+
+// Close stops the cleanup routine and waits for it to finish.
 func (rl *RateLimiter) Close() {
 	close(rl.stopCh)
+	rl.wg.Wait()
 }
 
 // GetClientIP extracts the client IP from the request.
@@ -116,6 +151,22 @@ func (rl *RateLimiter) GetClientIP(r *http.Request) string {
 
 // RateLimit returns middleware that limits requests per IP.
 // trustProxy: set to true only if running behind a trusted reverse proxy
+//
+// Fix #16: IMPORTANT - Singleton usage note:
+// This function creates a new RateLimiter instance each time it's called.
+// For proper rate limiting, call this function ONCE during server initialization
+// and reuse the returned middleware for all routes. Creating multiple instances
+// would result in separate rate limit counters, effectively disabling rate limiting.
+//
+// Example (correct):
+//
+//	rateLimitMiddleware := middleware.RateLimit(60) // Create once
+//	mux.Use(rateLimitMiddleware) // Reuse for all routes
+//
+// Example (incorrect - creates separate counters):
+//
+//	mux.Handle("/api", middleware.RateLimit(60)(apiHandler))
+//	mux.Handle("/health", middleware.RateLimit(60)(healthHandler)) // Separate counter!
 func RateLimit(requestsPerMinute int) func(http.Handler) http.Handler {
 	return RateLimitWithTrust(requestsPerMinute, false)
 }
@@ -124,6 +175,8 @@ func RateLimit(requestsPerMinute int) func(http.Handler) http.Handler {
 // trustProxy: set to true only if running behind a trusted reverse proxy (nginx, cloudflare, etc.)
 // WARNING: Enabling trustProxy when not behind a proxy allows attackers to bypass rate limiting
 // by spoofing X-Forwarded-For headers.
+//
+// Fix #16: See RateLimit() for singleton usage notes - call ONCE and reuse.
 func RateLimitWithTrust(requestsPerMinute int, trustProxy bool) func(http.Handler) http.Handler {
 	limiter := NewRateLimiter(requestsPerMinute, time.Minute, trustProxy)
 

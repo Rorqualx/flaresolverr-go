@@ -2,6 +2,8 @@ package browser
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
@@ -288,8 +290,9 @@ const stealthScript = `
 //   - blockFonts: Block font resources (woff, ttf, etc.)
 //   - blockMedia: Block video and audio resources
 //
-// Bug 1: Returns a cleanup function that must be called when the page is closed
-// to prevent goroutine leaks from EachEvent listeners.
+// Returns a cleanup function that MUST be called when the page is closed
+// to prevent goroutine leaks from EachEvent listeners. The cleanup function
+// is safe to call multiple times.
 func BlockResources(ctx context.Context, page *rod.Page, blockImages, blockCSS, blockFonts, blockMedia bool) (cleanup func(), err error) {
 	log.Debug().
 		Bool("images", blockImages).
@@ -308,19 +311,55 @@ func BlockResources(ctx context.Context, page *rod.Page, blockImages, blockCSS, 
 		return func() {}, err
 	}
 
-	// Bug 1: Create cancellable context for event listeners
+	// Create cancellable context for event listeners
+	// This context is cancelled when cleanup is called OR when parent context is done
 	listenerCtx, cancel := context.WithCancel(ctx)
 	pageWithCtx := page.Context(listenerCtx)
 
-	// Handle intercepted requests using Rod's EachEvent
+	// Fix #3: Add WaitGroup to track EachEvent goroutines to prevent leaks
+	var wg sync.WaitGroup
+
+	// Track cleanup state to prevent double-cancel
+	var cleanupOnce sync.Once
+	cleanupFunc := func() {
+		cleanupOnce.Do(func() {
+			cancel()
+			// Wait for goroutines to finish with timeout
+			done := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+				log.Debug().Msg("Resource blocking listeners cleaned up")
+			case <-time.After(5 * time.Second):
+				log.Warn().Msg("Timeout waiting for resource blocking listeners to cleanup")
+			}
+		})
+	}
+
+	// Monitor for page close to auto-cleanup goroutines
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		pageWithCtx.EachEvent(func(e *proto.TargetTargetDestroyed) bool {
+			cleanupFunc()
+			return true // Stop listening
+		})()
+	}()
+
+	// Handle intercepted requests using Rod's EachEvent
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		pageWithCtx.EachEvent(func(e *proto.FetchRequestPaused) bool {
 			select {
 			case <-listenerCtx.Done():
 				return true // Stop listening
 			default:
 			}
-			// Fail blocked requests
+			// Ignore error: request may have been cancelled or page closed
 			_ = proto.FetchFailRequest{
 				RequestID:   e.RequestID,
 				ErrorReason: proto.NetworkErrorReasonBlockedByClient,
@@ -329,7 +368,7 @@ func BlockResources(ctx context.Context, page *rod.Page, blockImages, blockCSS, 
 		})()
 	}()
 
-	return cancel, nil
+	return cleanupFunc, nil
 }
 
 // buildBlockPatterns creates the list of URL patterns to block.

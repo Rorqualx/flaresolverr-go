@@ -40,6 +40,9 @@ type Pool struct {
 	// Stop channel for graceful shutdown of background goroutines
 	stopCh chan struct{}
 
+	// WaitGroup to track background goroutines for clean shutdown
+	wg sync.WaitGroup
+
 	// Bug 4: Atomic counter for race-free Available() reads
 	availableCount atomic.Int32
 
@@ -108,9 +111,16 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 	// Bug 4: Initialize atomic counter with pool size
 	pool.availableCount.Store(int32(cfg.BrowserPoolSize))
 
-	// Start background routines
-	go pool.monitorMemory()
-	go pool.healthCheckRoutine()
+	// Start background routines with WaitGroup tracking for clean shutdown
+	pool.wg.Add(2)
+	go func() {
+		defer pool.wg.Done()
+		pool.monitorMemory()
+	}()
+	go func() {
+		defer pool.wg.Done()
+		pool.healthCheckRoutine()
+	}()
 
 	log.Info().
 		Int("pool_size", cfg.BrowserPoolSize).
@@ -235,15 +245,24 @@ func (p *Pool) Acquire(ctx context.Context) (*rod.Browser, error) {
 
 	for retry := 0; retry < maxRetries; retry++ {
 		log.Debug().
-			Int("available", len(p.available)).
+			Int32("available", p.availableCount.Load()). // Fix #7: Use atomic counter instead of len() to avoid race
 			Int("retry", retry).
 			Msg("Acquiring browser from pool")
 
 		select {
-		case browser := <-p.available:
+		case browser, ok := <-p.available:
+			// Fix #3: Handle closed channel - ok is false when channel is closed
+			if !ok || p.closed.Load() {
+				// Channel was closed or pool is closing
+				if browser != nil {
+					_ = browser.Close() // Clean up any browser we received
+				}
+				return nil, types.ErrBrowserPoolClosed
+			}
+
 			// Got a browser from the pool
 			p.stats.Acquired.Add(1)
-			p.availableCount.Add(-1) // Bug 4: Decrement atomic counter
+			p.availableCount.Add(-1)
 
 			// Verify browser is healthy before returning
 			if !p.isHealthy(browser) {
@@ -292,9 +311,13 @@ func (p *Pool) Release(browser *rod.Browser) {
 		return
 	}
 
+	// First check - avoid work if already closed
 	if p.closed.Load() {
 		// Pool is closed, just close the browser
-		_ = browser.Close()
+		// Fix #6: Log browser close errors instead of silently ignoring
+		if err := browser.Close(); err != nil {
+			log.Warn().Err(err).Msg("Error closing browser during release (pool closed)")
+		}
 		return
 	}
 
@@ -307,27 +330,49 @@ func (p *Pool) Release(browser *rod.Browser) {
 		log.Warn().Err(err).Msg("Failed to get pages for cleanup")
 	} else {
 		for _, page := range pages {
-			// Navigate to blank to clear page state
-			_ = page.Navigate("about:blank")
-			_ = page.Close()
+			// Fix #6: Log page cleanup errors instead of silently ignoring
+			if err := page.Navigate("about:blank"); err != nil {
+				log.Debug().Err(err).Msg("Failed to navigate page to blank during cleanup")
+			}
+			if err := page.Close(); err != nil {
+				log.Debug().Err(err).Msg("Failed to close page during cleanup")
+			}
 		}
 	}
 
-	// Return browser to pool
+	// Fix #1: Use mutex with defer to prevent deadlock if panic occurs.
+	// The double-check pattern: check closed flag while holding lock before channel send.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed.Load() {
+		// Fix #6: Log browser close errors
+		if err := browser.Close(); err != nil {
+			log.Warn().Err(err).Msg("Error closing browser during release (pool closed during cleanup)")
+		}
+		return
+	}
+
+	// Safe to send - we hold the lock and confirmed not closed
+	// Channel operations are non-blocking (select with default) so holding mutex is safe
 	select {
 	case p.available <- browser:
-		p.availableCount.Add(1) // Bug 4: Increment atomic counter
+		p.availableCount.Add(1)
 		log.Debug().
 			Int64("total_released", p.stats.Released.Load()).
 			Msg("Browser released to pool")
 	default:
 		// Pool is full (shouldn't happen with correct usage)
 		log.Warn().Msg("Pool is full, closing excess browser")
-		_ = browser.Close()
+		// Fix #6: Log browser close errors
+		if err := browser.Close(); err != nil {
+			log.Warn().Err(err).Msg("Error closing excess browser")
+		}
 	}
 }
 
 // isHealthy checks if a browser is responsive and usable.
+// Fix #5: Uses context properly with Rod operations for proper timeout propagation.
 func (p *Pool) isHealthy(browser *rod.Browser) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -338,29 +383,22 @@ func (p *Pool) isHealthy(browser *rod.Browser) bool {
 		log.Debug().Err(err).Msg("Browser health check failed: cannot create page")
 		return false
 	}
+	defer page.Close()
 
-	// Try to navigate to about:blank with context
-	err = page.Timeout(5 * time.Second).Navigate("about:blank")
+	// Fix #5: Use page.Context(ctx) to pass timeout context to Rod operations
+	// This ensures the navigate operation respects the context deadline
+	err = page.Context(ctx).Navigate("about:blank")
 	if err != nil {
 		log.Debug().Err(err).Msg("Browser health check failed: cannot navigate")
-		_ = page.Close()
 		return false
 	}
 
-	// Check context wasn't canceled
-	select {
-	case <-ctx.Done():
-		_ = page.Close()
-		return false
-	default:
-	}
-
-	_ = page.Close()
 	return true
 }
 
 // recycleBrowser replaces an unhealthy browser with a new one.
 // Uses timeouts to prevent deadlocks during browser close/spawn operations.
+// Fix #4: Added shutdown awareness to abandon recycle during pool shutdown.
 func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 	p.stats.Recycled.Add(1)
 
@@ -370,6 +408,7 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 
 	// Close old browser OUTSIDE lock with timeout
 	closeDone := make(chan struct{})
+	closeStarted := time.Now()
 	go func() {
 		defer close(closeDone)
 		if err := oldBrowser.Close(); err != nil {
@@ -377,11 +416,24 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 		}
 	}()
 
+	// Fix #4: Add shutdown awareness to close timeout
 	select {
 	case <-closeDone:
-		// Closed successfully
+		log.Debug().
+			Dur("duration", time.Since(closeStarted)).
+			Msg("Old browser closed during recycle")
+	case <-p.stopCh:
+		// Pool is shutting down, abandon this recycle
+		log.Warn().
+			Dur("elapsed", time.Since(closeStarted)).
+			Msg("Browser close abandoned during pool shutdown")
+		return
 	case <-time.After(10 * time.Second):
-		log.Warn().Msg("Browser close timed out during recycle")
+		log.Warn().
+			Dur("elapsed", time.Since(closeStarted)).
+			Msg("Browser close timed out during recycle - goroutine leaked")
+		p.stats.Errors.Add(1)
+		// Note: The goroutine continues running but we proceed anyway
 	}
 
 	// Spawn new browser OUTSIDE lock with timeout
@@ -394,12 +446,16 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 		newBrowser, spawnErr = p.spawnBrowser()
 	}()
 
+	// Fix #4: Add shutdown awareness to spawn timeout
 	select {
 	case <-spawnDone:
 		// Spawn completed
+	case <-p.stopCh:
+		log.Warn().Msg("Browser spawn abandoned during pool shutdown")
+		p.removeBrowserEntry(oldBrowser)
+		return
 	case <-time.After(30 * time.Second):
 		log.Error().Msg("Browser spawn timed out during recycle")
-		// Bug 5: Use helper function with defer for safe unlock
 		p.removeBrowserEntry(oldBrowser)
 		return
 	}
@@ -418,12 +474,22 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 	}
 	p.updateBrowserEntry(oldBrowser, newEntry)
 
-	// Add new browser to pool
+	// Fix #4: Add new browser to pool with closed check to prevent "send on closed channel" panic.
+	// Must hold lock while checking closed flag and sending to channel.
+	p.mu.Lock()
+	if p.closed.Load() {
+		p.mu.Unlock()
+		log.Warn().Msg("Pool closed during browser recycle, closing new browser")
+		_ = newBrowser.Close()
+		return
+	}
 	select {
 	case p.available <- newBrowser:
-		p.availableCount.Add(1) // Bug 4: Increment atomic counter
+		p.availableCount.Add(1)
+		p.mu.Unlock()
 		log.Info().Msg("Replacement browser added to pool")
 	default:
+		p.mu.Unlock()
 		log.Warn().Msg("Could not add replacement browser to pool")
 		_ = newBrowser.Close()
 	}
@@ -577,6 +643,9 @@ func (p *Pool) Close() error {
 	// Signal background goroutines to stop immediately
 	close(p.stopCh)
 
+	// Wait for background goroutines to finish
+	p.wg.Wait()
+
 	p.mu.Lock()
 	browsers := make([]*browserEntry, len(p.browsers))
 	copy(browsers, p.browsers)
@@ -602,8 +671,13 @@ func (p *Pool) Close() error {
 	// Wait for all browsers to close
 	closeErr := eg.Wait()
 
-	// Drain and close the available channel
+	// Fix #1: Acquire lock before closing channel to synchronize with Release()
+	// This ensures no Release() is in the middle of a channel send when we close
+	p.mu.Lock()
 	close(p.available)
+	p.mu.Unlock()
+
+	// Drain any remaining items from channel (safe after close)
 	for range p.available {
 		// Drain remaining browsers
 	}

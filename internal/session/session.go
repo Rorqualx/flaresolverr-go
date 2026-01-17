@@ -4,6 +4,7 @@ package session
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -23,8 +24,8 @@ type Session struct {
 	Browser   *rod.Browser
 	Page      *rod.Page
 	CreatedAt time.Time
-	LastUsed  time.Time
-	mu        sync.Mutex
+	lastUsed  atomic.Int64 // Unix nano timestamp for lock-free access
+	mu        sync.Mutex   // Only used for page operations (GetCookies/SetCookies)
 }
 
 // Manager handles session lifecycle and cleanup.
@@ -35,6 +36,7 @@ type Manager struct {
 	config   *config.Config
 	pool     *browser.Pool // Pool reference for returning browsers on cleanup
 	stopCh   chan struct{}
+	wg       sync.WaitGroup // Track background goroutines for clean shutdown
 }
 
 // NewManager creates a new session manager.
@@ -48,7 +50,12 @@ func NewManager(cfg *config.Config, pool *browser.Pool) *Manager {
 		stopCh:   make(chan struct{}),
 	}
 
-	go m.cleanupRoutine()
+	// Start cleanup routine with WaitGroup tracking for clean shutdown
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.cleanupRoutine()
+	}()
 
 	log.Info().
 		Dur("ttl", cfg.SessionTTL).
@@ -94,13 +101,14 @@ func (m *Manager) Create(id string, brow *rod.Browser) (*Session, error) {
 		return nil, err
 	}
 
+	now := time.Now()
 	session := &Session{
 		ID:        id,
 		Browser:   brow,
 		Page:      page,
-		CreatedAt: time.Now(),
-		LastUsed:  time.Now(),
+		CreatedAt: now,
 	}
+	session.lastUsed.Store(now.UnixNano())
 
 	m.sessions[id] = session
 
@@ -114,21 +122,18 @@ func (m *Manager) Create(id string, brow *rod.Browser) (*Session, error) {
 
 // Get retrieves a session by ID.
 // Returns ErrSessionNotFound if the session doesn't exist.
-// Updates the LastUsed timestamp on access.
+// Updates the LastUsed timestamp on access using atomic operation.
 func (m *Manager) Get(id string) (*Session, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	session, exists := m.sessions[id]
+	m.mu.RUnlock()
+
 	if !exists {
 		return nil, types.ErrSessionNotFound
 	}
 
-	// Update last used time - safe while holding manager's read lock
-	// because cleanup holds write lock
-	session.mu.Lock()
-	session.LastUsed = time.Now()
-	session.mu.Unlock()
+	// Update last used time atomically - no lock needed
+	session.Touch()
 
 	return session, nil
 }
@@ -148,8 +153,11 @@ func (m *Manager) Destroy(id string) error {
 	}
 
 	// Close the page
+	// Fix #5: Log page close errors instead of silently ignoring
 	if session.Page != nil {
-		_ = session.Page.Close()
+		if err := session.Page.Close(); err != nil {
+			log.Debug().Err(err).Str("session_id", id).Msg("Error closing session page during destroy")
+		}
 	}
 
 	// CRITICAL: Return browser to pool
@@ -209,9 +217,8 @@ func (m *Manager) cleanupExpired() {
 	m.mu.Lock()
 	var expiredSessions []*Session
 	for id, session := range m.sessions {
-		session.mu.Lock()
-		lastUsed := session.LastUsed
-		session.mu.Unlock()
+		// Use atomic LastUsedTime - no nested lock needed
+		lastUsed := session.LastUsedTime()
 
 		if now.Sub(lastUsed) > m.config.SessionTTL {
 			expiredSessions = append(expiredSessions, session)
@@ -232,8 +239,11 @@ func (m *Manager) cleanupExpired() {
 	for _, session := range expiredSessions {
 		sess := session // Capture for closure
 		eg.Go(func() error {
+			// Fix #5: Log page close errors instead of silently ignoring
 			if sess.Page != nil {
-				_ = sess.Page.Close()
+				if err := sess.Page.Close(); err != nil {
+					log.Debug().Err(err).Str("session_id", sess.ID).Msg("Error closing expired session page")
+				}
 			}
 
 			// CRITICAL: Return browser to pool
@@ -249,7 +259,9 @@ func (m *Manager) cleanupExpired() {
 		})
 	}
 
-	_ = eg.Wait()
+	if err := eg.Wait(); err != nil {
+		log.Error().Err(err).Msg("Session cleanup encountered errors")
+	}
 
 	log.Debug().
 		Int("expired_count", len(expiredSessions)).
@@ -262,6 +274,9 @@ func (m *Manager) cleanupExpired() {
 // Uses errgroup for parallel session cleanup to speed up shutdown.
 func (m *Manager) Close() error {
 	close(m.stopCh)
+
+	// Wait for cleanup goroutine to finish
+	m.wg.Wait()
 
 	// Collect sessions under lock
 	m.mu.Lock()
@@ -284,8 +299,11 @@ func (m *Manager) Close() error {
 	for _, session := range sessions {
 		sess := session // Capture for closure
 		eg.Go(func() error {
+			// Fix #5: Log page close errors instead of silently ignoring
 			if sess.Page != nil {
-				_ = sess.Page.Close()
+				if err := sess.Page.Close(); err != nil {
+					log.Debug().Err(err).Str("session_id", sess.ID).Msg("Error closing session page during shutdown")
+				}
 			}
 			// CRITICAL: Return browser to pool
 			if sess.Browser != nil && m.pool != nil {
@@ -296,18 +314,23 @@ func (m *Manager) Close() error {
 		})
 	}
 
-	_ = eg.Wait()
+	if err := eg.Wait(); err != nil {
+		log.Error().Err(err).Msg("Session shutdown encountered errors")
+	}
 
 	log.Info().Msg("Session manager closed")
 	return nil
 }
 
-// Touch updates the LastUsed timestamp for a session.
+// Touch updates the LastUsed timestamp for a session atomically.
 // This is useful for keeping sessions alive during long operations.
 func (s *Session) Touch() {
-	s.mu.Lock()
-	s.LastUsed = time.Now()
-	s.mu.Unlock()
+	s.lastUsed.Store(time.Now().UnixNano())
+}
+
+// LastUsedTime returns the last used time as a time.Time.
+func (s *Session) LastUsedTime() time.Time {
+	return time.Unix(0, s.lastUsed.Load())
 }
 
 // GetCookies retrieves all cookies from the session's page.

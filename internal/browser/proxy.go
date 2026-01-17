@@ -2,6 +2,8 @@ package browser
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
@@ -21,8 +23,9 @@ type ProxyConfig struct {
 // Note: The proxy server itself must be set at browser launch time.
 // This function only handles authentication for authenticated proxies.
 //
-// Bug 1: Returns a cleanup function that must be called when the page is closed
-// to prevent goroutine leaks from EachEvent listeners.
+// Returns a cleanup function that MUST be called when the page is closed
+// to prevent goroutine leaks from EachEvent listeners. The cleanup function
+// is safe to call multiple times.
 func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (cleanup func(), err error) {
 	if proxy == nil || proxy.URL == "" {
 		return func() {}, nil
@@ -31,7 +34,6 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 	// If proxy requires authentication, set up auth handler
 	if proxy.Username != "" {
 		log.Debug().
-			Str("proxy_url", proxy.URL).
 			Bool("has_credentials", true).
 			Msg("Setting up proxy authentication")
 
@@ -44,12 +46,48 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 			return func() {}, err
 		}
 
-		// Bug 1: Create cancellable context for event listeners
+		// Create cancellable context for event listeners
+		// This context is cancelled when cleanup is called OR when parent context is done
 		listenerCtx, cancel := context.WithCancel(ctx)
 		pageWithCtx := page.Context(listenerCtx)
 
-		// Handle authentication challenges
+		// Fix #2: Add WaitGroup to track EachEvent goroutines to prevent leaks
+		var wg sync.WaitGroup
+
+		// Track cleanup state to prevent double-cancel
+		var cleanupOnce sync.Once
+		cleanupFunc := func() {
+			cleanupOnce.Do(func() {
+				cancel()
+				// Wait for goroutines to finish with timeout
+				done := make(chan struct{})
+				go func() {
+					wg.Wait()
+					close(done)
+				}()
+				select {
+				case <-done:
+					log.Debug().Msg("Proxy authentication listeners cleaned up")
+				case <-time.After(5 * time.Second):
+					log.Warn().Msg("Timeout waiting for proxy auth listeners to cleanup")
+				}
+			})
+		}
+
+		// Monitor for page close to auto-cleanup goroutines
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			pageWithCtx.EachEvent(func(e *proto.TargetTargetDestroyed) bool {
+				cleanupFunc()
+				return true // Stop listening
+			})()
+		}()
+
+		// Handle authentication challenges
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			pageWithCtx.EachEvent(func(e *proto.FetchAuthRequired) bool {
 				select {
 				case <-listenerCtx.Done():
@@ -58,6 +96,7 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 				}
 				log.Debug().Msg("Proxy authentication required, providing credentials")
 
+				// Ignore error: request may have been cancelled or timed out
 				_ = proto.FetchContinueWithAuth{
 					RequestID: e.RequestID,
 					AuthChallengeResponse: &proto.FetchAuthChallengeResponse{
@@ -70,8 +109,10 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 			})()
 		}()
 
-		// Also handle regular paused requests (continue them)
+		// Handle regular paused requests (continue them)
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			pageWithCtx.EachEvent(func(e *proto.FetchRequestPaused) bool {
 				select {
 				case <-listenerCtx.Done():
@@ -80,6 +121,7 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 				}
 				// Only continue if not an auth challenge (no response status means it's a request)
 				if e.ResponseStatusCode == nil {
+					// Ignore error: request may have been cancelled or timed out
 					_ = proto.FetchContinueRequest{
 						RequestID: e.RequestID,
 					}.Call(page)
@@ -88,7 +130,7 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 			})()
 		}()
 
-		return cancel, nil
+		return cleanupFunc, nil
 	}
 
 	return func() {}, nil
