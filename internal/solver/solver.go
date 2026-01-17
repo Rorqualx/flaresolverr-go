@@ -466,6 +466,7 @@ var challengeSelectors = []string{
 	"#cf-challenge-running",
 	".ray_id",
 	"#turnstile-wrapper",
+	".cf-turnstile", // Turnstile widget class (used by nowsecure.nl and others)
 	"#cf-wrapper",
 	"#challenge-running",
 	"#challenge-stage",
@@ -539,9 +540,10 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 			return nil, types.NewAccessDeniedError(url)
 		}
 
-		// If Turnstile is present, try to click it
-		if challengeSelector == "#turnstile-wrapper" {
-			log.Debug().Msg("Turnstile detected, attempting to solve...")
+		// If Turnstile is present, try to solve it
+		// Check for both #turnstile-wrapper (ID) and .cf-turnstile (class)
+		if challengeSelector == "#turnstile-wrapper" || challengeSelector == ".cf-turnstile" {
+			log.Debug().Str("selector", challengeSelector).Msg("Turnstile detected, attempting to solve...")
 			if err := s.solveTurnstile(ctx, page); err != nil {
 				log.Debug().Err(err).Msg("Turnstile solve attempt failed")
 			}
@@ -606,19 +608,79 @@ func (s *Solver) detectChallenge(html string) ChallengeType {
 }
 
 // solveTurnstile attempts to solve the Turnstile challenge.
-// Uses the same approach as Python FlareSolverr: keyboard navigation.
+// Uses multiple approaches: keyboard navigation, iframe click, and direct widget click.
 // Properly releases DOM element references to prevent memory leaks.
 func (s *Solver) solveTurnstile(_ context.Context, page *rod.Page) error {
 	log.Debug().Msg("Attempting to solve Turnstile challenge")
 
-	// Method 1: Try keyboard navigation (Python FlareSolverr approach)
-	// This works better because it doesn't require finding elements in iframes
-	if err := s.solveTurnstileKeyboard(page); err == nil {
-		return nil
+	// Method 1: Try direct widget click first (for visible Turnstile widgets)
+	if err := s.solveTurnstileWidget(page); err == nil {
+		log.Debug().Msg("Turnstile widget click attempted")
 	}
 
-	// Method 2: Fallback to direct iframe click
-	return s.solveTurnstileClick(page)
+	// Method 2: Try iframe click (for challenges.cloudflare.com iframe)
+	if err := s.solveTurnstileClick(page); err == nil {
+		log.Debug().Msg("Turnstile iframe click attempted")
+	}
+
+	// Method 3: Try keyboard navigation as fallback
+	if err := s.solveTurnstileKeyboard(page); err == nil {
+		log.Debug().Msg("Turnstile keyboard navigation attempted")
+	}
+
+	// Don't return error - the solveLoop will check if challenge is still present
+	return nil
+}
+
+// solveTurnstileWidget attempts to click directly on the Turnstile widget element.
+func (s *Solver) solveTurnstileWidget(page *rod.Page) error {
+	log.Debug().Msg("Trying direct widget click for Turnstile")
+
+	// Try clicking on .cf-turnstile widget or its checkbox
+	widgetSelectors := []string{
+		".cf-turnstile iframe",
+		".cf-turnstile",
+		"#turnstile-wrapper iframe",
+		"#turnstile-wrapper",
+		"[data-sitekey] iframe",
+		"[data-sitekey]",
+	}
+
+	for _, selector := range widgetSelectors {
+		// Use Has() to check if element exists without waiting
+		has, _, _ := page.Has(selector)
+		if !has {
+			continue
+		}
+
+		// Use timeout to prevent hanging
+		element, err := page.Timeout(2 * time.Second).Element(selector)
+		if err != nil {
+			log.Debug().Str("selector", selector).Err(err).Msg("Failed to get element")
+			continue
+		}
+
+		// Try to get the element's bounding box and click in the center
+		box, err := element.Shape()
+		if err == nil && box != nil && len(box.Quads) > 0 {
+			// Get center of the element
+			quad := box.Quads[0]
+			x := (quad[0] + quad[2] + quad[4] + quad[6]) / 4
+			y := (quad[1] + quad[3] + quad[5] + quad[7]) / 4
+
+			log.Debug().Str("selector", selector).Float64("x", x).Float64("y", y).Msg("Clicking Turnstile widget")
+
+			// Move to position and click
+			page.Mouse.MustMoveTo(x, y)
+			if clickErr := page.Mouse.Click(proto.InputMouseButtonLeft, 1); clickErr == nil {
+				log.Info().Str("selector", selector).Msg("Clicked Turnstile widget")
+			}
+		}
+
+		_ = element.Release()
+	}
+
+	return nil
 }
 
 // solveTurnstileKeyboard uses keyboard navigation to solve Turnstile.
