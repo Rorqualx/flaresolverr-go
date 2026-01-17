@@ -29,6 +29,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
 FROM alpine:3.19
 
 # Install Chromium, xvfb, and required dependencies
+# mesa-gl and mesa-dri-gallium provide OpenGL/WebGL software rendering
 RUN apk add --no-cache \
     chromium \
     chromium-chromedriver \
@@ -41,7 +42,21 @@ RUN apk add --no-cache \
     font-noto-cjk \
     dumb-init \
     xvfb \
-    xvfb-run
+    xvfb-run \
+    mesa-gl \
+    mesa-dri-gallium \
+    mesa-egl \
+    libxcomposite \
+    libxdamage \
+    libxrandr \
+    libxi \
+    libxtst \
+    libxscrnsaver \
+    alsa-lib \
+    at-spi2-core \
+    cups-libs \
+    libdrm \
+    libxkbcommon
 
 # Create non-root user
 RUN addgroup -g 1000 flaresolverr && \

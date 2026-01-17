@@ -130,62 +130,116 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 }
 
 // createLauncher creates a configured Rod launcher with optimal settings.
-// These flags are tuned for headless operation, memory efficiency, and anti-detection.
+// These flags are tuned for anti-detection, matching techniques used by
+// undetected_chromedriver but adapted for Rod/CDP.
+//
+// Key anti-detection strategies:
+// 1. Use Xvfb virtual display (HEADLESS=false) - real headed browser
+// 2. Disable automation-controlled blink features
+// 3. Use consistent, realistic user agent
+// 4. Proper WebGL rendering with SwiftShader
+// 5. No flags that reveal automation
 func (p *Pool) createLauncher() *launcher.Launcher {
 	l := launcher.New()
-
-	// Headless mode - use new headless mode for better anti-detection
-	// Chrome 109+ supports --headless=new which is much harder to detect
-	// because it uses the same rendering path as headed mode
-	if p.config.Headless {
-		l = l.Set("headless", "new")
-	}
 
 	// Custom browser path if specified
 	if p.config.BrowserPath != "" {
 		l = l.Bin(p.config.BrowserPath)
 	}
 
-	// Security flags - required for containerized environments
+	// ========================================
+	// Display Mode Configuration
+	// ========================================
+	// HEADLESS=false (default in Docker): Uses Xvfb virtual display
+	// This is the BEST option for anti-detection because:
+	// - It's a real headed browser, not headless
+	// - Full GPU/WebGL rendering pipeline
+	// - No "HeadlessChrome" in any detection vectors
+	// - Indistinguishable from a real desktop browser
+	//
+	// HEADLESS=true: Uses --headless=new (Chrome 109+)
+	// Only use this when Xvfb is not available
+	if p.config.Headless {
+		l = l.Set("headless", "new")
+	}
+	// When HEADLESS=false, Chrome uses DISPLAY env var pointing to Xvfb (:99)
+
+	// ========================================
+	// Container Security Flags
+	// ========================================
 	l = l.Set("no-sandbox").
 		Set("disable-setuid-sandbox").
 		Set("disable-dev-shm-usage")
 
-	// Anti-detection flags - critical for bypassing Cloudflare
-	// This hides the navigator.webdriver property at the browser level
+	// ========================================
+	// CRITICAL: Anti-Detection Flags
+	// ========================================
+
+	// 1. Disable AutomationControlled - prevents navigator.webdriver = true
+	// This is the most important anti-detection flag
 	l = l.Set("disable-blink-features", "AutomationControlled")
 
-	// Language configuration - consistent with real browsers
-	l = l.Set("accept-lang", "en-US,en")
+	// 2. Disable automation infobar and switches
+	// Note: Rod/CDP doesn't use chromedriver, so we don't have those detection vectors
+	// But these flags still help prevent other detection methods
+	l = l.Delete("enable-automation") // Make sure this is NOT set
 
-	// Suppress Chrome dialogs
-	l = l.Set("disable-search-engine-choice-screen")
+	// 3. Disable features that can leak automation
+	l = l.Set("disable-features", "Translate,TranslateUI,BlinkGenPropertyTrees")
 
-	// Performance and stability flags
-	l = l.Set("disable-gpu").
-		Set("no-zygote").
-		Set("disable-background-networking").
+	// 4. Enable network service features (normal browser behavior)
+	l = l.Set("enable-features", "NetworkService,NetworkServiceInProcess")
+
+	// 5. WebGL with SwiftShader - provides realistic GPU fingerprint
+	// Without this, WebGL returns empty/null values which is a detection signal
+	l = l.Set("use-gl", "swiftshader")
+	l = l.Set("use-angle", "swiftshader")
+
+	// 6. Ignore certificate errors (like original FlareSolverr)
+	// Required for some proxies and helps avoid SSL-related detection
+	if p.config.IgnoreCertErrors {
+		l = l.Set("ignore-certificate-errors")
+		l = l.Set("ignore-ssl-errors")
+	}
+
+	// ========================================
+	// Browser Behavior (Realistic)
+	// ========================================
+
+	// Language - consistent with user agent
+	l = l.Set("accept-lang", "en-US,en;q=0.9")
+
+	// First-run and dialogs
+	l = l.Set("no-first-run").
+		Set("no-default-browser-check").
+		Set("disable-infobars").
+		Set("disable-search-engine-choice-screen")
+
+	// Window size - standard resolution
+	l = l.Set("window-size", "1920,1080")
+
+	// ========================================
+	// Performance & Stability
+	// ========================================
+	l = l.Set("disable-background-networking").
 		Set("disable-default-apps").
 		Set("disable-extensions").
 		Set("disable-sync").
-		Set("disable-translate").
-		Set("metrics-recording-only").
 		Set("mute-audio").
-		Set("no-first-run").
+		Set("no-zygote").
 		Set("safebrowsing-disable-auto-update")
 
-	// Window size - consistent viewport
-	l = l.Set("window-size", "1920,1080")
-
-	// Memory optimization flags
+	// Memory limits for container environment
 	l = l.Set("js-flags", "--max-old-space-size=256").
-		Set("disable-features", "TranslateUI,BlinkGenPropertyTrees").
 		Set("disable-ipc-flooding-protection").
 		Set("disable-renderer-backgrounding")
 
-	// ARM-specific flags
+	// GPU sandbox - required for container environments
+	l = l.Set("disable-gpu-sandbox")
+
+	// ARM-specific: disable GPU entirely on ARM
 	if isARM() {
-		l = l.Set("disable-gpu-sandbox")
+		l = l.Set("disable-gpu")
 	}
 
 	return l
