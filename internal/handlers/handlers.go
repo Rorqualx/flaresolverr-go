@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/rs/zerolog/log"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
@@ -90,9 +91,12 @@ func closeBody(body io.ReadCloser) {
 
 // New creates a new Handler.
 func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Handler {
-	// User agent must match actual Chrome/Chromium version to avoid detection
-	// Alpine 3.19 ships Chromium 124, so we use Chrome/124.0.0.0
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+	// Get the real user agent from the browser
+	// This is critical: using a mismatched UA (e.g., claiming Chrome 142 when the browser is 124)
+	// is detected by Cloudflare. Python FlareSolverr gets the UA from the browser itself.
+	userAgent := getActualUserAgent(pool)
+
+	log.Info().Str("user_agent", userAgent).Msg("Using browser's actual user agent")
 
 	return &Handler{
 		pool:        pool,
@@ -102,6 +106,50 @@ func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Han
 		userAgent:   userAgent,
 		domainStats: stats.NewManager(),
 	}
+}
+
+// getActualUserAgent retrieves the real user agent from the browser via CDP.
+// This ensures the User-Agent and Client Hints match the actual browser version,
+// preventing detection by Cloudflare which checks for version mismatches.
+func getActualUserAgent(pool *browser.Pool) string {
+	// Fallback user agent in case we can't get the real one
+	fallbackUA := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+	// Acquire a browser to get the real user agent
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	b, err := pool.Acquire(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("Could not acquire browser to get user agent, using fallback")
+		return fallbackUA
+	}
+	defer pool.Release(b)
+
+	// Use CDP's Browser.getVersion() to get the real user agent
+	// This is more reliable than navigator.userAgent on about:blank
+	result, err := proto.BrowserGetVersion{}.Call(b)
+	if err != nil {
+		log.Warn().Err(err).Msg("Could not get browser version via CDP, using fallback")
+		return fallbackUA
+	}
+
+	ua := result.UserAgent
+
+	// Strip "HeadlessChrome" if present (like Python FlareSolverr does)
+	ua = strings.Replace(ua, "HeadlessChrome", "Chrome", 1)
+
+	// Ensure we have a Linux user agent for Docker containers
+	// The CDP may return a platform-specific UA that doesn't match the container
+	// Also upgrade Chrome version to match Python FlareSolverr for better Cloudflare compatibility
+	if strings.Contains(ua, "Macintosh") || strings.Contains(ua, "Windows") || strings.Contains(ua, "Chrome/") {
+		// Use Chrome 142 to match Python FlareSolverr's success rate
+		// Python FlareSolverr claims Chrome 142 regardless of actual Chromium version
+		ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+		log.Debug().Str("corrected_ua", ua).Msg("Using optimized user agent (Chrome 142)")
+	}
+
+	return ua
 }
 
 // DomainStats returns the domain statistics manager.

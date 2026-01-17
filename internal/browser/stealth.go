@@ -469,10 +469,59 @@ func buildBlockPatterns(blockImages, blockCSS, blockFonts, blockMedia bool) []*p
 	return patterns
 }
 
-// SetUserAgent sets a custom user agent on the page.
+// SetUserAgent sets a custom user agent on the page with proper Client Hints.
+// This is critical for bypassing Cloudflare detection which checks Sec-CH-UA headers.
 func SetUserAgent(page *rod.Page, userAgent string) error {
+	// Extract Chrome version from user agent for Client Hints
+	// User agent format: ...Chrome/124.0.0.0...
+	chromeVersion := "124"
+	if idx := strings.Index(userAgent, "Chrome/"); idx != -1 {
+		versionStart := idx + 7
+		versionEnd := versionStart
+		for versionEnd < len(userAgent) && userAgent[versionEnd] != '.' && userAgent[versionEnd] != ' ' {
+			versionEnd++
+		}
+		if versionEnd > versionStart {
+			chromeVersion = userAgent[versionStart:versionEnd]
+		}
+	}
+
+	// Determine platform from user agent
+	platform := "Linux"
+	platformVersion := "6.5.0"
+	architecture := "x86_64"
+	if strings.Contains(userAgent, "Windows") {
+		platform = "Windows"
+		platformVersion = "15.0.0"
+		architecture = "x86"
+	} else if strings.Contains(userAgent, "Macintosh") {
+		platform = "macOS"
+		platformVersion = "14.0.0"
+		architecture = "arm"
+	}
+
+	// Match Python FlareSolverr's Client Hints format exactly
+	// Python sends: "Not_A Brand";v="99", "Chromium";v="142" (no Google Chrome)
 	return proto.NetworkSetUserAgentOverride{
-		UserAgent: userAgent,
+		UserAgent:      userAgent,
+		AcceptLanguage: "en-US,en;q=0.9",
+		Platform:       platform,
+		UserAgentMetadata: &proto.EmulationUserAgentMetadata{
+			Brands: []*proto.EmulationUserAgentBrandVersion{
+				{Brand: "Not_A Brand", Version: "99"},
+				{Brand: "Chromium", Version: chromeVersion},
+			},
+			FullVersionList: []*proto.EmulationUserAgentBrandVersion{
+				{Brand: "Not_A Brand", Version: "99.0.0.0"},
+				{Brand: "Chromium", Version: chromeVersion + ".0.0.0"},
+			},
+			Platform:        platform,
+			PlatformVersion: platformVersion,
+			Architecture:    architecture,
+			Model:           "",
+			Mobile:          false,
+			Bitness:         "64",
+		},
 	}.Call(page)
 }
 
@@ -494,4 +543,15 @@ func SetCookies(page *rod.Page, cookies []*proto.NetworkCookieParam) error {
 // GetCookies retrieves all cookies from the page.
 func GetCookies(page *rod.Page) ([]*proto.NetworkCookie, error) {
 	return page.Cookies(nil)
+}
+
+// GetBrowserUserAgent retrieves the browser's actual user agent string.
+// This is critical for anti-detection: we should use the browser's real UA
+// instead of a hardcoded one, to prevent mismatches that Cloudflare can detect.
+func GetBrowserUserAgent(page *rod.Page) (string, error) {
+	result, err := page.Eval(`() => navigator.userAgent`)
+	if err != nil {
+		return "", fmt.Errorf("failed to get browser user agent: %w", err)
+	}
+	return result.Value.Str(), nil
 }

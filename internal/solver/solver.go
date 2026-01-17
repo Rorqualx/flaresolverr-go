@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/url"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -300,7 +300,7 @@ func (s *Solver) setCookies(page *rod.Page, cookies []types.RequestCookie, targe
 	}
 
 	// Parse URL to get domain
-	parsedURL, err := url.Parse(targetURL)
+	parsedURL, err := neturl.Parse(targetURL)
 	if err != nil {
 		return err
 	}
@@ -343,7 +343,7 @@ func (s *Solver) navigatePost(page *rod.Page, targetURL string, postData string)
 		Msg("Performing POST request")
 
 	// Parse the URL to get the base domain
-	parsedURL, err := url.Parse(targetURL)
+	parsedURL, err := neturl.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
 	}
@@ -423,8 +423,8 @@ func (s *Solver) buildFormFieldsJS(postData string) string {
 		parts := strings.SplitN(pair, "=", 2)
 		if len(parts) == 2 {
 			// URL decode the key and value
-			key, _ := url.QueryUnescape(parts[0])
-			value, _ := url.QueryUnescape(parts[1])
+			key, _ := neturl.QueryUnescape(parts[0])
+			value, _ := neturl.QueryUnescape(parts[1])
 
 			// Use JSON encoding for proper escaping of all special characters
 			// This safely handles quotes, backslashes, newlines, unicode, and script tags
@@ -856,23 +856,32 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 	}
 
 	var cookieError string
-	cookies, err := page.Cookies(nil)
+	// Use Network.getAllCookies to get ALL cookies regardless of domain
+	// This is the same method Python FlareSolverr uses via Selenium's driver.get_cookies()
+	var cookies []*proto.NetworkCookie
+	allCookiesResult, err := proto.NetworkGetAllCookies{}.Call(page)
 	if err != nil {
 		// Chrome 114+ returns partitionKey as string which causes unmarshal warning
 		// Cookies are still returned successfully, so only log at debug level for this case
 		if strings.Contains(err.Error(), "partitionKey") {
 			log.Debug().Msg("Cookie partitionKey field type mismatch (harmless)")
+			// Still try to access cookies even with the warning
+			if allCookiesResult != nil {
+				cookies = allCookiesResult.Cookies
+			}
 		} else {
-			log.Warn().Err(err).Msg("Failed to get cookies")
+			log.Warn().Err(err).Msg("Failed to get all cookies")
 			cookieError = err.Error()
-			cookies = nil
 		}
+	} else if allCookiesResult != nil {
+		cookies = allCookiesResult.Cookies
 	}
 
+	log.Debug().Int("cookie_count", len(cookies)).Msg("Retrieved all cookies via Network.getAllCookies")
+
 	// Get current URL (may have been redirected)
-	info, err := page.Info()
 	currentURL := url
-	if err == nil && info.URL != "" {
+	if info, err := page.Info(); err == nil && info.URL != "" {
 		currentURL = info.URL
 	}
 
