@@ -90,7 +90,9 @@ func closeBody(body io.ReadCloser) {
 
 // New creates a new Handler.
 func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Handler {
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	// User agent must match actual Chrome/Chromium version to avoid detection
+	// Alpine 3.19 ships Chromium 124, so we use Chrome/124.0.0.0
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 	return &Handler{
 		pool:        pool,
