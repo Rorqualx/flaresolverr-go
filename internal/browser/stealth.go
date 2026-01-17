@@ -226,61 +226,41 @@ const stealthScript = `
     // 10. WebGL vendor/renderer
     // ========================================
     // Spoof WebGL to avoid detection of VM/headless
+    // Using simple function wrapper instead of Proxy for better compatibility
     try {
-        if (typeof Proxy !== 'undefined' && typeof Reflect !== 'undefined') {
-            const getParameterProxyHandler = {
-                apply: function(target, thisArg, args) {
-                    try {
-                        // Safety check: ensure target and args are valid
-                        if (typeof target !== 'function' || !args || args.length === 0) {
-                            return null;
-                        }
-                        const param = args[0];
+        const UNMASKED_VENDOR_WEBGL = 37445;
+        const UNMASKED_RENDERER_WEBGL = 37446;
 
-                        // UNMASKED_VENDOR_WEBGL
-                        if (param === 37445) {
+        ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(function(ctxName) {
+            try {
+                const ctx = window[ctxName];
+                if (!ctx || !ctx.prototype) return;
+
+                const originalGetParameter = ctx.prototype.getParameter;
+                if (typeof originalGetParameter !== 'function') return;
+
+                // Check if already wrapped
+                if (originalGetParameter._stealth) return;
+
+                // Create wrapper function
+                ctx.prototype.getParameter = function(param) {
+                    try {
+                        if (param === UNMASKED_VENDOR_WEBGL) {
                             return 'Intel Inc.';
                         }
-                        // UNMASKED_RENDERER_WEBGL
-                        if (param === 37446) {
+                        if (param === UNMASKED_RENDERER_WEBGL) {
                             return 'Intel Iris OpenGL Engine';
                         }
-
-                        // Safety check: ensure Reflect.apply is available
-                        if (typeof Reflect !== 'undefined' && typeof Reflect.apply === 'function') {
-                            return Reflect.apply(target, thisArg, args);
-                        }
-                        // Fallback to direct call
-                        return target.apply(thisArg, args);
+                        return originalGetParameter.call(this, param);
                     } catch (e) {
-                        // If anything fails, try direct call or return null
-                        try {
-                            return target.apply(thisArg, args);
-                        } catch (e2) {
-                            return null;
-                        }
+                        return null;
                     }
-                }
-            };
-
-            // Apply to both WebGL contexts
-            ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(ctx => {
-                try {
-                    if (window[ctx] && window[ctx].prototype && typeof window[ctx].prototype.getParameter === 'function') {
-                        // Check if already proxied to avoid double-wrapping
-                        if (window[ctx].prototype.getParameter.__isStealthProxy) {
-                            return;
-                        }
-                        const getParameter = window[ctx].prototype.getParameter;
-                        const proxiedFn = new Proxy(getParameter, getParameterProxyHandler);
-                        proxiedFn.__isStealthProxy = true;
-                        window[ctx].prototype.getParameter = proxiedFn;
-                    }
-                } catch (e) {
-                    // Skip this context if it fails
-                }
-            });
-        }
+                };
+                ctx.prototype.getParameter._stealth = true;
+            } catch (e) {
+                // Skip this context
+            }
+        });
     } catch (e) {
         // WebGL spoofing failed, continue anyway
     }
