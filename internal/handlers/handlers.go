@@ -71,6 +71,25 @@ func sanitizeURLForLogging(rawURL string) string {
 	return parsed.String()
 }
 
+// extractChromeVersion extracts the major Chrome version from a User-Agent string.
+// Returns the major version number (e.g., "124" from "Chrome/124.0.0.0") or empty string if not found.
+// This is useful for matching tls-client profiles which are named by Chrome version.
+func extractChromeVersion(userAgent string) string {
+	idx := strings.Index(userAgent, "Chrome/")
+	if idx == -1 {
+		return ""
+	}
+	versionStart := idx + 7 // len("Chrome/")
+	versionEnd := versionStart
+	for versionEnd < len(userAgent) && userAgent[versionEnd] != '.' && userAgent[versionEnd] != ' ' {
+		versionEnd++
+	}
+	if versionEnd > versionStart {
+		return userAgent[versionStart:versionEnd]
+	}
+	return ""
+}
+
 // Handler handles all FlareSolverr API requests.
 type Handler struct {
 	pool        *browser.Pool
@@ -659,6 +678,7 @@ func (h *Handler) writeSuccess(w http.ResponseWriter, result *solver.Result, coo
 		Response:        response,
 		Cookies:         cookies,
 		UserAgent:       result.UserAgent,
+		BrowserVersion:  extractChromeVersion(result.UserAgent),
 		Screenshot:      result.Screenshot,
 		TurnstileToken:  result.TurnstileToken,
 		LocalStorage:    result.LocalStorage,

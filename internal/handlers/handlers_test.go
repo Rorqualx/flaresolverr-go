@@ -365,3 +365,56 @@ func TestResponseTimestamps(t *testing.T) {
 		t.Error("EndTime should be >= StartTime")
 	}
 }
+
+func TestExtractChromeVersion(t *testing.T) {
+	tests := []struct {
+		name      string
+		userAgent string
+		want      string
+	}{
+		{
+			name:      "Chrome 124",
+			userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+			want:      "124",
+		},
+		{
+			name:      "Chrome 144",
+			userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+			want:      "144",
+		},
+		{
+			name:      "Chrome 99",
+			userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36",
+			want:      "99",
+		},
+		{
+			name:      "No Chrome",
+			userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/109.0",
+			want:      "",
+		},
+		{
+			name:      "Empty string",
+			userAgent: "",
+			want:      "",
+		},
+		{
+			name:      "Chrome at end without version",
+			userAgent: "Some browser Chrome/",
+			want:      "",
+		},
+		{
+			name:      "Chromium based Edge",
+			userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+			want:      "120",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractChromeVersion(tt.userAgent)
+			if got != tt.want {
+				t.Errorf("extractChromeVersion() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
