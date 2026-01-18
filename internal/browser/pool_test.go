@@ -377,3 +377,114 @@ func BenchmarkPoolConcurrent(b *testing.B) {
 		}
 	})
 }
+
+// TestPoolWithDefaultProxy tests that the pool applies default proxy from config.
+func TestPoolWithDefaultProxy(t *testing.T) {
+	skipCI(t)
+
+	cfg := testConfig()
+	cfg.ProxyURL = "http://test-proxy:8080"
+
+	pool, err := NewPool(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create pool with proxy: %v", err)
+	}
+	defer pool.Close()
+
+	// Pool should initialize successfully with proxy config
+	if pool.Size() != cfg.BrowserPoolSize {
+		t.Errorf("Expected pool size %d, got %d", cfg.BrowserPoolSize, pool.Size())
+	}
+
+	// Acquire a browser - should work normally
+	ctx := context.Background()
+	browser, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Failed to acquire browser from proxy pool: %v", err)
+	}
+	defer pool.Release(browser)
+
+	// Browser should be functional
+	if browser == nil {
+		t.Error("Expected non-nil browser")
+	}
+}
+
+// TestSpawnWithProxy tests spawning a browser with custom proxy.
+func TestSpawnWithProxy(t *testing.T) {
+	skipCI(t)
+
+	cfg := testConfig()
+	pool, err := NewPool(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create pool: %v", err)
+	}
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Spawn browser with custom proxy
+	browser, err := pool.SpawnWithProxy(ctx, "http://custom-proxy:9090")
+	if err != nil {
+		t.Fatalf("Failed to spawn browser with proxy: %v", err)
+	}
+	defer browser.Close()
+
+	// Browser should be functional
+	if browser == nil {
+		t.Error("Expected non-nil browser")
+	}
+
+	// Pool stats should NOT be affected (this browser is not pooled)
+	acquired, _, _, _ := pool.GetStats()
+	if acquired != 0 {
+		t.Errorf("Expected 0 acquired (SpawnWithProxy doesn't affect pool), got %d", acquired)
+	}
+}
+
+// TestSpawnWithProxyContextCancellation tests that SpawnWithProxy respects context.
+func TestSpawnWithProxyContextCancellation(t *testing.T) {
+	skipCI(t)
+
+	cfg := testConfig()
+	pool, err := NewPool(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create pool: %v", err)
+	}
+	defer pool.Close()
+
+	// Create already-canceled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// SpawnWithProxy should fail immediately
+	_, err = pool.SpawnWithProxy(ctx, "http://proxy:8080")
+	if err == nil {
+		t.Error("Expected error for canceled context, got nil")
+	}
+}
+
+// TestSpawnWithProxyEmptyURL tests spawning with empty proxy URL (no proxy).
+func TestSpawnWithProxyEmptyURL(t *testing.T) {
+	skipCI(t)
+
+	cfg := testConfig()
+	pool, err := NewPool(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create pool: %v", err)
+	}
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Spawn browser with empty proxy (should work, no proxy applied)
+	browser, err := pool.SpawnWithProxy(ctx, "")
+	if err != nil {
+		t.Fatalf("Failed to spawn browser with empty proxy: %v", err)
+	}
+	defer browser.Close()
+
+	if browser == nil {
+		t.Error("Expected non-nil browser")
+	}
+}

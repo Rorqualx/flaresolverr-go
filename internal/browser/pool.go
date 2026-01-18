@@ -139,7 +139,10 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 // 3. Use consistent, realistic user agent
 // 4. Proper WebGL rendering with SwiftShader
 // 5. No flags that reveal automation
-func (p *Pool) createLauncher() *launcher.Launcher {
+//
+// The proxyURL parameter sets the --proxy-server flag for Chrome.
+// If empty, no proxy is configured.
+func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	l := launcher.New()
 
 	// Custom browser path if specified
@@ -177,6 +180,19 @@ func (p *Pool) createLauncher() *launcher.Launcher {
 		Set("disable-dev-shm-usage")
 
 	// ========================================
+	// Proxy Configuration
+	// ========================================
+	if proxyURL != "" {
+		l = l.Set("proxy-server", proxyURL)
+		log.Debug().Str("proxy", proxyURL).Msg("Browser proxy configured")
+
+		// CRITICAL: Prevent WebRTC IP leaks when using proxy
+		// WebRTC can reveal the real IP even when routing through a proxy.
+		// This forces WebRTC to only use the proxy's IP for ICE candidates.
+		l = l.Set("force-webrtc-ip-handling-policy", "disable_non_proxied_udp")
+	}
+
+	// ========================================
 	// CRITICAL: Anti-Detection Flags
 	// ========================================
 
@@ -190,7 +206,12 @@ func (p *Pool) createLauncher() *launcher.Launcher {
 	l = l.Delete("enable-automation") // Make sure this is NOT set
 
 	// 3. Disable features that can leak automation
-	l = l.Set("disable-features", "Translate,TranslateUI,BlinkGenPropertyTrees")
+	disabledFeatures := "Translate,TranslateUI,BlinkGenPropertyTrees"
+	if proxyURL != "" {
+		// Add WebRTC leak prevention when using proxy
+		disabledFeatures += ",WebRtcHideLocalIpsWithMdns"
+	}
+	l = l.Set("disable-features", disabledFeatures)
 
 	// 4. Enable network service features (normal browser behavior)
 	l = l.Set("enable-features", "NetworkService,NetworkServiceInProcess")
@@ -275,7 +296,8 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 
 	// Create a fresh launcher for this browser instance
 	// (launchers can only launch once, so we need a new one each time)
-	l := p.createLauncher()
+	// Pass the default proxy from config (may be empty)
+	l := p.createLauncher(p.config.ProxyURL)
 
 	// Launch the browser process
 	url, err := l.Launch()
@@ -297,6 +319,53 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	}
 
 	log.Debug().Str("url", url).Msg("Browser spawned successfully")
+	return browser, nil
+}
+
+// SpawnWithProxy creates a new browser with a specific proxy configuration.
+// This browser is NOT pooled and must be closed by the caller.
+// Use this when a request specifies a proxy different from the pool default.
+//
+// The caller is responsible for closing the browser when done:
+//
+//	browser, err := pool.SpawnWithProxy(ctx, proxyURL)
+//	if err != nil {
+//	    return err
+//	}
+//	defer browser.Close()
+func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browser, error) {
+	// Check context before starting expensive operation
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
+
+	log.Debug().Str("proxy", proxyURL).Msg("Spawning browser with custom proxy")
+
+	// Create launcher with the specified proxy
+	l := p.createLauncher(proxyURL)
+
+	// Launch the browser process
+	url, err := l.Launch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to launch browser with proxy: %w", err)
+	}
+
+	// Connect to the browser via CDP
+	browser := rod.New().ControlURL(url)
+	if err := browser.Connect(); err != nil {
+		return nil, fmt.Errorf("failed to connect to browser: %w", err)
+	}
+
+	// Configure browser-level settings
+	if p.config.IgnoreCertErrors {
+		browser = browser.MustIgnoreCertErrors(true)
+	}
+
+	log.Debug().Str("url", url).Str("proxy", proxyURL).Msg("Browser with proxy spawned successfully")
 	return browser, nil
 }
 

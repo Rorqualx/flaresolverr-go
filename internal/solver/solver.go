@@ -170,18 +170,44 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve attempt")
 
-	// Acquire browser from pool
-	browserInstance, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return nil, types.NewPoolAcquireError("failed to acquire browser", err)
+	// Acquire browser - use dedicated browser for per-request proxy, pooled otherwise
+	var browserInstance *rod.Browser
+	var usePooledBrowser bool
+
+	if opts.Proxy != nil && opts.Proxy.URL != "" {
+		// Per-request proxy: spawn dedicated browser with this proxy
+		// This browser is NOT pooled and will be closed after use
+		log.Info().
+			Str("proxy_url", opts.Proxy.URL).
+			Bool("has_auth", opts.Proxy.Username != "").
+			Msg("Spawning dedicated browser with per-request proxy")
+		var err error
+		browserInstance, err = s.pool.SpawnWithProxy(ctx, opts.Proxy.URL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to spawn browser with proxy: %w", err)
+		}
+		defer browserInstance.Close()
+		usePooledBrowser = false
+	} else {
+		// No per-request proxy: use pooled browser (may have default proxy from config)
+		log.Debug().Msg("Using pooled browser (no per-request proxy specified)")
+		var err error
+		browserInstance, err = s.pool.Acquire(ctx)
+		if err != nil {
+			return nil, types.NewPoolAcquireError("failed to acquire browser", err)
+		}
+		defer s.pool.Release(browserInstance)
+		usePooledBrowser = true
 	}
-	defer s.pool.Release(browserInstance)
+
+	_ = usePooledBrowser // Used for logging/debugging if needed
 
 	// Create timeout context for the solve operation
 	solveCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var page *rod.Page
+	var err error
 
 	// For POST requests, we need a special approach because stealth scripts
 	// conflict with form creation JavaScript. We use a regular page and
