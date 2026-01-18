@@ -28,7 +28,7 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 ### Docker (Recommended)
 
 ```bash
-docker run -d -p 8191:8191 --name flaresolverr ghcr.io/rorqualx/flaresolverr-go:latest
+docker run -d -p 8191:8191 --name flaresolverr rorqualx/flaresolverr-go:latest
 ```
 
 ### From Source
@@ -370,7 +370,7 @@ environment:
 version: "3.8"
 services:
   flaresolverr:
-    image: ghcr.io/rorqualx/flaresolverr-go:latest
+    image: rorqualx/flaresolverr-go:latest
     container_name: flaresolverr
     ports:
       - "8191:8191"
