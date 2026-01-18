@@ -54,8 +54,8 @@ type Solution struct {
 	Response       string            `json:"response"`
 	Cookies        []Cookie          `json:"cookies"`
 	UserAgent      string            `json:"userAgent"`
-	BrowserVersion string            `json:"browserVersion,omitempty"` // Chrome major version (e.g., "124") for tls-client profile matching
-	Screenshot     string            `json:"screenshot,omitempty"`     // Base64 encoded PNG screenshot
+	BrowserVersion string            `json:"browserVersion,omitempty"`  // Chrome major version (e.g., "124") for tls-client profile matching
+	Screenshot     string            `json:"screenshot,omitempty"`      // Base64 encoded PNG screenshot
 	TurnstileToken string            `json:"turnstile_token,omitempty"` // cf-turnstile-response token if present
 
 	// Extended extraction for debugging (omitted when empty)

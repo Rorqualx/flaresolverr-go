@@ -79,7 +79,7 @@ func extractChromeVersion(userAgent string) string {
 	if idx == -1 {
 		return ""
 	}
-	versionStart := idx + 7 // len("Chrome/")
+	versionStart := idx + 7 // skip past "Chrome/"
 	versionEnd := versionStart
 	for versionEnd < len(userAgent) && userAgent[versionEnd] != '.' && userAgent[versionEnd] != ' ' {
 		versionEnd++
