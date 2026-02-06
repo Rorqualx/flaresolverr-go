@@ -289,3 +289,53 @@ func TestManager_RequestCount(t *testing.T) {
 		t.Errorf("RequestCount = %d, want 3", count)
 	}
 }
+
+// TestDomainStats_CacheConcurrency tests that concurrent access to the
+// cache is safe and doesn't cause data races or stale reads.
+func TestDomainStats_CacheConcurrency(t *testing.T) {
+	m := NewManager()
+	domain := "concurrent.com"
+
+	// Record some initial data
+	m.RecordRequest(domain, 100, true, false)
+
+	// Run concurrent readers and writers
+	done := make(chan bool)
+	const goroutines = 10
+	const iterations = 100
+
+	// Start readers
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			for j := 0; j < iterations; j++ {
+				delay := m.SuggestedDelay(domain)
+				if delay < 0 {
+					t.Errorf("SuggestedDelay returned invalid value: %d", delay)
+				}
+			}
+			done <- true
+		}()
+	}
+
+	// Start writers (invalidate cache by recording requests)
+	for i := 0; i < goroutines/2; i++ {
+		go func() {
+			for j := 0; j < iterations; j++ {
+				m.RecordRequest(domain, int64(100+j), j%2 == 0, j%5 == 0)
+			}
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < goroutines+goroutines/2; i++ {
+		<-done
+	}
+
+	// Verify final state is consistent
+	finalDelay := m.SuggestedDelay(domain)
+	if finalDelay < m.DefaultMinDelayMs || finalDelay > m.DefaultMaxDelayMs {
+		t.Errorf("Final delay %d out of bounds [%d, %d]",
+			finalDelay, m.DefaultMinDelayMs, m.DefaultMaxDelayMs)
+	}
+}
