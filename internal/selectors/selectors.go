@@ -19,6 +19,8 @@ type Selectors struct {
 	JavaScript            []string `yaml:"javascript"`
 	TurnstileSelectors    []string `yaml:"turnstile_selectors"`
 	TurnstileFramePattern string   `yaml:"turnstile_frame_pattern"`
+	ShadowHosts           []string `yaml:"shadow_hosts"`
+	ShadowInnerSelectors  []string `yaml:"shadow_inner_selectors"`
 }
 
 var (
@@ -94,5 +96,21 @@ func defaultSelectors() *Selectors {
 			"[data-testid='cf-turnstile-response']",
 		},
 		TurnstileFramePattern: "challenges.cloudflare.com",
+		ShadowHosts: []string{
+			"div.cf-turnstile-wrapper",
+			".cf-turnstile",
+			"#turnstile-wrapper",
+			"[data-sitekey]",
+			".turnstile-container",
+			"[data-cf-turnstile]",
+		},
+		ShadowInnerSelectors: []string{
+			"input[type='checkbox']",
+			"[role='checkbox']",
+			".checkbox",
+			"#checkbox",
+			"[aria-checked]",
+			"label input",
+		},
 	}
 }

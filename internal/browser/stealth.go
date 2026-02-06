@@ -55,13 +55,46 @@ const stealthScript = `
     // Global flag to prevent re-applying stealth on session page reuse
     // This survives across navigations within the same page context
     if (window.__stealthApplied) {
-        console.debug('[Stealth] Already applied, skipping');
         return;
     }
     window.__stealthApplied = true;
 
     // Wrap everything in try-catch to prevent any single failure from breaking the script
     try {
+
+    // ========================================
+    // 0. Block WebRTC at JavaScript level
+    // ========================================
+    // CRITICAL: Prevents WebRTC IP leaks that can expose the server's real IP
+    // even when using a proxy. This complements the Chrome --force-webrtc-ip-handling-policy
+    // flag but provides defense-in-depth at the JavaScript API level.
+    // Note: Some sites detect undefined WebRTC as a bot signal, so we use
+    // dummy constructors that throw errors on instantiation.
+    try {
+        // Block RTCPeerConnection - primary WebRTC class
+        window.RTCPeerConnection = function() {
+            throw new DOMException('RTCPeerConnection is not supported', 'NotSupportedError');
+        };
+        window.webkitRTCPeerConnection = window.RTCPeerConnection;
+        window.mozRTCPeerConnection = window.RTCPeerConnection;
+
+        // Block RTCDataChannel
+        window.RTCDataChannel = function() {
+            throw new DOMException('RTCDataChannel is not supported', 'NotSupportedError');
+        };
+
+        // Block RTCSessionDescription
+        window.RTCSessionDescription = function() {
+            throw new DOMException('RTCSessionDescription is not supported', 'NotSupportedError');
+        };
+
+        // Block RTCIceCandidate
+        window.RTCIceCandidate = function() {
+            throw new DOMException('RTCIceCandidate is not supported', 'NotSupportedError');
+        };
+    } catch (e) {
+        // WebRTC blocking failed - continue anyway
+    }
 
     // ========================================
     // 1. Remove webdriver property
@@ -145,34 +178,57 @@ const stealthScript = `
         window.chrome.csi = function() { return {}; };
     }
     if (!window.chrome.loadTimes) {
+        // Cache the base time on first call to simulate realistic page load times
+        // Each metric is offset by realistic intervals from the base time
+        const baseTime = Date.now() / 1000;
+        const cachedTimes = {
+            requestTime: baseTime - 0.8,                    // Request started ~800ms ago
+            startLoadTime: baseTime - 0.7,                  // Started loading ~700ms ago
+            commitLoadTime: baseTime - 0.5,                 // Committed ~500ms ago
+            finishDocumentLoadTime: baseTime - 0.2,         // DOM finished ~200ms ago
+            finishLoadTime: baseTime - 0.1,                 // Load finished ~100ms ago
+            firstPaintTime: baseTime - 0.15,                // First paint ~150ms ago
+            firstPaintAfterLoadTime: 0,
+            navigationType: 'navigate',
+            wasFetchedViaSpdy: false,
+            wasNpnNegotiated: true,
+            npnNegotiatedProtocol: 'h2',
+            wasAlternateProtocolAvailable: false,
+            connectionInfo: 'h2'
+        };
         window.chrome.loadTimes = function() {
-            return {
-                requestTime: Date.now() / 1000,
-                startLoadTime: Date.now() / 1000,
-                commitLoadTime: Date.now() / 1000,
-                finishDocumentLoadTime: Date.now() / 1000,
-                finishLoadTime: Date.now() / 1000,
-                firstPaintTime: Date.now() / 1000,
-                firstPaintAfterLoadTime: 0,
-                navigationType: 'navigate',
-                wasFetchedViaSpdy: false,
-                wasNpnNegotiated: true,
-                npnNegotiatedProtocol: 'h2',
-                wasAlternateProtocolAvailable: false,
-                connectionInfo: 'h2'
-            };
+            return cachedTimes;
         };
     }
 
     // ========================================
     // 5. Mock permissions API
     // ========================================
+    // Mock common permissions to avoid detection
+    // Real browsers have specific default states for various permissions
     if (window.navigator && window.navigator.permissions && window.navigator.permissions.query) {
         const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+        const permissionDefaults = {
+            'notifications': 'default',
+            'geolocation': 'prompt',
+            'camera': 'prompt',
+            'microphone': 'prompt',
+            'midi': 'prompt',
+            'push': 'prompt',
+            'background-sync': 'granted',
+            'accelerometer': 'granted',
+            'gyroscope': 'granted',
+            'magnetometer': 'granted',
+            'clipboard-read': 'prompt',
+            'clipboard-write': 'granted',
+            'payment-handler': 'prompt',
+            'persistent-storage': 'prompt'
+        };
         window.navigator.permissions.query = (parameters) => {
-            if (parameters.name === 'notifications') {
+            const name = parameters && parameters.name;
+            if (name && permissionDefaults.hasOwnProperty(name)) {
                 return Promise.resolve({
-                    state: typeof Notification !== 'undefined' ? Notification.permission : 'default',
+                    state: permissionDefaults[name],
                     onchange: null
                 });
             }
@@ -326,10 +382,75 @@ const stealthScript = `
         });
     }
 
-    console.debug('[Stealth] Anti-detection patches applied');
+    // ========================================
+    // 12. Canvas fingerprinting protection
+    // ========================================
+    // Add subtle noise to canvas toDataURL/toBlob to prevent fingerprinting
+    // while maintaining visual consistency for the same session
+    try {
+        // Skip if already patched
+        if (!HTMLCanvasElement.prototype.toDataURL._stealth) {
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+                // Apply subtle, consistent modification to canvas before export
+                try {
+                    const ctx = this.getContext('2d');
+                    if (ctx) {
+                        // Add a nearly invisible pixel modification
+                        const imageData = ctx.getImageData(0, 0, 1, 1);
+                        // Modify based on session-consistent seed
+                        if (!window.__canvasSeed) {
+                            window.__canvasSeed = Math.floor(Math.random() * 256);
+                        }
+                        imageData.data[0] = (imageData.data[0] + window.__canvasSeed) % 256;
+                        ctx.putImageData(imageData, 0, 0);
+                    }
+                } catch (e) {
+                    // Ignore canvas access errors
+                }
+                return originalToDataURL.call(this, type, quality);
+            };
+            HTMLCanvasElement.prototype.toDataURL._stealth = true;
+        }
+    } catch (e) {
+        // Canvas patching failed, continue
+    }
+
+    // ========================================
+    // 13. AudioContext fingerprinting protection
+    // ========================================
+    // Override AudioContext to add noise to audio fingerprinting
+    try {
+        if (window.AudioContext && !window.AudioContext._stealth) {
+            const OriginalAudioContext = window.AudioContext;
+            window.AudioContext = function(...args) {
+                const ctx = new OriginalAudioContext(...args);
+                // Override createAnalyser to add subtle timing variations
+                const originalCreateAnalyser = ctx.createAnalyser.bind(ctx);
+                ctx.createAnalyser = function() {
+                    const analyser = originalCreateAnalyser();
+                    const originalGetFloatFrequencyData = analyser.getFloatFrequencyData.bind(analyser);
+                    analyser.getFloatFrequencyData = function(array) {
+                        originalGetFloatFrequencyData(array);
+                        // Add tiny random noise
+                        for (let i = 0; i < array.length; i++) {
+                            array[i] += (Math.random() - 0.5) * 0.0001;
+                        }
+                    };
+                    return analyser;
+                };
+                return ctx;
+            };
+            window.AudioContext._stealth = true;
+            // Copy static properties
+            Object.setPrototypeOf(window.AudioContext, OriginalAudioContext);
+        }
+    } catch (e) {
+        // AudioContext patching failed, continue
+    }
 
     } catch (e) {
-        console.debug('[Stealth] Some patches failed:', e.message);
+        // Silently ignore patching failures - don't log to avoid detection
     }
 })();
 `
@@ -501,20 +622,22 @@ func SetUserAgent(page *rod.Page, userAgent string) error {
 		architecture = "arm"
 	}
 
-	// Match Python FlareSolverr's Client Hints format exactly
-	// Python sends: "Not_A Brand";v="99", "Chromium";v="142" (no Google Chrome)
+	// Include "Google Chrome" brand to match real Chrome browsers
+	// Real Chrome includes: "Not_A Brand", "Google Chrome", "Chromium"
 	return proto.NetworkSetUserAgentOverride{
 		UserAgent:      userAgent,
 		AcceptLanguage: "en-US,en;q=0.9",
 		Platform:       platform,
 		UserAgentMetadata: &proto.EmulationUserAgentMetadata{
 			Brands: []*proto.EmulationUserAgentBrandVersion{
-				{Brand: "Not_A Brand", Version: "99"},
+				{Brand: "Not_A Brand", Version: "8"},
 				{Brand: "Chromium", Version: chromeVersion},
+				{Brand: "Google Chrome", Version: chromeVersion},
 			},
 			FullVersionList: []*proto.EmulationUserAgentBrandVersion{
-				{Brand: "Not_A Brand", Version: "99.0.0.0"},
+				{Brand: "Not_A Brand", Version: "8.0.0.0"},
 				{Brand: "Chromium", Version: chromeVersion + ".0.0.0"},
+				{Brand: "Google Chrome", Version: chromeVersion + ".0.0.0"},
 			},
 			Platform:        platform,
 			PlatformVersion: platformVersion,
@@ -555,4 +678,94 @@ func GetBrowserUserAgent(page *rod.Page) (string, error) {
 		return "", fmt.Errorf("failed to get browser user agent: %w", err)
 	}
 	return result.Value.Str(), nil
+}
+
+// shadowInterceptScript intercepts Element.prototype.attachShadow to force
+// all shadow roots to open mode. This allows JavaScript-based access to
+// shadow DOM content that would otherwise be inaccessible in closed mode.
+//
+// DETECTION RISK: MEDIUM-HIGH
+// This modifies a browser prototype, which can be detected by anti-bot systems
+// that check for prototype tampering.
+//
+// Use this only as a fallback when CDP-native shadow root access fails.
+const shadowInterceptScript = `
+(() => {
+    'use strict';
+
+    // Skip if already applied
+    if (window.__shadowInterceptApplied) {
+        return;
+    }
+    window.__shadowInterceptApplied = true;
+
+    try {
+        // Store original attachShadow and Object.assign
+        const originalAttachShadow = Element.prototype.attachShadow;
+        // Cache Object.assign to prevent prototype pollution attacks
+        const safeAssign = Object.assign.bind(Object);
+
+        // Override attachShadow to force mode: 'open'
+        Element.prototype.attachShadow = function(init) {
+            // Force open mode using cached Object.assign
+            // Create a plain object first to avoid prototype pollution
+            const modifiedInit = safeAssign(Object.create(null), init, { mode: 'open' });
+            return originalAttachShadow.call(this, modifiedInit);
+        };
+
+        // Make it look native
+        Element.prototype.attachShadow.toString = function() {
+            return 'function attachShadow() { [native code] }';
+        };
+
+    } catch (e) {
+        // Silently ignore failures - don't log to avoid detection
+    }
+})();
+`
+
+// InjectShadowInterceptor injects the shadow root interception script into a page.
+// This forces all future attachShadow calls to use mode: 'open', making shadow
+// DOM content accessible via JavaScript.
+//
+// IMPORTANT: This should be called via Page.addScriptToEvaluateOnNewDocument
+// to intercept before any page scripts run. Call this only when CDP-native
+// shadow root access (via ShadowRoot()) has failed.
+//
+// Detection risk: MEDIUM-HIGH - modifies browser prototype
+//
+// Usage:
+//
+//	err := browser.InjectShadowInterceptor(page)
+//	if err != nil {
+//	    log.Warn().Err(err).Msg("Failed to inject shadow interceptor")
+//	}
+func InjectShadowInterceptor(page *rod.Page) error {
+	// Use addScriptToEvaluateOnNewDocument so it runs before page scripts
+	_, err := proto.PageAddScriptToEvaluateOnNewDocument{
+		Source: shadowInterceptScript,
+	}.Call(page)
+
+	if err != nil {
+		return fmt.Errorf("failed to inject shadow interceptor: %w", err)
+	}
+
+	log.Debug().Msg("Shadow root interceptor injected (forces mode: 'open')")
+	return nil
+}
+
+// ApplyShadowInterceptorNow applies the shadow interception script immediately
+// to the current page context. This is useful when the page has already loaded
+// but you need to intercept future shadow roots.
+//
+// Note: This won't affect shadow roots that were already created before this call.
+// For full coverage, use InjectShadowInterceptor before navigation.
+func ApplyShadowInterceptorNow(page *rod.Page) error {
+	_, err := page.Evaluate(rod.Eval(shadowInterceptScript))
+	if err != nil {
+		return fmt.Errorf("failed to apply shadow interceptor: %w", err)
+	}
+
+	log.Debug().Msg("Shadow root interceptor applied to current context")
+	return nil
 }

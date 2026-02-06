@@ -28,12 +28,60 @@ javascript:
   - "cf-challenge"
   - "cf_chl_prog"
 
+# CAPTCHA patterns (hCaptcha, reCAPTCHA)
+# These are detected but not auto-solved
+captcha:
+  - "hcaptcha.com"
+  - "h-captcha"
+  - "hcaptcha-checkbox"
+  - "recaptcha"
+  - "grecaptcha"
+  - "g-recaptcha"
+  - "recaptcha/api"
+
 # Turnstile checkbox selectors (in order of preference)
+# Note: More specific selectors first, generic checkbox last to avoid false positives
 turnstile_selectors:
-  - "input[type='checkbox']"
   - ".cf-turnstile-response"
   - "#cf-turnstile-response"
   - "[data-testid='cf-turnstile-response']"
+  - "[data-sitekey] input[type='checkbox']"
+  - ".cf-turnstile input[type='checkbox']"
 
 # Turnstile frame URL pattern
 turnstile_frame_pattern: "challenges.cloudflare.com"
+
+# Shadow DOM host selectors (for closed shadow root traversal)
+# These are elements that may contain a shadow root with the Turnstile checkbox
+# Modern selectors for Cloudflare Turnstile (2024+)
+shadow_hosts:
+  - "div.cf-turnstile-wrapper"
+  - ".cf-turnstile"
+  - "#turnstile-wrapper"
+  - "[data-sitekey]"
+  - ".turnstile-container"
+  - "[data-cf-turnstile]"
+  - "cf-turnstile"
+  - "[data-ray]"
+  - ".cf-challenge-container"
+  - "#challenge-stage"
+  - "[data-cf-beacon]"
+  - "#cf-challenge-running"
+
+# Selectors to find checkbox inside shadow roots
+# More specific Turnstile/CF selectors first, then generic checkbox selectors
+shadow_inner_selectors:
+  - "[data-testid='cf-turnstile-response'] input"
+  - ".cf-turnstile-response"
+  - "#turnstile-response"
+  - "[aria-label*='Verify'] input[type='checkbox']"
+  - "[role='checkbox'][aria-checked]"
+  - "label[for*='cf'] input[type='checkbox']"
+  - "input[type='checkbox'][id*='cf']"
+  - "input[type='checkbox'][name*='cf']"
+  - "[role='checkbox']"
+  - ".checkbox"
+  - "#checkbox"
+  - "[aria-checked]"
+  - "label input[type='checkbox']"
+  - "input[type='checkbox']"
