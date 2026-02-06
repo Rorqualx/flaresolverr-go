@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // maxClients is the maximum number of tracked clients to prevent memory exhaustion.
@@ -22,6 +24,7 @@ type RateLimiter struct {
 	trustProxy bool          // whether to trust X-Forwarded-For headers
 	stopCh     chan struct{}
 	wg         sync.WaitGroup // Track background goroutines for clean shutdown
+	closeOnce  sync.Once      // Fix #28: Ensure Close is idempotent
 }
 
 type client struct {
@@ -123,13 +126,20 @@ func (rl *RateLimiter) cleanupStale() {
 // evictOldest removes the oldest client entry to make room for new ones.
 // Must be called while holding rl.mu.
 func (rl *RateLimiter) evictOldest() {
+	// Fix: Check for empty map to prevent scanning empty map
+	if len(rl.clients) == 0 {
+		return
+	}
+
 	var oldestIP string
 	var oldestTime time.Time
+	first := true
 
 	for ip, c := range rl.clients {
-		if oldestIP == "" || c.lastReset.Before(oldestTime) {
+		if first || c.lastReset.Before(oldestTime) {
 			oldestIP = ip
 			oldestTime = c.lastReset
+			first = false
 		}
 	}
 
@@ -139,9 +149,12 @@ func (rl *RateLimiter) evictOldest() {
 }
 
 // Close stops the cleanup routine and waits for it to finish.
+// Fix #28: Uses sync.Once to make Close idempotent and prevent panic on double-close.
 func (rl *RateLimiter) Close() {
-	close(rl.stopCh)
-	rl.wg.Wait()
+	rl.closeOnce.Do(func() {
+		close(rl.stopCh)
+		rl.wg.Wait()
+	})
 }
 
 // GetClientIP extracts the client IP from the request.
@@ -171,13 +184,39 @@ func RateLimit(requestsPerMinute int) func(http.Handler) http.Handler {
 	return RateLimitWithTrust(requestsPerMinute, false)
 }
 
+// RateLimiterMiddleware wraps RateLimiter with cleanup support for graceful shutdown.
+// Call Close() on shutdown to stop the cleanup goroutine.
+type RateLimiterMiddleware struct {
+	limiter *RateLimiter
+	handler func(http.Handler) http.Handler
+}
+
+// Close stops the rate limiter's cleanup routine.
+func (m *RateLimiterMiddleware) Close() {
+	if m.limiter != nil {
+		m.limiter.Close()
+	}
+}
+
+// Handler returns the middleware handler function.
+func (m *RateLimiterMiddleware) Handler() func(http.Handler) http.Handler {
+	return m.handler
+}
+
 // RateLimitWithTrust returns middleware that limits requests per IP with configurable proxy trust.
 // trustProxy: set to true only if running behind a trusted reverse proxy (nginx, cloudflare, etc.)
 // WARNING: Enabling trustProxy when not behind a proxy allows attackers to bypass rate limiting
 // by spoofing X-Forwarded-For headers.
 //
 // Fix #16: See RateLimit() for singleton usage notes - call ONCE and reuse.
+//
+// Fix #29: Deprecated: Use NewRateLimitMiddleware for proper cleanup support.
+// This function creates a RateLimiter with a background goroutine that cannot be stopped,
+// which causes goroutine leaks. Use NewRateLimitMiddleware().Handler() instead and call
+// Close() on shutdown.
 func RateLimitWithTrust(requestsPerMinute int, trustProxy bool) func(http.Handler) http.Handler {
+	log.Warn().Msg("RateLimitWithTrust is deprecated and leaks goroutines - use NewRateLimitMiddleware instead")
+
 	limiter := NewRateLimiter(requestsPerMinute, time.Minute, trustProxy)
 
 	return func(next http.Handler) http.Handler {
@@ -196,23 +235,86 @@ func RateLimitWithTrust(requestsPerMinute int, trustProxy bool) func(http.Handle
 	}
 }
 
+// NewRateLimitMiddleware creates a rate limiter middleware with cleanup support.
+// Call Close() on the returned middleware during shutdown to prevent goroutine leaks.
+func NewRateLimitMiddleware(requestsPerMinute int, trustProxy bool) *RateLimiterMiddleware {
+	limiter := NewRateLimiter(requestsPerMinute, time.Minute, trustProxy)
+
+	m := &RateLimiterMiddleware{
+		limiter: limiter,
+	}
+
+	m.handler = func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			startTime := time.Now()
+			ip := limiter.GetClientIP(r)
+
+			if !limiter.Allow(ip) {
+				w.Header().Set("Retry-After", "60")
+				writeErrorResponse(w, http.StatusTooManyRequests, "Rate limit exceeded. Please try again later.", startTime)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	return m
+}
+
+// normalizeIP validates and normalizes an IP address string.
+// Returns a canonical IP string or the original string if invalid.
+// This prevents bypass attempts using IPv6 variations.
+func normalizeIP(ipStr string) string {
+	ipStr = strings.TrimSpace(ipStr)
+	if ipStr == "" {
+		return ""
+	}
+
+	// Parse and normalize the IP
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		// Invalid IP - return as-is for logging but may cause issues
+		return ipStr
+	}
+
+	// Normalize IPv4-mapped IPv6 addresses to IPv4
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.String()
+	}
+
+	// Return canonical IPv6 form
+	return ip.String()
+}
+
 // getClientIP extracts the client IP from the request.
 // When trustProxy is false (default), only RemoteAddr is used to prevent IP spoofing.
 // When trustProxy is true, X-Forwarded-For and X-Real-IP headers are checked first.
+// Fix: Validates and normalizes IP addresses to prevent bypasses.
 func getClientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		// Check X-Forwarded-For header (may contain multiple IPs)
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			// Take the first IP (leftmost = original client)
+			var ipStr string
 			if idx := strings.Index(xff, ","); idx > 0 {
-				return strings.TrimSpace(xff[:idx])
+				ipStr = xff[:idx]
+			} else {
+				ipStr = xff
 			}
-			return strings.TrimSpace(xff)
+			// Validate and normalize the extracted IP
+			normalized := normalizeIP(ipStr)
+			if normalized != "" {
+				return normalized
+			}
 		}
 
 		// Check X-Real-IP header
 		if xri := r.Header.Get("X-Real-IP"); xri != "" {
-			return strings.TrimSpace(xri)
+			normalized := normalizeIP(xri)
+			if normalized != "" {
+				return normalized
+			}
 		}
 	}
 
@@ -221,5 +323,5 @@ func getClientIP(r *http.Request, trustProxy bool) string {
 	if err != nil {
 		return r.RemoteAddr
 	}
-	return ip
+	return normalizeIP(ip)
 }
