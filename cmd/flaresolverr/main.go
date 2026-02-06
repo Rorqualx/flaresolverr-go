@@ -18,7 +18,6 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 	"github.com/Rorqualx/flaresolverr-go/internal/handlers"
-	"github.com/Rorqualx/flaresolverr-go/internal/metrics"
 	"github.com/Rorqualx/flaresolverr-go/internal/middleware"
 	"github.com/Rorqualx/flaresolverr-go/internal/session"
 	"github.com/Rorqualx/flaresolverr-go/pkg/version"
@@ -66,8 +65,9 @@ func main() {
 	// 1. Recovery (outermost - catches panics from everything)
 	// 2. Logging (logs all requests)
 	// 3. Rate limiting (if enabled)
-	// 4. Security headers
-	// 5. CORS (handles preflight)
+	// 4. API key authentication (if enabled)
+	// 5. Security headers
+	// 6. CORS (handles preflight)
 
 	finalHandler = middleware.CORS(middleware.CORSConfig{
 		AllowedOrigins: cfg.CORSAllowedOrigins,
@@ -75,12 +75,23 @@ func main() {
 
 	finalHandler = middleware.SecurityHeaders(finalHandler)
 
+	// Apply API key authentication middleware if enabled
+	// This MUST be applied before rate limiting so unauthenticated requests
+	// are rejected before consuming rate limit tokens
+	if cfg.APIKeyEnabled {
+		log.Info().Msg("API key authentication enabled")
+		finalHandler = middleware.APIKey(cfg)(finalHandler)
+	}
+
+	// Create rate limiter middleware with cleanup support
+	var rateLimiter *middleware.RateLimiterMiddleware
 	if cfg.RateLimitEnabled {
 		log.Info().
 			Int("requests_per_minute", cfg.RateLimitRPM).
 			Bool("trust_proxy", cfg.TrustProxy).
 			Msg("Rate limiting enabled")
-		finalHandler = middleware.RateLimitWithTrust(cfg.RateLimitRPM, cfg.TrustProxy)(finalHandler)
+		rateLimiter = middleware.NewRateLimitMiddleware(cfg.RateLimitRPM, cfg.TrustProxy)
+		finalHandler = rateLimiter.Handler()(finalHandler)
 	}
 
 	finalHandler = middleware.Logging(finalHandler)
@@ -89,46 +100,12 @@ func main() {
 	// Create HTTP server
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      finalHandler,
-		ReadTimeout:  cfg.MaxTimeout + 10*time.Second,
-		WriteTimeout: cfg.MaxTimeout + 10*time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-
-	// Channel to signal shutdown to background tasks
-	stopCh := make(chan struct{})
-
-	// Start metrics server if enabled
-	var metricsServer *http.Server
-	if cfg.PrometheusEnabled {
-		// Set build info
-		metrics.SetBuildInfo(version.Full(), version.GoVersion())
-
-		// Start memory collector
-		go metrics.StartMemoryCollector(10*time.Second, stopCh)
-
-		// Create metrics server
-		metricsAddr := fmt.Sprintf(":%d", cfg.PrometheusPort)
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", metrics.Handler())
-
-		metricsServer = &http.Server{
-			Addr:         metricsAddr,
-			Handler:      metricsMux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
-		}
-
-		go func() {
-			log.Info().
-				Int("port", cfg.PrometheusPort).
-				Msg("Prometheus metrics server started")
-
-			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Error().Err(err).Msg("Metrics server failed")
-			}
-		}()
+		Addr:              addr,
+		Handler:           finalHandler,
+		ReadTimeout:       cfg.MaxTimeout + 10*time.Second,
+		WriteTimeout:      cfg.MaxTimeout + 10*time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second, // Prevent slowloris attacks
 	}
 
 	// Start pprof server if enabled
@@ -160,7 +137,6 @@ func main() {
 		log.Info().
 			Str("address", addr).
 			Int("pool_size", cfg.BrowserPoolSize).
-			Bool("metrics_enabled", cfg.PrometheusEnabled).
 			Bool("rate_limit_enabled", cfg.RateLimitEnabled).
 			Msg("FlareSolverr is ready to accept requests")
 
@@ -174,10 +150,10 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Info().Msg("Shutting down...")
+	// Stop receiving signals to prevent double-shutdown
+	signal.Stop(quit)
 
-	// Signal background tasks to stop
-	close(stopCh)
+	log.Info().Msg("Shutting down...")
 
 	// Graceful shutdown with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -188,18 +164,16 @@ func main() {
 		log.Error().Err(err).Msg("Server shutdown error")
 	}
 
-	// Shutdown metrics server if running
-	if metricsServer != nil {
-		if err := metricsServer.Shutdown(ctx); err != nil {
-			log.Error().Err(err).Msg("Metrics server shutdown error")
-		}
-	}
-
 	// Shutdown pprof server if running
 	if pprofServer != nil {
 		if err := pprofServer.Shutdown(ctx); err != nil {
 			log.Error().Err(err).Msg("pprof server shutdown error")
 		}
+	}
+
+	// Close rate limiter to stop cleanup goroutine
+	if rateLimiter != nil {
+		rateLimiter.Close()
 	}
 
 	// Close session manager
