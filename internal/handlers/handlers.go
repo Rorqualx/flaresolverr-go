@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -69,6 +70,52 @@ func sanitizeURLForLogging(rawURL string) string {
 
 	parsed.RawQuery = query.Encode()
 	return parsed.String()
+}
+
+// specialCharsForLogging contains characters that commonly cause issues in proxy credentials.
+// This is used for debug logging to help troubleshoot authentication problems.
+var specialCharsForLogging = []rune{'"', '\'', '\\', '@', ':', '%', '\n', '\r', '\t'}
+
+// logProxyCredentialInfo logs debug information about proxy credentials without exposing
+// the actual values. This helps troubleshoot issues with special characters in credentials.
+func logProxyCredentialInfo(username, password string) {
+	// Check if username contains special characters
+	usernameHasSpecial := false
+	for _, c := range username {
+		for _, special := range specialCharsForLogging {
+			if c == special {
+				usernameHasSpecial = true
+				break
+			}
+		}
+		if usernameHasSpecial {
+			break
+		}
+	}
+
+	// Check if password contains special characters
+	passwordHasSpecial := false
+	for _, c := range password {
+		for _, special := range specialCharsForLogging {
+			if c == special {
+				passwordHasSpecial = true
+				break
+			}
+		}
+		if passwordHasSpecial {
+			break
+		}
+	}
+
+	// Only log if special characters are present (to reduce noise)
+	if usernameHasSpecial || passwordHasSpecial {
+		log.Debug().
+			Bool("username_has_special_chars", usernameHasSpecial).
+			Bool("password_has_special_chars", passwordHasSpecial).
+			Int("username_length", len(username)).
+			Int("password_length", len(password)).
+			Msg("Proxy credentials contain special characters (handled via CDP/extension)")
+	}
 }
 
 // extractChromeVersion extracts the major Chrome version from a User-Agent string.
@@ -371,25 +418,27 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 
-	// Validate URL for SSRF protection with DNS resolution for audit trail
-	// Fix #8: Note on DNS pinning limitation:
-	// The resolvedIP is logged for audit purposes to help detect DNS rebinding attacks,
-	// but it is NOT used to enforce DNS pinning. True DNS rebinding protection would require
-	// a custom DNS resolver that pins the IP for the entire request lifecycle, which is
-	// not implemented here. The browser may re-resolve DNS and get a different IP.
-	// The response URL is re-validated after navigation as a secondary defense.
-	validatedURL, resolvedIP, err := security.ValidateAndResolveURL(req.URL)
+	// Validate URL for SSRF protection with DNS resolution and pinning
+	// DNS Pinning: The resolved IP is captured here and passed to the solver.
+	// After browser navigation, the response URL's IP is compared against this
+	// expected IP to detect DNS rebinding attacks where:
+	// 1. Attacker's domain initially resolves to a safe IP (passes validation)
+	// 2. Before browser navigates, attacker changes DNS to point to internal IP
+	// 3. Browser ends up accessing internal resources
+	// The post-navigation validation catches this by re-resolving and comparing.
+	// Use request context to respect client-side timeouts for DNS resolution.
+	validatedURL, resolvedIP, err := security.ValidateAndResolveURLWithContext(ctx, req.URL)
 	if err != nil {
 		log.Warn().Err(err).Str("url", sanitizeURLForLogging(req.URL)).Msg("URL validation failed")
-		h.writeError(w, "Invalid URL: "+err.Error(), startTime)
+		h.writeError(w, fmt.Sprintf("Invalid URL: %v", err), startTime)
 		return
 	}
-	// Log resolved IP for audit trail (helps detect DNS rebinding attempts)
+	// Log resolved IP for DNS pinning
 	if resolvedIP != nil {
 		log.Debug().
 			Str("url", sanitizeURLForLogging(validatedURL)).
 			Str("resolved_ip", resolvedIP.String()).
-			Msg("URL validated with DNS resolution")
+			Msg("URL validated with DNS resolution (IP pinned for rebinding protection)")
 	}
 
 	// Validate proxy URL if provided
@@ -402,7 +451,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 	if proxyURL != "" {
 		if err := security.ValidateProxyURL(proxyURL, h.config.AllowLocalProxies); err != nil {
 			log.Warn().Err(err).Msg("Proxy URL validation failed")
-			h.writeError(w, "Invalid proxy URL: "+err.Error(), startTime)
+			h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
 			return
 		}
 	}
@@ -423,6 +472,12 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			h.writeError(w, "Proxy password exceeds maximum length of 256 characters", startTime)
 			return
 		}
+
+		// Debug log when credentials contain special characters that commonly cause issues
+		// This helps with troubleshooting without exposing the actual credentials
+		if req.Proxy.Username != "" || req.Proxy.Password != "" {
+			logProxyCredentialInfo(req.Proxy.Username, req.Proxy.Password)
+		}
 	}
 
 	// Validate cookies to prevent resource exhaustion
@@ -439,6 +494,12 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 	for _, cookie := range req.Cookies {
+		// Fix #40: Validate cookie name is not empty
+		if len(cookie.Name) == 0 {
+			log.Warn().Msg("Empty cookie name")
+			h.writeError(w, "Cookie name cannot be empty", startTime)
+			return
+		}
 		if len(cookie.Name) > maxCookieNameLength {
 			truncName := cookie.Name
 			if len(truncName) > 50 {
@@ -463,6 +524,12 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			h.writeError(w, "Cookie path exceeds maximum length of 2048 characters", startTime)
 			return
 		}
+		// Fix #41: Validate cookie path doesn't contain traversal sequences
+		if strings.Contains(cookie.Path, "..") {
+			log.Warn().Str("name", cookie.Name).Str("path", cookie.Path).Msg("Cookie path contains traversal sequence")
+			h.writeError(w, "Cookie path cannot contain '..'", startTime)
+			return
+		}
 	}
 
 	// Validate POST requirements
@@ -482,14 +549,61 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 
-	// Validate and determine timeout
+	// Validate contentType (only for POST requests)
+	contentType := req.ContentType
+	if isPost && contentType != "" {
+		switch contentType {
+		case types.ContentTypeFormURLEncoded, types.ContentTypeJSON:
+			// Valid content types
+		default:
+			log.Warn().Str("contentType", contentType).Msg("Invalid content type")
+			h.writeError(w, "contentType must be 'application/json' or 'application/x-www-form-urlencoded'", startTime)
+			return
+		}
+
+		// Validate JSON syntax if contentType is application/json
+		if contentType == types.ContentTypeJSON {
+			if !json.Valid([]byte(req.PostData)) {
+				log.Warn().Msg("Invalid JSON in postData")
+				h.writeError(w, "postData must be valid JSON when contentType is 'application/json'", startTime)
+				return
+			}
+		}
+
+		// Validate form-urlencoded syntax if contentType is application/x-www-form-urlencoded
+		if contentType == types.ContentTypeFormURLEncoded && req.PostData != "" {
+			if _, err := url.ParseQuery(req.PostData); err != nil {
+				log.Warn().Err(err).Msg("Invalid form-urlencoded postData")
+				h.writeError(w, "postData must be valid form-urlencoded format", startTime)
+				return
+			}
+		}
+	}
+
+	// Validate custom headers
+	if len(req.Headers) > 0 {
+		if err := security.ValidateHeaders(req.Headers); err != nil {
+			log.Warn().Err(err).Msg("Header validation failed")
+			h.writeError(w, fmt.Sprintf("Invalid headers: %v", err), startTime)
+			return
+		}
+	}
+
+	// Validate and determine timeout with overflow protection
 	if req.MaxTimeout < 0 {
 		h.writeError(w, "maxTimeout cannot be negative", startTime)
 		return
 	}
 	timeout := h.config.DefaultTimeout
 	if req.MaxTimeout > 0 {
-		timeout = time.Duration(req.MaxTimeout) * time.Millisecond
+		// Fix 1.8: Cap maxTimeout to prevent integer overflow when converting to Duration
+		// Maximum safe value: 10 minutes (600,000 ms) - prevents overflow and abuse
+		const maxTimeoutMs = 10 * 60 * 1000 // 10 minutes in milliseconds
+		maxTimeoutValue := req.MaxTimeout
+		if maxTimeoutValue > maxTimeoutMs {
+			maxTimeoutValue = maxTimeoutMs
+		}
+		timeout = time.Duration(maxTimeoutValue) * time.Millisecond
 		if timeout > h.config.MaxTimeout {
 			timeout = h.config.MaxTimeout
 		}
@@ -509,17 +623,34 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		waitInSeconds = maxWaitSeconds
 	}
 
-	// Build solve options
+	// Validate and cap TabsTillVerify to prevent abuse
+	const maxTabsTillVerify = 50
+	tabsTillVerify := req.TabsTillVerify
+	if tabsTillVerify < 0 {
+		tabsTillVerify = 0
+	} else if tabsTillVerify > maxTabsTillVerify {
+		log.Warn().
+			Int("requested", req.TabsTillVerify).
+			Int("capped_to", maxTabsTillVerify).
+			Msg("TabsTillVerify exceeds maximum, capping")
+		tabsTillVerify = maxTabsTillVerify
+	}
+
+	// Build solve options with DNS pinning
 	opts := &solver.SolveOptions{
-		URL:           req.URL,
-		Timeout:       timeout,
-		Cookies:       req.Cookies,
-		Proxy:         req.Proxy,
-		PostData:      req.PostData,
-		IsPost:        isPost,
-		Screenshot:    req.ReturnScreenshot,
-		DisableMedia:  req.DisableMedia,
-		WaitInSeconds: waitInSeconds,
+		URL:            req.URL,
+		Timeout:        timeout,
+		Cookies:        req.Cookies,
+		Proxy:          req.Proxy,
+		PostData:       req.PostData,
+		ContentType:    contentType, // Content type for POST (json or form-urlencoded)
+		Headers:        req.Headers, // Custom HTTP headers
+		IsPost:         isPost,
+		Screenshot:     req.ReturnScreenshot,
+		DisableMedia:   req.DisableMedia,
+		WaitInSeconds:  waitInSeconds,
+		ExpectedIP:     resolvedIP,     // DNS pinning: verify response URL resolves to same IP
+		TabsTillVerify: tabsTillVerify, // Number of Tab presses for Turnstile keyboard navigation
 	}
 
 	var result *solver.Result
@@ -533,14 +664,22 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			h.writeError(w, "Session not found or expired", startTime)
 			return
 		}
-		// Fix #6: Use SafeGetPage to prevent TOCTOU race condition
-		// This atomically checks and retrieves the page reference under lock
-		page := sess.SafeGetPage()
+
+		// Acquire operation lock to prevent concurrent operations on the same session
+		// This prevents page state corruption from concurrent navigation/actions
+		sess.LockOperation()
+		defer sess.UnlockOperation()
+
+		// Use AcquirePageWithRelease for reference counting to prevent
+		// race condition where page is closed during solve operation.
+		// The release function uses sync.Once to ensure exactly one release.
+		page, releasePage := sess.AcquirePageWithRelease()
 		if page == nil {
-			log.Error().Str("session", req.Session).Msg("Session page is nil")
+			log.Error().Str("session", req.Session).Msg("Session page is nil or session is closing")
 			h.writeError(w, "Session page is no longer available", startTime)
 			return
 		}
+		defer releasePage()
 		result, solveErr = h.solver.SolveWithPage(ctx, page, opts)
 	} else {
 		result, solveErr = h.solver.Solve(ctx, opts)
@@ -584,15 +723,16 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 	// Acquire browser for session
 	browserInstance, err := h.pool.Acquire(ctx)
 	if err != nil {
-		h.writeError(w, "Failed to acquire browser: "+err.Error(), startTime)
+		h.writeError(w, fmt.Sprintf("Failed to acquire browser: %v", err), startTime)
 		return
 	}
 
 	// Create session (note: this transfers browser ownership to session)
+	// On error, Create() already releases the browser back to pool, so don't release here
 	sess, err := h.sessions.Create(sessionID, browserInstance)
 	if err != nil {
-		h.pool.Release(browserInstance)
-		h.writeError(w, "Failed to create session: "+err.Error(), startTime)
+		// Note: Do NOT release browser here - session.Create() handles it on all error paths
+		h.writeError(w, fmt.Sprintf("Failed to create session: %v", err), startTime)
 		return
 	}
 
@@ -633,7 +773,17 @@ func (h *Handler) handleSessionDestroy(w http.ResponseWriter, req *types.Request
 		return
 	}
 
+	// Fix #42: Validate session ID format before attempting destroy
+	if errMsg := security.ValidateSessionID(req.Session); errMsg != "" {
+		h.writeError(w, errMsg, startTime)
+		return
+	}
+
 	if err := h.sessions.Destroy(req.Session); err != nil {
+		if errors.Is(err, types.ErrSessionInUse) {
+			h.writeError(w, "Session is currently in use, try again later", startTime)
+			return
+		}
 		h.writeError(w, "Session not found or already destroyed", startTime)
 		return
 	}
@@ -799,12 +949,47 @@ func (h *Handler) writeAccessDeniedError(w http.ResponseWriter, requestURL strin
 	h.writeJSONResponse(w, http.StatusOK, resp)
 }
 
+// sanitizeErrorMessage removes internal details from error messages
+// to prevent information disclosure to clients.
+func sanitizeErrorMessage(message string) string {
+	// List of internal error prefixes/patterns to sanitize
+	sensitivePatterns := []string{
+		"failed to acquire browser:",
+		"failed to spawn browser:",
+		"browser pool exhausted:",
+		"context deadline exceeded",
+		"context canceled",
+		"i/o timeout",
+		"connection refused",
+		"no such host",
+		"network is unreachable",
+	}
+
+	messageLower := strings.ToLower(message)
+	for _, pattern := range sensitivePatterns {
+		if strings.Contains(messageLower, pattern) {
+			// Return generic message for internal errors
+			if strings.Contains(messageLower, "browser") || strings.Contains(messageLower, "pool") {
+				return "Service temporarily unavailable"
+			}
+			if strings.Contains(messageLower, "timeout") || strings.Contains(messageLower, "context") {
+				return "Request timed out"
+			}
+			if strings.Contains(messageLower, "connection") || strings.Contains(messageLower, "network") || strings.Contains(messageLower, "host") {
+				return "Unable to connect to target"
+			}
+		}
+	}
+	return message
+}
+
 // writeError writes an error response with appropriate HTTP status code.
 // Note: For backward compatibility with existing clients, we still return HTTP 200
 // with the error in the JSON body. This matches the original FlareSolverr behavior.
 // Use writeErrorWithStatus for cases where HTTP status codes are preferred.
+// Fix: Sanitizes error messages to prevent internal detail disclosure.
 func (h *Handler) writeError(w http.ResponseWriter, message string, startTime time.Time) {
-	h.writeErrorWithStatus(w, http.StatusOK, message, startTime)
+	h.writeErrorWithStatus(w, http.StatusOK, sanitizeErrorMessage(message), startTime)
 }
 
 // writeErrorWithStatus writes an error response with a specific HTTP status code.
@@ -828,7 +1013,9 @@ func (h *Handler) writeJSONResponse(w http.ResponseWriter, statusCode int, resp 
 	if err := json.NewEncoder(buf).Encode(resp); err != nil {
 		log.Error().Err(err).Msg("Failed to encode JSON response")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"status":"error","message":"internal encoding error"}`))
+		if _, err := w.Write([]byte(`{"status":"error","message":"internal encoding error"}`)); err != nil {
+			log.Error().Err(err).Msg("Failed to write fallback error response")
+		}
 		return
 	}
 
@@ -836,5 +1023,7 @@ func (h *Handler) writeJSONResponse(w http.ResponseWriter, statusCode int, resp 
 	if statusCode != http.StatusOK {
 		w.WriteHeader(statusCode)
 	}
-	_, _ = w.Write(buf.Bytes())
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		log.Error().Err(err).Msg("Failed to write JSON response")
+	}
 }

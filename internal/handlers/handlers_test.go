@@ -117,10 +117,13 @@ func TestOptionsMethod(t *testing.T) {
 	defer h.sessions.Close()
 
 	// CORS is handled by middleware, so wrap handler with CORS middleware
-	// Empty config means allow all origins (backward compatible)
-	corsHandler := middleware.CORS(middleware.CORSConfig{})(h)
+	// Fix #17: Empty config now rejects all - use allowed origins for test
+	corsHandler := middleware.CORS(middleware.CORSConfig{
+		AllowedOrigins: []string{"https://example.com"},
+	})(h)
 
 	req := httptest.NewRequest("OPTIONS", "/v1", nil)
+	req.Header.Set("Origin", "https://example.com")
 	w := httptest.NewRecorder()
 
 	corsHandler.ServeHTTP(w, req)
@@ -129,9 +132,9 @@ func TestOptionsMethod(t *testing.T) {
 		t.Errorf("Expected status 200 for OPTIONS, got %d", w.Code)
 	}
 
-	// Check CORS headers (set by middleware)
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("Missing CORS Allow-Origin header")
+	// Check CORS headers (set by middleware) - should return specific origin
+	if w.Header().Get("Access-Control-Allow-Origin") != "https://example.com" {
+		t.Errorf("Expected Access-Control-Allow-Origin 'https://example.com', got %q", w.Header().Get("Access-Control-Allow-Origin"))
 	}
 	if w.Header().Get("Access-Control-Allow-Methods") == "" {
 		t.Error("Missing CORS Allow-Methods header")
@@ -178,7 +181,8 @@ func TestUnknownCommand(t *testing.T) {
 		t.Errorf("Expected error status, got %q", resp.Status)
 	}
 
-	if resp.Message != "Unknown command: unknown.command" {
+	// Command is quoted with %q format for security (prevents log injection)
+	if resp.Message != `Unknown command: "unknown.command"` {
 		t.Errorf("Unexpected error message: %q", resp.Message)
 	}
 }
