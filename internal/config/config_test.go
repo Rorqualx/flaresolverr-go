@@ -15,7 +15,6 @@ func TestLoadDefaults(t *testing.T) {
 		"DEFAULT_TIMEOUT", "MAX_TIMEOUT",
 		"PROXY_URL", "PROXY_USERNAME", "PROXY_PASSWORD",
 		"LOG_LEVEL", "LOG_HTML",
-		"PROMETHEUS_ENABLED", "PROMETHEUS_PORT",
 	}
 	for _, env := range envVars {
 		os.Unsetenv(env)
@@ -23,9 +22,9 @@ func TestLoadDefaults(t *testing.T) {
 
 	cfg := Load()
 
-	// Server defaults
-	if cfg.Host != "0.0.0.0" {
-		t.Errorf("Expected default host '0.0.0.0', got %q", cfg.Host)
+	// Server defaults - default to localhost for security
+	if cfg.Host != "127.0.0.1" {
+		t.Errorf("Expected default host '127.0.0.1', got %q", cfg.Host)
 	}
 	if cfg.Port != 8191 {
 		t.Errorf("Expected default port 8191, got %d", cfg.Port)
@@ -73,14 +72,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogHTML {
 		t.Error("Expected LogHTML to be false by default")
 	}
-
-	// Metrics defaults
-	if cfg.PrometheusEnabled {
-		t.Error("Expected PrometheusEnabled to be false by default")
-	}
-	if cfg.PrometheusPort != 8192 {
-		t.Errorf("Expected default Prometheus port 8192, got %d", cfg.PrometheusPort)
-	}
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -98,11 +89,10 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("MAX_TIMEOUT", "10m")
 	os.Setenv("PROXY_URL", "http://proxy:8080")
 	os.Setenv("PROXY_USERNAME", "user")
-	os.Setenv("PROXY_PASSWORD", "pass")
+	// Fix #46: Use clearly marked placeholder for test credentials
+	os.Setenv("PROXY_PASSWORD", "test-placeholder-not-real")
 	os.Setenv("LOG_LEVEL", "debug")
 	os.Setenv("LOG_HTML", "true")
-	os.Setenv("PROMETHEUS_ENABLED", "true")
-	os.Setenv("PROMETHEUS_PORT", "9090")
 
 	defer func() {
 		// Clean up
@@ -113,7 +103,6 @@ func TestLoadFromEnv(t *testing.T) {
 			"DEFAULT_TIMEOUT", "MAX_TIMEOUT",
 			"PROXY_URL", "PROXY_USERNAME", "PROXY_PASSWORD",
 			"LOG_LEVEL", "LOG_HTML",
-			"PROMETHEUS_ENABLED", "PROMETHEUS_PORT",
 		}
 		for _, env := range envVars {
 			os.Unsetenv(env)
@@ -162,20 +151,15 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.ProxyUsername != "user" {
 		t.Errorf("Expected proxy username 'user', got %q", cfg.ProxyUsername)
 	}
-	if cfg.ProxyPassword != "pass" {
-		t.Errorf("Expected proxy password 'pass', got %q", cfg.ProxyPassword)
+	// Fix #46: Using placeholder value in tests
+	if cfg.ProxyPassword != "test-placeholder-not-real" {
+		t.Errorf("Expected proxy password 'test-placeholder-not-real', got %q", cfg.ProxyPassword)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("Expected log level 'debug', got %q", cfg.LogLevel)
 	}
 	if !cfg.LogHTML {
 		t.Error("Expected LogHTML to be true")
-	}
-	if !cfg.PrometheusEnabled {
-		t.Error("Expected PrometheusEnabled to be true")
-	}
-	if cfg.PrometheusPort != 9090 {
-		t.Errorf("Expected Prometheus port 9090, got %d", cfg.PrometheusPort)
 	}
 }
 

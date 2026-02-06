@@ -10,6 +10,16 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Configuration upper bounds to prevent resource exhaustion.
+const (
+	maxBrowserPoolSize = 20
+	maxMaxSessions     = 10000
+	maxMaxMemoryMB     = 16384
+	maxTimeout         = 10 * time.Minute
+	maxRateLimitRPM    = 10000 // Maximum requests per minute per IP
+	minAPIKeyLength    = 16    // Minimum API key length for security
+)
+
 // Config holds all application configuration.
 // Configuration is loaded from environment variables at startup.
 type Config struct {
@@ -36,6 +46,9 @@ type Config struct {
 	MaxTimeout     time.Duration
 
 	// Proxy defaults
+	// Fix #32: Note - Proxy credentials are stored in plaintext in memory
+	// for compatibility with proxy libraries. Consider using environment
+	// variables that are cleared after reading if security is critical.
 	ProxyURL      string
 	ProxyUsername string
 	ProxyPassword string
@@ -43,10 +56,6 @@ type Config struct {
 	// Logging
 	LogLevel string
 	LogHTML  bool
-
-	// Metrics
-	PrometheusEnabled bool
-	PrometheusPort    int
 
 	// Profiling
 	PProfEnabled  bool
@@ -70,8 +79,9 @@ type Config struct {
 // Returns a Config with values from environment or sensible defaults.
 func Load() *Config {
 	return &Config{
-		// Server
-		Host: getEnvString("HOST", "0.0.0.0"),
+		// Server - default to localhost for security (prevents accidental exposure)
+		// Set HOST=0.0.0.0 explicitly to bind to all interfaces
+		Host: getEnvString("HOST", "127.0.0.1"),
 		Port: getEnvInt("PORT", 8191),
 
 		// Browser
@@ -101,10 +111,6 @@ func Load() *Config {
 		LogLevel: getEnvString("LOG_LEVEL", "info"),
 		LogHTML:  getEnvBool("LOG_HTML", false),
 
-		// Metrics
-		PrometheusEnabled: getEnvBool("PROMETHEUS_ENABLED", false),
-		PrometheusPort:    getEnvInt("PROMETHEUS_PORT", 8192),
-
 		// Profiling - disabled by default for security
 		PProfEnabled:  getEnvBool("PPROF_ENABLED", false),
 		PProfPort:     getEnvInt("PPROF_PORT", 6060),
@@ -116,7 +122,7 @@ func Load() *Config {
 		TrustProxy:         getEnvBool("TRUST_PROXY", false),
 		IgnoreCertErrors:   getEnvBool("IGNORE_CERT_ERRORS", false),
 		CORSAllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", nil),
-		AllowLocalProxies:  getEnvBool("ALLOW_LOCAL_PROXIES", true), // Default true for backward compatibility
+		AllowLocalProxies:  getEnvBool("ALLOW_LOCAL_PROXIES", false), // Default false for security
 
 		// API Key Authentication
 		APIKeyEnabled: getEnvBool("API_KEY_ENABLED", false),
@@ -132,56 +138,170 @@ func (c *Config) HasDefaultProxy() bool {
 // Validate checks configuration values and logs warnings for invalid values.
 // Invalid values are corrected to sensible defaults. (Bug 12: config bounds validation)
 func (c *Config) Validate() {
-	// Port validation
-	if c.Port < 1 || c.Port > 65535 {
+	// Port validation - allow 0 for system-assigned ports
+	if c.Port < 0 || c.Port > 65535 {
 		log.Warn().Int("port", c.Port).Msg("Invalid port, using default 8191")
 		c.Port = 8191
 	}
 
-	// Pool size validation
+	// BrowserPath validation - prevent path traversal attacks
+	if c.BrowserPath != "" {
+		// Check for path traversal sequences
+		if strings.Contains(c.BrowserPath, "..") {
+			log.Error().
+				Str("path", c.BrowserPath).
+				Msg("BrowserPath contains path traversal sequence (..), ignoring")
+			c.BrowserPath = ""
+		} else if !strings.HasPrefix(c.BrowserPath, "/") && !strings.HasPrefix(c.BrowserPath, "C:") && !strings.HasPrefix(c.BrowserPath, "c:") {
+			// Not an absolute path (Unix or Windows)
+			log.Warn().
+				Str("path", c.BrowserPath).
+				Msg("BrowserPath should be an absolute path")
+		}
+	}
+
+	// Pool size validation with upper bound
 	if c.BrowserPoolSize < 1 {
 		log.Warn().Int("size", c.BrowserPoolSize).Msg("Invalid pool size, using default 3")
 		c.BrowserPoolSize = 3
-	}
-	if c.BrowserPoolSize > 20 {
-		log.Warn().Int("size", c.BrowserPoolSize).Msg("Large pool size may cause high memory usage")
+	} else if c.BrowserPoolSize > maxBrowserPoolSize {
+		log.Warn().
+			Int("size", c.BrowserPoolSize).
+			Int("max", maxBrowserPoolSize).
+			Msg("Pool size too large, capping to maximum")
+		c.BrowserPoolSize = maxBrowserPoolSize
 	}
 
-	// Memory validation
+	// Memory validation with upper bound
 	if c.MaxMemoryMB < 256 {
 		log.Warn().Int("mb", c.MaxMemoryMB).Msg("Memory limit too low, using default 2048")
 		c.MaxMemoryMB = 2048
+	} else if c.MaxMemoryMB > maxMaxMemoryMB {
+		log.Warn().
+			Int("mb", c.MaxMemoryMB).
+			Int("max", maxMaxMemoryMB).
+			Msg("Memory limit too high, capping to maximum")
+		c.MaxMemoryMB = maxMaxMemoryMB
 	}
 
-	// Timeout validation
+	// Timeout validation with upper bound
+	// Fix 3.21: Validate MaxTimeout first, then DefaultTimeout, to ensure proper ordering
+	if c.MaxTimeout < time.Second {
+		log.Warn().Dur("timeout", c.MaxTimeout).Msg("Max timeout too short, using 300s")
+		c.MaxTimeout = 300 * time.Second
+	}
+	if c.MaxTimeout > maxTimeout {
+		log.Warn().
+			Dur("timeout", c.MaxTimeout).
+			Dur("max", maxTimeout).
+			Msg("Max timeout too high, capping to maximum")
+		c.MaxTimeout = maxTimeout
+	}
 	if c.DefaultTimeout < time.Second {
 		log.Warn().Dur("timeout", c.DefaultTimeout).Msg("Default timeout too short, using 60s")
 		c.DefaultTimeout = 60 * time.Second
 	}
-	if c.MaxTimeout < c.DefaultTimeout {
+	if c.DefaultTimeout > c.MaxTimeout {
 		log.Warn().
-			Dur("max", c.MaxTimeout).
 			Dur("default", c.DefaultTimeout).
-			Msg("Max timeout less than default, adjusting")
-		c.MaxTimeout = c.DefaultTimeout
+			Dur("max", c.MaxTimeout).
+			Msg("Default timeout exceeds max timeout, adjusting to max")
+		c.DefaultTimeout = c.MaxTimeout
 	}
 
-	// Session validation
+	// Session validation with upper bound
 	if c.MaxSessions < 1 {
 		log.Warn().Int("max", c.MaxSessions).Msg("Invalid max sessions, using 100")
 		c.MaxSessions = 100
+	} else if c.MaxSessions > maxMaxSessions {
+		log.Warn().
+			Int("sessions", c.MaxSessions).
+			Int("max", maxMaxSessions).
+			Msg("Max sessions too high, capping to maximum")
+		c.MaxSessions = maxMaxSessions
 	}
 
-	// Rate limit validation
-	if c.RateLimitEnabled && c.RateLimitRPM < 1 {
-		log.Warn().Int("rpm", c.RateLimitRPM).Msg("Invalid rate limit, using 60 RPM")
-		c.RateLimitRPM = 60
+	// SessionTTL validation (minimum 1 minute, maximum 24 hours)
+	const minSessionTTL = 1 * time.Minute
+	const maxSessionTTL = 24 * time.Hour
+	if c.SessionTTL < minSessionTTL {
+		log.Warn().
+			Dur("ttl", c.SessionTTL).
+			Dur("min", minSessionTTL).
+			Msg("Session TTL too short, using minimum")
+		c.SessionTTL = minSessionTTL
+	} else if c.SessionTTL > maxSessionTTL {
+		log.Warn().
+			Dur("ttl", c.SessionTTL).
+			Dur("max", maxSessionTTL).
+			Msg("Session TTL too long, using maximum")
+		c.SessionTTL = maxSessionTTL
 	}
 
-	// Prometheus port validation
-	if c.PrometheusEnabled && (c.PrometheusPort < 1 || c.PrometheusPort > 65535) {
-		log.Warn().Int("port", c.PrometheusPort).Msg("Invalid Prometheus port, using 8192")
-		c.PrometheusPort = 8192
+	// SessionCleanupInterval validation (minimum 10 seconds, maximum 1 hour)
+	const minCleanupInterval = 10 * time.Second
+	const maxCleanupInterval = 1 * time.Hour
+	if c.SessionCleanupInterval < minCleanupInterval {
+		log.Warn().
+			Dur("interval", c.SessionCleanupInterval).
+			Dur("min", minCleanupInterval).
+			Msg("Session cleanup interval too short, using minimum")
+		c.SessionCleanupInterval = minCleanupInterval
+	} else if c.SessionCleanupInterval > maxCleanupInterval {
+		log.Warn().
+			Dur("interval", c.SessionCleanupInterval).
+			Dur("max", maxCleanupInterval).
+			Msg("Session cleanup interval too long, using maximum")
+		c.SessionCleanupInterval = maxCleanupInterval
+	}
+
+	// Fix #34: Cross-validate session cleanup interval vs TTL
+	if c.SessionCleanupInterval >= c.SessionTTL {
+		log.Warn().
+			Dur("cleanup_interval", c.SessionCleanupInterval).
+			Dur("ttl", c.SessionTTL).
+			Msg("SESSION_CLEANUP_INTERVAL should be less than SESSION_TTL for timely cleanup")
+	}
+
+	// BrowserPoolTimeout validation (minimum 1 second, maximum 5 minutes)
+	const minPoolTimeout = 1 * time.Second
+	const maxPoolTimeout = 5 * time.Minute
+	if c.BrowserPoolTimeout < minPoolTimeout {
+		log.Warn().
+			Dur("timeout", c.BrowserPoolTimeout).
+			Dur("min", minPoolTimeout).
+			Msg("Browser pool timeout too short, using minimum")
+		c.BrowserPoolTimeout = minPoolTimeout
+	} else if c.BrowserPoolTimeout > maxPoolTimeout {
+		log.Warn().
+			Dur("timeout", c.BrowserPoolTimeout).
+			Dur("max", maxPoolTimeout).
+			Msg("Browser pool timeout too long, using maximum")
+		c.BrowserPoolTimeout = maxPoolTimeout
+	}
+
+	// Rate limit validation with upper bound
+	if c.RateLimitEnabled {
+		if c.RateLimitRPM < 1 {
+			log.Warn().Int("rpm", c.RateLimitRPM).Msg("Invalid rate limit, using 60 RPM")
+			c.RateLimitRPM = 60
+		} else if c.RateLimitRPM > maxRateLimitRPM {
+			log.Warn().
+				Int("rpm", c.RateLimitRPM).
+				Int("max", maxRateLimitRPM).
+				Msg("Rate limit too high, capping to maximum")
+			c.RateLimitRPM = maxRateLimitRPM
+		}
+	}
+
+	// Log level validation
+	validLogLevels := map[string]bool{
+		"trace": true, "debug": true, "info": true,
+		"warn": true, "error": true, "fatal": true,
+	}
+	if !validLogLevels[strings.ToLower(c.LogLevel)] {
+		log.Warn().Str("level", c.LogLevel).Msg("Invalid log level, using 'info'")
+		c.LogLevel = "info"
 	}
 
 	// PProf security warning
@@ -205,7 +325,31 @@ func (c *Config) Validate() {
 		}
 	}
 
-	// Fix #17: Proxy credential validation
+	// Fix #17: Proxy URL and credential validation
+	if c.ProxyURL != "" {
+		// Basic URL format validation
+		if !strings.Contains(c.ProxyURL, "://") {
+			log.Error().
+				Str("proxy_url", c.ProxyURL).
+				Msg("ProxyURL missing scheme (should be http://, https://, socks4://, or socks5://)")
+		} else {
+			scheme := strings.ToLower(strings.Split(c.ProxyURL, "://")[0])
+			validSchemes := map[string]bool{"http": true, "https": true, "socks4": true, "socks5": true}
+			if !validSchemes[scheme] {
+				log.Error().
+					Str("proxy_url", c.ProxyURL).
+					Str("scheme", scheme).
+					Msg("ProxyURL has invalid scheme (must be http, https, socks4, or socks5)")
+			}
+
+			// Fix #33: Check for embedded credentials in proxy URL
+			// Credentials should be passed via PROXY_USERNAME/PROXY_PASSWORD for security
+			if strings.Contains(c.ProxyURL, "@") {
+				log.Warn().Msg("ProxyURL contains embedded credentials (@) - use PROXY_USERNAME and PROXY_PASSWORD environment variables instead for better security")
+			}
+		}
+	}
+
 	// Warn if username is set without password or vice versa
 	if c.ProxyUsername != "" && c.ProxyPassword == "" {
 		log.Warn().Msg("PROXY_USERNAME set but PROXY_PASSWORD is empty - authentication may fail")
@@ -217,25 +361,17 @@ func (c *Config) Validate() {
 	if (c.ProxyUsername != "" || c.ProxyPassword != "") && c.ProxyURL == "" {
 		log.Warn().Msg("Proxy credentials set but PROXY_URL is empty - credentials will not be used")
 	}
+	// Security: Warn if proxy credentials are used over HTTP (vulnerable to interception)
+	if (c.ProxyUsername != "" || c.ProxyPassword != "") && c.ProxyURL != "" {
+		if strings.HasPrefix(strings.ToLower(c.ProxyURL), "http://") {
+			log.Warn().Msg("WARNING: Proxy credentials over HTTP - credentials may be intercepted. Consider using HTTPS proxy")
+		}
+	}
 
-	// Port conflict validation
+	// Port conflict validation with fixed loop logic
 	usedPorts := make(map[int]string)
 	if c.Port > 0 {
 		usedPorts[c.Port] = "PORT"
-	}
-	if c.PrometheusEnabled {
-		if existingName, exists := usedPorts[c.PrometheusPort]; exists {
-			log.Error().
-				Int("port", c.PrometheusPort).
-				Str("conflicts_with", existingName).
-				Msg("PROMETHEUS_PORT conflicts with another port, adjusting")
-			// Find next available port
-			c.PrometheusPort = c.Port + 1
-			for _, exists := usedPorts[c.PrometheusPort]; exists; _, exists = usedPorts[c.PrometheusPort] {
-				c.PrometheusPort++
-			}
-		}
-		usedPorts[c.PrometheusPort] = "PROMETHEUS_PORT"
 	}
 	if c.PProfEnabled {
 		if existingName, exists := usedPorts[c.PProfPort]; exists {
@@ -243,20 +379,47 @@ func (c *Config) Validate() {
 				Int("port", c.PProfPort).
 				Str("conflicts_with", existingName).
 				Msg("PPROF_PORT conflicts with another port, adjusting")
-			// Find next available port
+			// Find next available port starting from 6060
 			c.PProfPort = 6060
-			for _, exists := usedPorts[c.PProfPort]; exists; _, exists = usedPorts[c.PProfPort] {
+			for usedPorts[c.PProfPort] != "" {
 				c.PProfPort++
+				if c.PProfPort > 65535 {
+					log.Warn().Msg("Could not find available pprof port, disabling")
+					c.PProfEnabled = false
+					break
+				}
 			}
 		}
 	}
 
-	// API key validation
-	if c.APIKeyEnabled && c.APIKey == "" {
-		log.Warn().Msg("API_KEY_ENABLED is true but API_KEY is empty - authentication will always fail")
-	}
-	if c.APIKeyEnabled && len(c.APIKey) < 16 {
-		log.Warn().Msg("API_KEY is shorter than 16 characters - consider using a stronger key")
+	// API key validation with minimum length enforcement
+	if c.APIKeyEnabled {
+		if c.APIKey == "" {
+			log.Error().Msg("API_KEY_ENABLED is true but API_KEY is empty - authentication will always fail")
+		} else if len(c.APIKey) < minAPIKeyLength {
+			log.Error().
+				Int("length", len(c.APIKey)).
+				Int("min_required", minAPIKeyLength).
+				Msg("API_KEY is too short for secure authentication - consider using a longer key")
+		} else {
+			// Fix #45: Validate API key format (alphanumeric with - or _)
+			const maxAPIKeyLength = 256
+			if len(c.APIKey) > maxAPIKeyLength {
+				log.Error().
+					Int("length", len(c.APIKey)).
+					Int("max", maxAPIKeyLength).
+					Msg("API_KEY is too long")
+			}
+			for i, r := range c.APIKey {
+				if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+					(r >= '0' && r <= '9') || r == '-' || r == '_') {
+					log.Warn().
+						Int("position", i).
+						Msg("API_KEY contains non-alphanumeric characters (only a-z, A-Z, 0-9, -, _ are recommended)")
+					break
+				}
+			}
+		}
 	}
 }
 
@@ -271,9 +434,19 @@ func getEnvString(key, defaultValue string) string {
 
 func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
-		intValue, err := strconv.Atoi(value)
+		// Use ParseInt with explicit bounds to catch overflow
+		intValue, err := strconv.ParseInt(value, 10, 32)
 		if err == nil {
-			return intValue
+			// Additional bounds check for sanity
+			if intValue < -2147483648 || intValue > 2147483647 {
+				log.Warn().
+					Str("key", key).
+					Str("value", value).
+					Int("default", defaultValue).
+					Msg("Integer value out of range in environment variable, using default")
+				return defaultValue
+			}
+			return int(intValue)
 		}
 		// Bug 8: Log warning on parse failure instead of silent fallback
 		log.Warn().
@@ -307,7 +480,16 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 	if value := os.Getenv(key); value != "" {
 		duration, err := time.ParseDuration(value)
 		if err == nil {
-			return duration
+			// Reject negative or zero durations
+			if duration > 0 {
+				return duration
+			}
+			log.Warn().
+				Str("key", key).
+				Str("value", value).
+				Dur("default", defaultValue).
+				Msg("Duration must be positive, using default")
+			return defaultValue
 		}
 		// Bug 8: Log warning on parse failure instead of silent fallback
 		log.Warn().

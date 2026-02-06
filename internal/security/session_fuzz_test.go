@@ -10,12 +10,12 @@ import (
 func FuzzValidateSessionID(f *testing.F) {
 	// Seed corpus with known test cases
 	seeds := []string{
-		// Valid session IDs
+		// Valid session IDs (min 8 chars)
 		"test-session-123",
-		"abc123",
+		"abc12345",
 		"my_session",
 		"Session-1",
-		"a",
+		"abcdefgh",              // Min length (8 chars)
 		strings.Repeat("a", 64), // Max length
 
 		// Invalid - too long
@@ -115,9 +115,9 @@ func FuzzGenerateSessionID(f *testing.F) {
 			t.Errorf("Generated session ID failed validation: id=%q, error=%q", id, validationErr)
 		}
 
-		// ID should have expected length (32 hex chars = 16 bytes)
-		if len(id) != 32 {
-			t.Errorf("Generated session ID has unexpected length: %d (expected 32)", len(id))
+		// ID should have expected length (48 hex chars = 24 bytes)
+		if len(id) != 48 {
+			t.Errorf("Generated session ID has unexpected length: %d (expected 48)", len(id))
 		}
 	})
 }
