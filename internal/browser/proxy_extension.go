@@ -13,6 +13,7 @@ import (
 // because Chrome doesn't support authenticated proxies via command line.
 type ProxyExtension struct {
 	dir      string
+	scheme   string // "http" or "https"
 	host     string
 	port     string
 	username string
@@ -21,7 +22,16 @@ type ProxyExtension struct {
 
 // NewProxyExtension creates a new proxy extension for authenticated proxy support.
 // Security: Creates files with 0600 permissions and directory with 0700 to protect credentials.
-func NewProxyExtension(host, port, username, password string) (*ProxyExtension, error) {
+// The scheme parameter should be "http" or "https" (defaults to "http" if empty).
+func NewProxyExtension(scheme, host, port, username, password string) (*ProxyExtension, error) {
+	// Normalize scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("unsupported proxy scheme: %s (must be http or https)", scheme)
+	}
+
 	// Create temporary directory for extension
 	dir, err := os.MkdirTemp("", "flaresolverr-proxy-ext-*")
 	if err != nil {
@@ -36,6 +46,7 @@ func NewProxyExtension(host, port, username, password string) (*ProxyExtension, 
 
 	ext := &ProxyExtension{
 		dir:      dir,
+		scheme:   scheme,
 		host:     host,
 		port:     port,
 		username: username,
@@ -103,6 +114,10 @@ func (e *ProxyExtension) createManifest() error {
 // Security: Uses json.Marshal for proper escaping of credentials to prevent JS injection.
 func (e *ProxyExtension) createBackgroundScript() error {
 	// Use json.Marshal for proper escaping of all values to prevent JavaScript injection
+	schemeJSON, err := json.Marshal(e.scheme)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy scheme: %w", err)
+	}
 	hostJSON, err := json.Marshal(e.host)
 	if err != nil {
 		return fmt.Errorf("failed to marshal proxy host: %w", err)
@@ -122,13 +137,14 @@ func (e *ProxyExtension) createBackgroundScript() error {
 
 	// JavaScript that handles proxy configuration and authentication
 	// All values are JSON-encoded to prevent injection attacks
+	// Fix: Support both http and https proxy schemes
 	script := fmt.Sprintf(`
 // Proxy configuration
 const config = {
     mode: "fixed_servers",
     rules: {
         singleProxy: {
-            scheme: "http",
+            scheme: %s,
             host: %s,
             port: parseInt(%s)
         },
@@ -156,7 +172,7 @@ chrome.webRequest.onAuthRequired.addListener(
     {urls: ["<all_urls>"]},
     ["asyncBlocking"]
 );
-`, hostJSON, portJSON, usernameJSON, passwordJSON)
+`, schemeJSON, hostJSON, portJSON, usernameJSON, passwordJSON)
 
 	scriptPath := filepath.Join(e.dir, "background.js")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
@@ -170,6 +186,7 @@ chrome.webRequest.onAuthRequired.addListener(
 // Manifest V2 is deprecated but may be needed for some environments.
 type ProxyExtensionMV2 struct {
 	dir      string
+	scheme   string // "http" or "https"
 	host     string
 	port     string
 	username string
@@ -178,7 +195,16 @@ type ProxyExtensionMV2 struct {
 
 // NewProxyExtensionMV2 creates a new Manifest V2 proxy extension.
 // Security: Creates files with 0600 permissions and directory with 0700 to protect credentials.
-func NewProxyExtensionMV2(host, port, username, password string) (*ProxyExtensionMV2, error) {
+// The scheme parameter should be "http" or "https" (defaults to "http" if empty).
+func NewProxyExtensionMV2(scheme, host, port, username, password string) (*ProxyExtensionMV2, error) {
+	// Normalize scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("unsupported proxy scheme: %s (must be http or https)", scheme)
+	}
+
 	dir, err := os.MkdirTemp("", "flaresolverr-proxy-ext-mv2-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir for proxy extension: %w", err)
@@ -192,6 +218,7 @@ func NewProxyExtensionMV2(host, port, username, password string) (*ProxyExtensio
 
 	ext := &ProxyExtensionMV2{
 		dir:      dir,
+		scheme:   scheme,
 		host:     host,
 		port:     port,
 		username: username,
@@ -257,6 +284,10 @@ func (e *ProxyExtensionMV2) createManifest() error {
 // Security: Uses json.Marshal for proper escaping of credentials to prevent JS injection.
 func (e *ProxyExtensionMV2) createBackgroundScript() error {
 	// Use json.Marshal for proper escaping of all values to prevent JavaScript injection
+	schemeJSON, err := json.Marshal(e.scheme)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proxy scheme: %w", err)
+	}
 	hostJSON, err := json.Marshal(e.host)
 	if err != nil {
 		return fmt.Errorf("failed to marshal proxy host: %w", err)
@@ -276,13 +307,14 @@ func (e *ProxyExtensionMV2) createBackgroundScript() error {
 
 	// JavaScript that handles proxy configuration and authentication (MV2 style)
 	// All values are JSON-encoded to prevent injection attacks
+	// Fix: Support both http and https proxy schemes
 	script := fmt.Sprintf(`
 // Proxy configuration
 var config = {
     mode: "fixed_servers",
     rules: {
         singleProxy: {
-            scheme: "http",
+            scheme: %s,
             host: %s,
             port: parseInt(%s)
         },
@@ -306,7 +338,7 @@ chrome.webRequest.onAuthRequired.addListener(
     {urls: ["<all_urls>"]},
     ["blocking"]
 );
-`, hostJSON, portJSON, usernameJSON, passwordJSON)
+`, schemeJSON, hostJSON, portJSON, usernameJSON, passwordJSON)
 
 	scriptPath := filepath.Join(e.dir, "background.js")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {

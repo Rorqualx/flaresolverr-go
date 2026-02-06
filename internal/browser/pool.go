@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/security"
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
@@ -30,6 +31,9 @@ import (
 //
 // The pool pre-warms browsers at startup and maintains them for reuse.
 // Each browser can handle multiple sequential requests.
+//
+// Lock ordering: mu must be acquired before any browser entry locks.
+// Never hold mu while performing slow I/O operations.
 type Pool struct {
 	mu        sync.Mutex
 	browsers  []*browserEntry
@@ -45,6 +49,15 @@ type Pool struct {
 
 	// Bug 4: Atomic counter for race-free Available() reads
 	availableCount atomic.Int32
+
+	// Audit Issue 2: Track leaked goroutines from browser close timeouts
+	leakedGoroutines atomic.Int32
+
+	// Issue #10: WaitGroup to track close goroutines for proper cleanup
+	closeWg sync.WaitGroup
+
+	// Issue #11: Semaphore to limit concurrent recycles
+	recycleSem chan struct{}
 
 	// Statistics for monitoring
 	stats PoolStats
@@ -78,10 +91,11 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 		Msg("Initializing browser pool")
 
 	pool := &Pool{
-		config:    cfg,
-		available: make(chan *rod.Browser, cfg.BrowserPoolSize),
-		browsers:  make([]*browserEntry, 0, cfg.BrowserPoolSize),
-		stopCh:    make(chan struct{}),
+		config:     cfg,
+		available:  make(chan *rod.Browser, cfg.BrowserPoolSize),
+		browsers:   make([]*browserEntry, 0, cfg.BrowserPoolSize),
+		stopCh:     make(chan struct{}),
+		recycleSem: make(chan struct{}, 4), // Issue #11: Limit concurrent recycles to 4
 	}
 
 	// Pre-warm the pool by launching all browsers
@@ -184,13 +198,19 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// ========================================
 	if proxyURL != "" {
 		l = l.Set("proxy-server", proxyURL)
-		log.Debug().Str("proxy", proxyURL).Msg("Browser proxy configured")
-
-		// CRITICAL: Prevent WebRTC IP leaks when using proxy
-		// WebRTC can reveal the real IP even when routing through a proxy.
-		// This forces WebRTC to only use the proxy's IP for ICE candidates.
-		l = l.Set("force-webrtc-ip-handling-policy", "disable_non_proxied_udp")
+		// Use redacted proxy URL in logs to prevent credential exposure
+		log.Debug().Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Browser proxy configured")
 	}
+
+	// ========================================
+	// WebRTC Leak Prevention
+	// ========================================
+	// CRITICAL: Always prevent WebRTC IP leaks, not just when using proxy.
+	// WebRTC can reveal the server's real public IP to target sites, which:
+	// - Allows fingerprinting and correlation of requests
+	// - Leaks internal network topology via ICE candidates
+	// - Can be used by bot detection to identify automated traffic
+	l = l.Set("force-webrtc-ip-handling-policy", "disable_non_proxied_udp")
 
 	// ========================================
 	// CRITICAL: Anti-Detection Flags
@@ -205,12 +225,9 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// But these flags still help prevent other detection methods
 	l = l.Delete("enable-automation") // Make sure this is NOT set
 
-	// 3. Disable features that can leak automation
-	disabledFeatures := "Translate,TranslateUI,BlinkGenPropertyTrees"
-	if proxyURL != "" {
-		// Add WebRTC leak prevention when using proxy
-		disabledFeatures += ",WebRtcHideLocalIpsWithMdns"
-	}
+	// 3. Disable features that can leak automation or IP information
+	// WebRtcHideLocalIpsWithMdns: Prevents mDNS from leaking local IPs
+	disabledFeatures := "Translate,TranslateUI,BlinkGenPropertyTrees,WebRtcHideLocalIpsWithMdns"
 	l = l.Set("disable-features", disabledFeatures)
 
 	// 4. Enable network service features (normal browser behavior)
@@ -315,7 +332,9 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	// Only ignore certificate errors if explicitly configured (security risk)
 	if p.config.IgnoreCertErrors {
 		log.Warn().Msg("Certificate validation disabled - MITM attacks possible")
-		browser = browser.MustIgnoreCertErrors(true)
+		if err := browser.IgnoreCertErrors(true); err != nil {
+			log.Warn().Err(err).Msg("Failed to set IgnoreCertErrors")
+		}
 	}
 
 	log.Debug().Str("url", url).Msg("Browser spawned successfully")
@@ -343,7 +362,8 @@ func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browse
 		}
 	}
 
-	log.Debug().Str("proxy", proxyURL).Msg("Spawning browser with custom proxy")
+	// Use redacted proxy URL in logs to prevent credential exposure
+	log.Debug().Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Spawning browser with custom proxy")
 
 	// Create launcher with the specified proxy
 	l := p.createLauncher(proxyURL)
@@ -362,10 +382,13 @@ func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browse
 
 	// Configure browser-level settings
 	if p.config.IgnoreCertErrors {
-		browser = browser.MustIgnoreCertErrors(true)
+		if err := browser.IgnoreCertErrors(true); err != nil {
+			log.Warn().Err(err).Msg("Failed to set IgnoreCertErrors")
+		}
 	}
 
-	log.Debug().Str("url", url).Str("proxy", proxyURL).Msg("Browser with proxy spawned successfully")
+	// Use redacted proxy URL in logs to prevent credential exposure
+	log.Debug().Str("url", url).Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Browser with proxy spawned successfully")
 	return browser, nil
 }
 
@@ -407,15 +430,19 @@ func (p *Pool) Acquire(ctx context.Context) (*rod.Browser, error) {
 
 			// Got a browser from the pool
 			p.stats.Acquired.Add(1)
-			p.availableCount.Add(-1)
 
 			// Verify browser is healthy before returning
+			// Fix: Only decrement availableCount AFTER health check succeeds
+			// to prevent TOCTOU race where count shows available but all are unhealthy
 			if !p.isHealthy(browser) {
 				log.Warn().Int("retry", retry).Msg("Acquired unhealthy browser, recycling")
 				p.stats.Errors.Add(1)
 				go p.recycleBrowser(browser) // Recycle in background
 				continue                     // Iterate instead of recurse
 			}
+
+			// Health check passed - now decrement available count
+			p.availableCount.Add(-1)
 
 			// Update use count (requires lock to safely access p.browsers)
 			p.mu.Lock()
@@ -451,15 +478,21 @@ func (p *Pool) Acquire(ctx context.Context) (*rod.Browser, error) {
 // This method cleans up any pages and prepares the browser for reuse.
 //
 // It is safe to call Release multiple times or on a nil browser.
+// Fix #1, #2: Uses mutex to prevent TOCTOU race between closed check and channel send.
+// Fix #21: Logs and handles page cleanup failures properly.
 func (p *Pool) Release(browser *rod.Browser) {
 	if browser == nil {
 		return
 	}
 
-	// First check - avoid work if already closed
+	// Acquire lock early to prevent race with Close()
+	// This ensures atomicity of closed check + channel send
+	p.mu.Lock()
+
+	// Check closed flag while holding lock
 	if p.closed.Load() {
+		p.mu.Unlock()
 		// Pool is closed, just close the browser
-		// Fix #6: Log browser close errors instead of silently ignoring
 		if err := browser.Close(); err != nil {
 			log.Warn().Err(err).Msg("Error closing browser during release (pool closed)")
 		}
@@ -467,31 +500,42 @@ func (p *Pool) Release(browser *rod.Browser) {
 	}
 
 	p.stats.Released.Add(1)
+	p.mu.Unlock() // Release lock during page cleanup (slow I/O)
 
 	// Clean up all pages before returning to pool
 	// This prevents memory accumulation across requests
+	// Fix #21: Track cleanup failures and mark browser unhealthy if needed
+	cleanupFailed := false
 	pages, err := browser.Pages()
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to get pages for cleanup")
+		log.Warn().Err(err).Msg("Failed to get pages for cleanup, browser may be unhealthy")
+		cleanupFailed = true
 	} else {
 		for _, page := range pages {
-			// Fix #6: Log page cleanup errors instead of silently ignoring
 			if err := page.Navigate("about:blank"); err != nil {
-				log.Debug().Err(err).Msg("Failed to navigate page to blank during cleanup")
+				log.Warn().Err(err).Msg("Failed to navigate page to blank during cleanup")
+				cleanupFailed = true
 			}
 			if err := page.Close(); err != nil {
-				log.Debug().Err(err).Msg("Failed to close page during cleanup")
+				log.Warn().Err(err).Msg("Failed to close page during cleanup")
+				cleanupFailed = true
 			}
 		}
 	}
 
-	// Fix #1: Use mutex with defer to prevent deadlock if panic occurs.
-	// The double-check pattern: check closed flag while holding lock before channel send.
+	// If cleanup failed, recycle the browser instead of returning to pool
+	if cleanupFailed {
+		log.Warn().Msg("Page cleanup failed, recycling browser instead of returning to pool")
+		go p.recycleBrowser(browser)
+		return
+	}
+
+	// Re-acquire lock for channel send
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Double-check closed flag (may have changed during page cleanup)
 	if p.closed.Load() {
-		// Fix #6: Log browser close errors
 		if err := browser.Close(); err != nil {
 			log.Warn().Err(err).Msg("Error closing browser during release (pool closed during cleanup)")
 		}
@@ -499,7 +543,6 @@ func (p *Pool) Release(browser *rod.Browser) {
 	}
 
 	// Safe to send - we hold the lock and confirmed not closed
-	// Channel operations are non-blocking (select with default) so holding mutex is safe
 	select {
 	case p.available <- browser:
 		p.availableCount.Add(1)
@@ -509,7 +552,6 @@ func (p *Pool) Release(browser *rod.Browser) {
 	default:
 		// Pool is full (shouldn't happen with correct usage)
 		log.Warn().Msg("Pool is full, closing excess browser")
-		// Fix #6: Log browser close errors
 		if err := browser.Close(); err != nil {
 			log.Warn().Err(err).Msg("Error closing excess browser")
 		}
@@ -544,7 +586,16 @@ func (p *Pool) isHealthy(browser *rod.Browser) bool {
 // recycleBrowser replaces an unhealthy browser with a new one.
 // Uses timeouts to prevent deadlocks during browser close/spawn operations.
 // Fix #4: Added shutdown awareness to abandon recycle during pool shutdown.
+// Fix #20: IMPORTANT - This method must NEVER be called while holding p.mu to avoid deadlock.
+// The call chain recycleBrowser -> closeBrowserWithTimeout -> updateBrowserEntry acquires p.mu,
+// so calling recycleBrowser with p.mu held would cause reentrant lock deadlock.
 func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
+	// Fix: Check if pool is closed before starting recycle to prevent race with Close()
+	if p.closed.Load() {
+		log.Debug().Msg("Skipping browser recycle - pool is closed")
+		return
+	}
+
 	p.stats.Recycled.Add(1)
 
 	log.Info().
@@ -552,34 +603,8 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 		Msg("Recycling browser")
 
 	// Close old browser OUTSIDE lock with timeout
-	closeDone := make(chan struct{})
-	closeStarted := time.Now()
-	go func() {
-		defer close(closeDone)
-		if err := oldBrowser.Close(); err != nil {
-			log.Warn().Err(err).Msg("Error closing old browser during recycle")
-		}
-	}()
-
-	// Fix #4: Add shutdown awareness to close timeout
-	select {
-	case <-closeDone:
-		log.Debug().
-			Dur("duration", time.Since(closeStarted)).
-			Msg("Old browser closed during recycle")
-	case <-p.stopCh:
-		// Pool is shutting down, abandon this recycle
-		log.Warn().
-			Dur("elapsed", time.Since(closeStarted)).
-			Msg("Browser close abandoned during pool shutdown")
-		return
-	case <-time.After(10 * time.Second):
-		log.Warn().
-			Dur("elapsed", time.Since(closeStarted)).
-			Msg("Browser close timed out during recycle - goroutine leaked")
-		p.stats.Errors.Add(1)
-		// Note: The goroutine continues running but we proceed anyway
-	}
+	// Use closeBrowserWithTimeout helper to properly handle goroutine lifecycle
+	p.closeBrowserWithTimeout(oldBrowser, 10*time.Second)
 
 	// Spawn new browser OUTSIDE lock with timeout
 	var newBrowser *rod.Browser
@@ -587,7 +612,6 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 
 	// Create context with timeout for spawn operation
 	spawnCtx, spawnCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer spawnCancel()
 
 	spawnDone := make(chan struct{})
 	go func() {
@@ -599,11 +623,20 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 	select {
 	case <-spawnDone:
 		// Spawn completed
+		spawnCancel()
 	case <-p.stopCh:
+		spawnCancel()
 		log.Warn().Msg("Browser spawn abandoned during pool shutdown")
 		p.removeBrowserEntry(oldBrowser)
+		// Wait briefly for spawning goroutine to notice context cancellation
+		select {
+		case <-spawnDone:
+		case <-time.After(2 * time.Second):
+			log.Warn().Msg("Spawn goroutine did not exit promptly after cancellation")
+		}
 		return
 	case <-time.After(30 * time.Second):
+		spawnCancel()
 		log.Error().Msg("Browser spawn timed out during recycle")
 		p.removeBrowserEntry(oldBrowser)
 		return
@@ -611,36 +644,90 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 
 	if spawnErr != nil {
 		log.Error().Err(spawnErr).Msg("Failed to spawn replacement browser")
-		// Bug 5: Use helper function with defer for safe unlock
 		p.removeBrowserEntry(oldBrowser)
 		return
 	}
 
-	// Bug 5: Use helper function with defer for safe unlock
+	// Update browser entry
 	newEntry := &browserEntry{
 		browser:   newBrowser,
 		createdAt: time.Now(),
 	}
 	p.updateBrowserEntry(oldBrowser, newEntry)
 
-	// Fix #4: Add new browser to pool with closed check to prevent "send on closed channel" panic.
-	// Must hold lock while checking closed flag and sending to channel.
+	// Add new browser to pool with proper synchronization
+	p.addBrowserToPool(newBrowser)
+}
+
+// closeBrowserWithTimeout closes a browser with a timeout and proper goroutine handling.
+// If the close times out, the goroutine is tracked as leaked but we proceed.
+// Returns true if the browser was closed within the timeout.
+// Fix #10: Uses WaitGroup to track close goroutines for proper cleanup on pool shutdown.
+func (p *Pool) closeBrowserWithTimeout(browser *rod.Browser, timeout time.Duration) bool {
+	closeDone := make(chan struct{})
+	closeStarted := time.Now()
+
+	// Fix #10: Track this goroutine in closeWg for proper shutdown
+	p.closeWg.Add(1)
+	go func() {
+		defer p.closeWg.Done()
+		defer close(closeDone)
+		if err := browser.Close(); err != nil {
+			log.Warn().Err(err).Msg("Error closing browser")
+		}
+	}()
+
+	select {
+	case <-closeDone:
+		log.Debug().
+			Dur("duration", time.Since(closeStarted)).
+			Msg("Browser closed successfully")
+		return true
+	case <-p.stopCh:
+		// Pool is shutting down, abandon wait
+		// The goroutine is still tracked in closeWg and will be waited on in Close()
+		log.Warn().
+			Dur("elapsed", time.Since(closeStarted)).
+			Msg("Browser close wait abandoned during pool shutdown")
+		return false
+	case <-time.After(timeout):
+		// Track leaked goroutine
+		leaked := p.leakedGoroutines.Add(1)
+		log.Warn().
+			Dur("elapsed", time.Since(closeStarted)).
+			Int32("leaked_count", leaked).
+			Msg("Browser close timed out - goroutine leaked")
+		if leaked > 10 {
+			log.Error().Int32("count", leaked).Msg("High number of leaked goroutines from browser close timeouts")
+		}
+		p.stats.Errors.Add(1)
+		return false
+	}
+}
+
+// addBrowserToPool safely adds a browser to the available pool.
+// Uses proper locking to prevent race conditions with Close().
+func (p *Pool) addBrowserToPool(browser *rod.Browser) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.closed.Load() {
-		p.mu.Unlock()
-		log.Warn().Msg("Pool closed during browser recycle, closing new browser")
-		_ = newBrowser.Close()
+		log.Warn().Msg("Pool closed, closing browser instead of adding to pool")
+		if err := browser.Close(); err != nil {
+			log.Warn().Err(err).Msg("Error closing browser (pool was closed)")
+		}
 		return
 	}
+
 	select {
-	case p.available <- newBrowser:
+	case p.available <- browser:
 		p.availableCount.Add(1)
-		p.mu.Unlock()
-		log.Info().Msg("Replacement browser added to pool")
+		log.Info().Msg("Browser added to pool")
 	default:
-		p.mu.Unlock()
-		log.Warn().Msg("Could not add replacement browser to pool")
-		_ = newBrowser.Close()
+		log.Warn().Msg("Pool is full, closing browser")
+		if err := browser.Close(); err != nil {
+			log.Warn().Err(err).Msg("Error closing excess browser")
+		}
 	}
 }
 
@@ -722,6 +809,7 @@ func (p *Pool) healthCheckRoutine() {
 
 // recycleAll recycles all browsers in the pool.
 // This is used when memory pressure is detected.
+// Fix #11: Uses semaphore to limit concurrent recycles and prevent resource exhaustion.
 func (p *Pool) recycleAll() {
 	p.mu.Lock()
 	toRecycle := make([]*rod.Browser, len(p.browsers))
@@ -732,9 +820,32 @@ func (p *Pool) recycleAll() {
 
 	log.Info().Int("count", len(toRecycle)).Msg("Recycling all browsers due to memory pressure")
 
+	// Fix #11: Use semaphore to limit concurrent recycles
+	var recycleWg sync.WaitGroup
 	for _, browser := range toRecycle {
-		p.recycleBrowser(browser)
+		// Check if pool is closed before starting new recycle
+		if p.closed.Load() {
+			log.Debug().Msg("Pool closed during recycleAll, aborting remaining recycles")
+			break
+		}
+
+		recycleWg.Add(1)
+		go func(b *rod.Browser) {
+			defer recycleWg.Done()
+
+			// Acquire semaphore slot
+			select {
+			case p.recycleSem <- struct{}{}:
+				defer func() { <-p.recycleSem }()
+				p.recycleBrowser(b)
+			case <-p.stopCh:
+				log.Debug().Msg("Pool shutdown during recycleAll, skipping recycle")
+			}
+		}(browser)
 	}
+
+	// Wait for all recycles to complete
+	recycleWg.Wait()
 }
 
 // Size returns the configured pool size.
@@ -753,19 +864,21 @@ func (p *Pool) Available() int {
 
 // PoolStatsSnapshot holds a point-in-time snapshot of pool statistics.
 type PoolStatsSnapshot struct {
-	Acquired int64
-	Released int64
-	Recycled int64
-	Errors   int64
+	Acquired         int64
+	Released         int64
+	Recycled         int64
+	Errors           int64
+	LeakedGoroutines int32 // Audit Issue 2: Track browser close timeout goroutine leaks
 }
 
 // Stats returns a snapshot of the current pool statistics.
 func (p *Pool) Stats() PoolStatsSnapshot {
 	return PoolStatsSnapshot{
-		Acquired: p.stats.Acquired.Load(),
-		Released: p.stats.Released.Load(),
-		Recycled: p.stats.Recycled.Load(),
-		Errors:   p.stats.Errors.Load(),
+		Acquired:         p.stats.Acquired.Load(),
+		Released:         p.stats.Released.Load(),
+		Recycled:         p.stats.Recycled.Load(),
+		Errors:           p.stats.Errors.Load(),
+		LeakedGoroutines: p.leakedGoroutines.Load(),
 	}
 }
 
@@ -782,18 +895,50 @@ func (p *Pool) GetStats() (acquired, released, recycled, errors int64) {
 //
 // Close is safe to call multiple times.
 // Uses errgroup for parallel browser closing to speed up shutdown.
+// Fix #1, #2: Coordinates channel close with Release() using mutex.
+// Fix #10: Waits for browser close goroutines to complete.
+// Fix #38: Resets stats on close for accurate reporting.
 func (p *Pool) Close() error {
+	// Fix #2: Set closed flag under lock to coordinate with Release()
+	p.mu.Lock()
 	if p.closed.Swap(true) {
+		p.mu.Unlock()
 		return nil // Already closed
 	}
+	// Close channel while holding lock to prevent send-on-closed-channel panic
+	close(p.available)
+	p.mu.Unlock()
 
 	log.Info().Msg("Closing browser pool")
 
 	// Signal background goroutines to stop immediately
 	close(p.stopCh)
 
-	// Wait for background goroutines to finish
-	p.wg.Wait()
+	// Wait for background goroutines to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Debug().Msg("Background goroutines stopped")
+	case <-time.After(30 * time.Second):
+		log.Warn().Msg("Timeout waiting for background goroutines to stop")
+	}
+
+	// Fix #10: Wait for any pending close goroutines
+	closeWgDone := make(chan struct{})
+	go func() {
+		p.closeWg.Wait()
+		close(closeWgDone)
+	}()
+	select {
+	case <-closeWgDone:
+		log.Debug().Msg("Browser close goroutines finished")
+	case <-time.After(15 * time.Second):
+		log.Warn().Msg("Timeout waiting for browser close goroutines")
+	}
 
 	p.mu.Lock()
 	browsers := make([]*browserEntry, len(p.browsers))
@@ -820,16 +965,19 @@ func (p *Pool) Close() error {
 	// Wait for all browsers to close
 	closeErr := eg.Wait()
 
-	// Fix #1: Acquire lock before closing channel to synchronize with Release()
-	// This ensures no Release() is in the middle of a channel send when we close
-	p.mu.Lock()
-	close(p.available)
-	p.mu.Unlock()
-
 	// Drain any remaining items from channel (safe after close)
-	for range p.available {
-		// Drain remaining browsers
+	for b := range p.available {
+		// Close any browsers that were still in the channel
+		if b != nil {
+			_ = b.Close()
+		}
 	}
+
+	// Fix #38: Reset stats on close
+	p.stats.Acquired.Store(0)
+	p.stats.Released.Store(0)
+	p.stats.Recycled.Store(0)
+	p.stats.Errors.Store(0)
 
 	log.Info().
 		Int64("total_acquired", p.stats.Acquired.Load()).
@@ -843,12 +991,18 @@ func (p *Pool) Close() error {
 
 // removeBrowserEntry removes a browser from the tracking slice.
 // Bug 5: Uses defer for safe unlock to prevent lock being held on panic.
+// Uses swap-with-last for O(1) removal instead of O(n) slice append.
 func (p *Pool) removeBrowserEntry(oldBrowser *rod.Browser) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, entry := range p.browsers {
 		if entry.browser == oldBrowser {
-			p.browsers = append(p.browsers[:i], p.browsers[i+1:]...)
+			// Swap with last element and truncate (O(1) removal)
+			last := len(p.browsers) - 1
+			if i != last {
+				p.browsers[i] = p.browsers[last]
+			}
+			p.browsers = p.browsers[:last]
 			return
 		}
 	}
