@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	neturl "net/url"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
 	"github.com/rs/zerolog/log"
+	"github.com/ysmood/gson"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
@@ -55,15 +57,23 @@ type Result struct {
 
 // SolveOptions contains options for a solve request.
 type SolveOptions struct {
-	URL           string
-	Timeout       time.Duration
-	Cookies       []types.RequestCookie
-	Proxy         *types.Proxy
-	PostData      string
-	IsPost        bool
-	Screenshot    bool // Capture screenshot after solve
-	DisableMedia  bool // Disable loading of media (images, CSS, fonts)
-	WaitInSeconds int  // Wait N seconds before returning the response
+	URL            string
+	Timeout        time.Duration
+	Cookies        []types.RequestCookie
+	Proxy          *types.Proxy
+	PostData       string
+	ContentType    string            // Content type for POST: "application/json" or "application/x-www-form-urlencoded"
+	Headers        map[string]string // Custom HTTP headers to send with the request
+	IsPost         bool
+	Screenshot     bool   // Capture screenshot after solve
+	DisableMedia   bool   // Disable loading of media (images, CSS, fonts)
+	WaitInSeconds  int    // Wait N seconds before returning the response
+	ExpectedIP     net.IP // Expected IP from DNS resolution for pinning (nil to skip)
+	TabsTillVerify int    // Number of Tab presses to reach Turnstile checkbox (default: 10)
+
+	// SkipResponseValidation disables response URL validation (for testing only).
+	// WARNING: Do not enable in production - this disables SSRF protection.
+	SkipResponseValidation bool
 }
 
 // Solver handles Cloudflare challenge resolution.
@@ -91,12 +101,32 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// safeEvalResultString safely extracts a string value from a RuntimeEvaluate result.
+// Returns an empty string if the result is nil, has an exception, or is not a string type.
+// This prevents nil pointer panics when accessing eval results.
+func safeEvalResultString(result *proto.RuntimeEvaluateResult) string {
+	if result == nil || result.Result == nil {
+		return ""
+	}
+	if result.ExceptionDetails != nil {
+		return ""
+	}
+	// gson.JSON uses Nil() method to check for nil values
+	if result.Result.Value.Nil() {
+		return ""
+	}
+	if result.Result.Type != proto.RuntimeRemoteObjectTypeString {
+		return ""
+	}
+	return result.Result.Value.Str()
+}
+
 // Fix #13: setupProxyAuth sets up proxy authentication for a page if needed.
-// Returns a cleanup function that should be deferred. The cleanup function is
-// safe to call even if it's nil (will be a no-op).
-func setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) func() {
+// Returns a cleanup function and error. The cleanup function is safe to call
+// even if it's nil (will be a no-op). Errors are now propagated to caller.
+func setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) (func(), error) {
 	if proxy == nil || proxy.URL == "" {
-		return func() {}
+		return func() {}, nil
 	}
 
 	cleanup, err := browser.SetPageProxy(ctx, page, &browser.ProxyConfig{
@@ -106,14 +136,15 @@ func setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) fun
 	})
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to set up proxy")
-		return func() {}
+		return func() {}, fmt.Errorf("failed to set up proxy authentication: %w", err)
 	}
-	return cleanup
+	return cleanup, nil
 }
 
 // setupMediaBlocking enables request interception to block media resources.
 // This reduces bandwidth and speeds up page loads by blocking images, stylesheets, fonts, and media.
 // Returns a cleanup function that should be deferred.
+// The cleanup function ensures the router goroutine exits cleanly with a timeout.
 func setupMediaBlocking(page *rod.Page) func() {
 	router := page.HijackRequests()
 
@@ -131,10 +162,32 @@ func setupMediaBlocking(page *rod.Page) func() {
 		ctx.ContinueRequest(&proto.FetchContinueRequest{})
 	})
 
-	go router.Run()
+	// Track the router goroutine for proper cleanup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Add panic recovery to prevent goroutine panic from crashing the process
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error().Interface("panic", r).Msg("Recovered from panic in media blocking router")
+			}
+		}()
+		router.Run()
+	}()
 
 	return func() {
-		_ = router.Stop()
+		// Stop the router - this signals the goroutine to exit
+		if err := router.Stop(); err != nil {
+			log.Debug().Err(err).Msg("Error stopping media blocking router")
+		}
+
+		// Wait for the goroutine to exit with a timeout
+		select {
+		case <-done:
+			// Clean exit
+		case <-time.After(5 * time.Second):
+			log.Warn().Msg("Media blocking goroutine did not exit cleanly within timeout")
+		}
 	}
 }
 
@@ -147,7 +200,19 @@ func setupMediaBlocking(page *rod.Page) func() {
 //     unrealistic timeouts that would fail before the browser could even navigate)
 //   - The timeout should be set appropriately at the handler layer based on config
 //     (DefaultTimeout/MaxTimeout); this validation is a safety net
-func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error) {
+//
+// Fix #24: Includes panic recovery to prevent crashes from browser-level panics.
+func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result, err error) {
+	// Fix #24: Panic recovery to catch browser-level panics
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().
+				Interface("panic", r).
+				Str("url", opts.URL).
+				Msg("Panic recovered in Solve")
+			err = fmt.Errorf("unexpected error during solve: %v", r)
+		}
+	}()
 	// Validate timeout: reject invalid values
 	if opts.Timeout <= 0 {
 		return nil, fmt.Errorf("timeout must be positive, got %v", opts.Timeout)
@@ -177,9 +242,10 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 	if opts.Proxy != nil && opts.Proxy.URL != "" {
 		// Per-request proxy: spawn dedicated browser with this proxy
 		// This browser is NOT pooled and will be closed after use
+		// Use redacted proxy URL in logs to prevent credential exposure
+		// Note: Intentionally not logging auth presence to prevent information disclosure
 		log.Info().
-			Str("proxy_url", opts.Proxy.URL).
-			Bool("has_auth", opts.Proxy.Username != "").
+			Str("proxy_url", security.RedactProxyURL(opts.Proxy.URL)).
 			Msg("Spawning dedicated browser with per-request proxy")
 		var err error
 		browserInstance, err = s.pool.SpawnWithProxy(ctx, opts.Proxy.URL)
@@ -211,16 +277,16 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 	defer cancel()
 
 	var page *rod.Page
-	var err error
 
 	// For POST requests, we need a special approach because stealth scripts
 	// conflict with form creation JavaScript. We use a regular page and
 	// apply stealth manually after the POST navigation.
 	if opts.IsPost && opts.PostData != "" {
-		// Create a regular page for POST (stealth scripts break form JS)
-		page, err = browserInstance.Page(proto.TargetCreateTarget{URL: "about:blank"})
+		// Fix 2.10: Use stealth.Page for POST requests too - apply stealth before navigation
+		// The previous concern about conflicts was resolved by proper ordering
+		page, err = stealth.Page(browserInstance)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create page: %w", err)
+			return nil, fmt.Errorf("failed to create stealth page for POST: %w", err)
 		}
 		defer page.Close()
 
@@ -244,46 +310,10 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 		}
 
 		// Fix #13: Use helper for proxy setup to reduce duplication
-		proxyCleanup := setupProxyAuth(solveCtx, page, opts.Proxy)
-		defer proxyCleanup()
-
-		// Set cookies before navigation
-		if len(opts.Cookies) > 0 {
-			if err := s.setCookies(page, opts.Cookies, opts.URL); err != nil {
-				log.Warn().Err(err).Msg("Failed to set cookies")
-			}
-		}
-
-		// POST request via form submission
-		if err := s.navigatePost(page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
+		proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
+		if err != nil {
 			return nil, err
 		}
-	} else {
-		// For GET requests, use stealth page
-		page = stealth.MustPage(browserInstance)
-		defer page.Close()
-
-		// Set user agent
-		if s.userAgent != "" {
-			if err := browser.SetUserAgent(page, s.userAgent); err != nil {
-				log.Warn().Err(err).Msg("Failed to set user agent")
-			}
-		}
-
-		// Set viewport
-		if err := browser.SetViewport(page, 1920, 1080); err != nil {
-			log.Warn().Err(err).Msg("Failed to set viewport")
-		}
-
-		// Set up media blocking if requested
-		if opts.DisableMedia {
-			mediaCleanup := setupMediaBlocking(page)
-			defer mediaCleanup()
-			log.Debug().Msg("Media blocking enabled")
-		}
-
-		// Fix #13: Use helper for proxy setup to reduce duplication
-		proxyCleanup := setupProxyAuth(solveCtx, page, opts.Proxy)
 		defer proxyCleanup()
 
 		// Set cookies before navigation
@@ -293,11 +323,102 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 			}
 		}
 
-		// Regular GET request
-		// Fix #7: Wrap navigation error with context for better debugging
-		if err := page.Context(solveCtx).Navigate(opts.URL); err != nil {
-			return nil, fmt.Errorf("failed to navigate to %s: %w", opts.URL, err)
+		// Set up network capture BEFORE navigation to capture response events
+		networkCapture, networkCleanup, err := setupNetworkCapture(solveCtx, page)
+		if err != nil {
+			log.Warn().Err(err).Msg("Failed to setup network capture, using defaults")
 		}
+		defer networkCleanup()
+
+		// Dispatch POST based on content type
+		if opts.ContentType == types.ContentTypeJSON {
+			// JSON POST via Fetch API
+			if err := s.navigatePostJSON(page.Context(solveCtx), opts.URL, opts.PostData, opts.Headers); err != nil {
+				return nil, err
+			}
+		} else {
+			// Form POST (default, backward compatible)
+			if err := s.navigatePost(page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
+				return nil, err
+			}
+		}
+
+		// Wait for initial load
+		if err := page.Context(solveCtx).WaitLoad(); err != nil {
+			log.Warn().Err(err).Msg("WaitLoad failed, continuing anyway")
+		}
+
+		// Main solve loop with DNS pinning
+		return s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
+	}
+
+	// GET request path
+	// For GET requests, use stealth page
+	page, err = stealth.Page(browserInstance)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stealth page: %w", err)
+	}
+	defer page.Close()
+
+	// Set user agent
+	if s.userAgent != "" {
+		if err := browser.SetUserAgent(page, s.userAgent); err != nil {
+			log.Warn().Err(err).Msg("Failed to set user agent")
+		}
+	}
+
+	// Set viewport
+	if err := browser.SetViewport(page, 1920, 1080); err != nil {
+		log.Warn().Err(err).Msg("Failed to set viewport")
+	}
+
+	// Set up media blocking if requested
+	if opts.DisableMedia {
+		mediaCleanup := setupMediaBlocking(page)
+		defer mediaCleanup()
+		log.Debug().Msg("Media blocking enabled")
+	}
+
+	// Fix #13: Use helper for proxy setup to reduce duplication
+	proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
+	if err != nil {
+		return nil, err
+	}
+	defer proxyCleanup()
+
+	// Set cookies before navigation
+	if len(opts.Cookies) > 0 {
+		if err := s.setCookies(page, opts.Cookies, opts.URL); err != nil {
+			log.Warn().Err(err).Msg("Failed to set cookies")
+		}
+	}
+
+	// Set up network capture BEFORE navigation to capture response events
+	networkCapture, networkCleanup, err := setupNetworkCapture(solveCtx, page)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to setup network capture, using defaults")
+	}
+	defer networkCleanup()
+
+	// Set custom headers before navigation (for GET requests)
+	if len(opts.Headers) > 0 {
+		if err := s.setCustomHeaders(page, opts.Headers); err != nil {
+			log.Warn().Err(err).Msg("Failed to set custom headers")
+		}
+	}
+
+	// Regular GET request
+	// Fix #7: Wrap navigation error with context for better debugging
+	// Fix 2.6: Check context before navigation to fail fast
+	if solveCtx.Err() != nil {
+		return nil, fmt.Errorf("context canceled before navigation: %w", solveCtx.Err())
+	}
+	if err := page.Context(solveCtx).Navigate(opts.URL); err != nil {
+		// Fix 2.6: Check if context was canceled to provide better error message
+		if solveCtx.Err() != nil {
+			return nil, fmt.Errorf("navigation timed out for %s: %w", opts.URL, solveCtx.Err())
+		}
+		return nil, fmt.Errorf("failed to navigate to %s: %w", opts.URL, err)
 	}
 
 	// Wait for initial load
@@ -305,8 +426,8 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (*Result, error)
 		log.Warn().Err(err).Msg("WaitLoad failed, continuing anyway")
 	}
 
-	// Main solve loop
-	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot)
+	// Main solve loop with DNS pinning
+	result, err = s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +453,7 @@ func (s *Solver) setCookies(page *rod.Page, cookies []types.RequestCookie, targe
 	// Parse URL to get domain
 	parsedURL, err := neturl.Parse(targetURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse cookie URL: %w", err)
 	}
 	domain := parsedURL.Hostname()
 
@@ -396,7 +517,10 @@ func (s *Solver) navigatePost(page *rod.Page, targetURL string, postData string)
 	}
 
 	// Build form fields JavaScript
-	fieldsJS := s.buildFormFieldsJS(postData)
+	fieldsJS, err := s.buildFormFieldsJS(postData)
+	if err != nil {
+		return fmt.Errorf("failed to build form fields: %w", err)
+	}
 
 	// Fix #14: Use JSON.Marshal for proper URL escaping instead of manual escaping.
 	// This safely handles all special characters including quotes, backslashes,
@@ -442,9 +566,10 @@ func (s *Solver) navigatePost(page *rod.Page, targetURL string, postData string)
 
 // buildFormFieldsJS generates JavaScript code to add form fields.
 // Uses JSON encoding for proper escaping to prevent JavaScript injection.
-func (s *Solver) buildFormFieldsJS(postData string) string {
+// Returns an error if any field fails to encode.
+func (s *Solver) buildFormFieldsJS(postData string) (string, error) {
 	if postData == "" {
-		return ""
+		return "", nil
 	}
 
 	var builder strings.Builder
@@ -453,20 +578,24 @@ func (s *Solver) buildFormFieldsJS(postData string) string {
 		parts := strings.SplitN(pair, "=", 2)
 		if len(parts) == 2 {
 			// URL decode the key and value
-			key, _ := neturl.QueryUnescape(parts[0])
-			value, _ := neturl.QueryUnescape(parts[1])
+			key, err := neturl.QueryUnescape(parts[0])
+			if err != nil {
+				return "", fmt.Errorf("failed to decode form key %q: %w", parts[0], err)
+			}
+			value, err := neturl.QueryUnescape(parts[1])
+			if err != nil {
+				return "", fmt.Errorf("failed to decode form value for key %q: %w", key, err)
+			}
 
 			// Use JSON encoding for proper escaping of all special characters
 			// This safely handles quotes, backslashes, newlines, unicode, and script tags
 			keyJSON, err := json.Marshal(key)
 			if err != nil {
-				log.Warn().Err(err).Str("key", key).Msg("Failed to JSON encode form key")
-				continue
+				return "", fmt.Errorf("failed to JSON encode form key %q: %w", key, err)
 			}
 			valueJSON, err := json.Marshal(value)
 			if err != nil {
-				log.Warn().Err(err).Str("key", key).Msg("Failed to JSON encode form value")
-				continue
+				return "", fmt.Errorf("failed to JSON encode form value for key %q: %w", key, err)
 			}
 
 			// Use unique variable names to avoid redeclaration
@@ -479,7 +608,180 @@ func (s *Solver) buildFormFieldsJS(postData string) string {
 				form.appendChild(input%d);`, i, i, i, keyJSON, i, valueJSON, i))
 		}
 	}
+	return builder.String(), nil
+}
+
+// navigatePostJSON performs a POST request with JSON body using the Fetch API.
+// This is used when contentType is "application/json".
+func (s *Solver) navigatePostJSON(page *rod.Page, targetURL string, jsonData string, headers map[string]string) error {
+	log.Debug().
+		Str("url", targetURL).
+		Int("json_data_len", len(jsonData)).
+		Int("headers_count", len(headers)).
+		Msg("Performing JSON POST request via Fetch API")
+
+	// Parse the URL to get the base domain
+	parsedURL, err := neturl.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Navigate to the target domain first to establish proper page context
+	baseURL := fmt.Sprintf("%s://%s/", parsedURL.Scheme, parsedURL.Host)
+	if err := page.Navigate(baseURL); err != nil {
+		return fmt.Errorf("failed to navigate to base URL: %w", err)
+	}
+
+	// Wait for page to be ready
+	if err := page.WaitLoad(); err != nil {
+		log.Debug().Err(err).Msg("WaitLoad on base URL failed")
+	}
+
+	// Give the page time to fully initialize
+	if !sleepWithContext(page.GetContext(), 500*time.Millisecond) {
+		return fmt.Errorf("context canceled during JSON POST navigation: %w", page.GetContext().Err())
+	}
+
+	// Build headers object JavaScript
+	headersJS := s.buildHeadersJS(headers)
+
+	// Safely encode the target URL and JSON data
+	targetURLJSON, err := json.Marshal(targetURL)
+	if err != nil {
+		return fmt.Errorf("failed to encode target URL: %w", err)
+	}
+
+	// The jsonData is already a JSON string, but we need to escape it for embedding in JS
+	jsonDataJS, err := json.Marshal(jsonData)
+	if err != nil {
+		return fmt.Errorf("failed to encode JSON data: %w", err)
+	}
+
+	// Use Fetch API to perform the JSON POST request
+	evalResult, err := proto.RuntimeEvaluate{
+		Expression: fmt.Sprintf(`
+			(async function() {
+				try {
+					var headers = new Headers({
+						'Content-Type': 'application/json'
+					});
+					%s
+
+					var response = await fetch(%s, {
+						method: 'POST',
+						headers: headers,
+						body: %s,
+						credentials: 'include'
+					});
+
+					var contentType = response.headers.get('content-type') || '';
+					var text = await response.text();
+
+					// Write the response to the document
+					document.open();
+					document.write(text);
+					document.close();
+
+					return {
+						status: response.status,
+						contentType: contentType,
+						success: true
+					};
+				} catch(e) {
+					return {
+						success: false,
+						error: e.message
+					};
+				}
+			})()
+		`, headersJS, targetURLJSON, jsonDataJS),
+		AwaitPromise:  true,
+		ReturnByValue: true,
+	}.Call(page)
+
+	if err != nil {
+		return fmt.Errorf("failed to execute JSON POST fetch: %w", err)
+	}
+
+	if evalResult.ExceptionDetails != nil {
+		return fmt.Errorf("fetch exception: %s", evalResult.ExceptionDetails.Text)
+	}
+
+	// Parse the result to check for errors
+	if evalResult.Result.Type == proto.RuntimeRemoteObjectTypeObject {
+		jsonStr := evalResult.Result.Value.String()
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &result); err == nil {
+			if success, ok := result["success"].(bool); ok && !success {
+				if errMsg, ok := result["error"].(string); ok {
+					return fmt.Errorf("fetch failed: %s", errMsg)
+				}
+				return fmt.Errorf("fetch failed with unknown error")
+			}
+			if status, ok := result["status"].(float64); ok {
+				log.Debug().Int("status", int(status)).Msg("JSON POST completed")
+			}
+		}
+	}
+
+	// Wait for the document to stabilize
+	if err := page.WaitLoad(); err != nil {
+		log.Warn().Err(err).Msg("WaitLoad after JSON POST failed, continuing anyway")
+	}
+
+	return nil
+}
+
+// buildHeadersJS generates JavaScript code to add custom headers to a Headers object.
+func (s *Solver) buildHeadersJS(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	for name, value := range headers {
+		// Safely encode header name and value
+		nameJSON, err := json.Marshal(name)
+		if err != nil {
+			log.Warn().Err(err).Str("header", name).Msg("Failed to encode header name")
+			continue
+		}
+		valueJSON, err := json.Marshal(value)
+		if err != nil {
+			log.Warn().Err(err).Str("header", name).Msg("Failed to encode header value")
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("headers.set(%s, %s);\n", nameJSON, valueJSON))
+	}
 	return builder.String()
+}
+
+// setCustomHeaders sets custom HTTP headers on the page using CDP.
+// These headers will be sent with subsequent requests.
+func (s *Solver) setCustomHeaders(page *rod.Page, headers map[string]string) error {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	log.Debug().Int("count", len(headers)).Msg("Setting custom HTTP headers via CDP")
+
+	// Convert to proto.NetworkHeaders
+	// NetworkHeaders is map[string]gson.JSON, so we use gson.New to convert strings
+	networkHeaders := make(proto.NetworkHeaders, len(headers))
+	for name, value := range headers {
+		networkHeaders[name] = gson.New(value)
+	}
+
+	// Use Network.setExtraHTTPHeaders to inject custom headers
+	err := proto.NetworkSetExtraHTTPHeaders{
+		Headers: networkHeaders,
+	}.Call(page)
+
+	if err != nil {
+		return fmt.Errorf("failed to set custom headers: %w", err)
+	}
+
+	return nil
 }
 
 // Challenge titles that indicate a challenge is in progress
@@ -506,7 +808,17 @@ var challengeSelectors = []string{
 
 // solveLoop repeatedly checks for and attempts to solve challenges.
 // Uses the same approach as Python FlareSolverr: check title and selectors.
-func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, captureScreenshot bool) (*Result, error) {
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout
+//   - page: The browser page
+//   - url: The original request URL
+//   - captureScreenshot: Whether to capture a screenshot
+//   - expectedIP: The IP resolved during initial validation for DNS pinning (nil to skip)
+//   - tabsTillVerify: Number of Tab presses to reach Turnstile checkbox (0 uses default of 10)
+//   - skipValidation: If true, skip response URL validation (for testing only)
+//   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
+func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, tabsTillVerify int, skipValidation bool, networkCapture *NetworkCapture) (*Result, error) {
 	const pollInterval = 1 * time.Second
 
 	// Calculate max attempts from context deadline (Bug 3: poll attempts vs timeout mismatch)
@@ -520,6 +832,8 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 	}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Check context at the start of each iteration to fail fast
+		// This is the primary cancellation check point
 		select {
 		case <-ctx.Done():
 			return nil, types.NewChallengeTimeoutError(url)
@@ -561,11 +875,16 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 		// If no challenge indicators, we're done
 		if !challengeInTitle && challengeSelector == "" {
 			log.Info().Str("title", title).Msg("Challenge solved or no challenge present")
-			return s.buildResult(page, url, captureScreenshot)
+			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture)
 		}
 
 		// Check for access denied
-		html, _ := page.HTML()
+		html, err := page.HTML()
+		if err != nil {
+			// Fix: Return error if HTML retrieval fails since we can't determine page state
+			log.Debug().Err(err).Msg("Failed to get page HTML for challenge detection")
+			return nil, fmt.Errorf("failed to get page HTML: %w", err)
+		}
 		if html != "" && s.detectChallenge(html) == ChallengeAccessDenied {
 			return nil, types.NewAccessDeniedError(url)
 		}
@@ -574,8 +893,10 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 		// Check for both #turnstile-wrapper (ID) and .cf-turnstile (class)
 		if challengeSelector == "#turnstile-wrapper" || challengeSelector == ".cf-turnstile" {
 			log.Debug().Str("selector", challengeSelector).Msg("Turnstile detected, attempting to solve...")
-			if err := s.solveTurnstile(ctx, page); err != nil {
-				log.Debug().Err(err).Msg("Turnstile solve attempt failed")
+			if err := s.solveTurnstile(ctx, page, tabsTillVerify); err != nil {
+				// Fix: Log but continue - Turnstile solve is best-effort, the loop will
+				// check again and return error if challenge persists past timeout
+				log.Warn().Err(err).Msg("Turnstile solve attempt failed, will retry")
 			}
 		}
 
@@ -598,9 +919,34 @@ func (s *Solver) getPageTitle(page *rod.Page) (string, error) {
 }
 
 // findChallengeSelector checks if any challenge selector is present on the page.
+// Uses shared timeout budget across all selector checks to prevent stacked timeouts.
+// Fix: Share timeout budget across selectors instead of giving each one a full 2 seconds.
 func (s *Solver) findChallengeSelector(page *rod.Page) string {
+	// Calculate timeout budget: use page's context deadline if available, otherwise default
+	ctx := page.GetContext()
+	totalTimeout := 5 * time.Second // Default total budget for all selectors
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < totalTimeout {
+			totalTimeout = remaining
+		}
+	}
+
+	// Distribute timeout budget across selectors (minimum 100ms each)
+	perSelectorTimeout := totalTimeout / time.Duration(len(challengeSelectors)+1)
+	if perSelectorTimeout < 100*time.Millisecond {
+		perSelectorTimeout = 100 * time.Millisecond
+	}
+
 	for _, selector := range challengeSelectors {
-		has, _, _ := page.Has(selector)
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			return ""
+		default:
+		}
+
+		has, _, _ := page.Timeout(perSelectorTimeout).Has(selector)
 		if has {
 			return selector
 		}
@@ -638,32 +984,145 @@ func (s *Solver) detectChallenge(html string) ChallengeType {
 }
 
 // solveTurnstile attempts to solve the Turnstile challenge.
-// Uses multiple approaches: keyboard navigation, iframe click, and direct widget click.
+// Uses multiple approaches in order of preference (detection risk):
+// 1. Shadow DOM traversal (CDP-native, low detection risk)
+// 2. Keyboard navigation (natural behavior, low detection risk)
+// 3. Direct widget click (medium detection risk)
+// 4. iframe click (medium detection risk)
+// 5. Positional click (last resort, medium detection risk)
+//
 // Properly releases DOM element references to prevent memory leaks.
-func (s *Solver) solveTurnstile(_ context.Context, page *rod.Page) error {
+//
+// Parameters:
+//   - tabsTillVerify: Number of Tab presses to reach the Turnstile checkbox (0 uses default of 10)
+func (s *Solver) solveTurnstile(ctx context.Context, page *rod.Page, tabsTillVerify int) error {
 	log.Debug().Msg("Attempting to solve Turnstile challenge")
 
-	// Method 1: Try direct widget click first (for visible Turnstile widgets)
-	if err := s.solveTurnstileWidget(page); err == nil {
+	// Method 1: Try CDP-native shadow DOM traversal first (lowest detection risk)
+	// This uses Rod's ShadowRoot() which accesses closed shadow roots via CDP debugger API
+	if err := s.solveTurnstileShadow(ctx, page); err == nil {
+		log.Debug().Msg("Turnstile shadow DOM traversal attempted")
+	}
+
+	// Fix #6: Pass context to all Turnstile methods
+	// Method 2: Try keyboard navigation (low fingerprinting, natural user behavior)
+	if err := s.solveTurnstileKeyboard(ctx, page, tabsTillVerify); err == nil {
+		log.Debug().Msg("Turnstile keyboard navigation attempted")
+	}
+
+	// Method 3: Try direct widget click as fallback (for visible Turnstile widgets)
+	if err := s.solveTurnstileWidget(ctx, page); err == nil {
 		log.Debug().Msg("Turnstile widget click attempted")
 	}
 
-	// Method 2: Try iframe click (for challenges.cloudflare.com iframe)
-	if err := s.solveTurnstileClick(page); err == nil {
+	// Method 4: Try iframe click (for challenges.cloudflare.com iframe)
+	if err := s.solveTurnstileClick(ctx, page); err == nil {
 		log.Debug().Msg("Turnstile iframe click attempted")
 	}
 
-	// Method 3: Try keyboard navigation as fallback
-	if err := s.solveTurnstileKeyboard(page); err == nil {
-		log.Debug().Msg("Turnstile keyboard navigation attempted")
+	// Method 5: Try positional click as last resort
+	// This clicks at a fixed offset from the Turnstile container bounds
+	if err := s.solveTurnstilePositional(ctx, page); err == nil {
+		log.Debug().Msg("Turnstile positional click attempted")
 	}
 
 	// Don't return error - the solveLoop will check if challenge is still present
 	return nil
 }
 
+// solveTurnstileShadow uses CDP-native shadow root traversal to find and click
+// the Turnstile checkbox. This method works with closed shadow roots because
+// Rod's ShadowRoot() uses CDP's DOM.describeNode with debugger-level access.
+//
+// Detection risk: LOW - uses debugger API, no JavaScript modification
+func (s *Solver) solveTurnstileShadow(ctx context.Context, page *rod.Page) error {
+	log.Debug().Msg("Trying CDP-native shadow DOM traversal for Turnstile")
+
+	traverser := NewShadowRootTraverser(page)
+
+	// Try to find and click the checkbox via shadow DOM
+	if err := traverser.ClickCheckbox(ctx); err != nil {
+		log.Debug().Err(err).Msg("Shadow DOM checkbox click failed")
+		return fmt.Errorf("shadow DOM click failed: %w", err)
+	}
+
+	log.Info().Msg("Clicked Turnstile checkbox via shadow DOM traversal")
+
+	// Wait for the click to register
+	if !sleepWithContext(ctx, 1*time.Second) {
+		return fmt.Errorf("context canceled after shadow DOM click")
+	}
+
+	return nil
+}
+
+// solveTurnstilePositional clicks at a calculated position based on the
+// Turnstile container bounds. This is a last resort when other methods fail.
+// The checkbox is typically at offset (20, 20) from the container's top-left.
+//
+// Detection risk: MEDIUM - coordinates may reveal automation patterns
+func (s *Solver) solveTurnstilePositional(ctx context.Context, page *rod.Page) error {
+	log.Debug().Msg("Trying positional click for Turnstile")
+
+	traverser := NewShadowRootTraverser(page)
+
+	// Get the Turnstile container bounds
+	bounds, err := traverser.GetTurnstileContainerBounds(ctx)
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to get Turnstile container bounds")
+		return fmt.Errorf("failed to get container bounds: %w", err)
+	}
+
+	// Calculate checkbox position (typically offset 20-25 pixels from top-left)
+	// The checkbox is usually near the left edge, vertically centered
+	checkboxOffsetX := 20.0
+	checkboxOffsetY := bounds.Height / 2 // Center vertically
+
+	clickX := bounds.X + checkboxOffsetX
+	clickY := bounds.Y + checkboxOffsetY
+
+	log.Debug().
+		Float64("container_x", bounds.X).
+		Float64("container_y", bounds.Y).
+		Float64("container_width", bounds.Width).
+		Float64("container_height", bounds.Height).
+		Float64("click_x", clickX).
+		Float64("click_y", clickY).
+		Msg("Calculated positional click coordinates")
+
+	// Move to position and click
+	centerX := int(clickX)
+	centerY := int(clickY)
+	if err := page.Mouse.MoveTo(proto.NewPoint(clickX, clickY)); err != nil {
+		log.Debug().Err(err).Msg("Failed to move mouse for positional click")
+		return fmt.Errorf("failed to move mouse to (%d, %d): %w", centerX, centerY, err)
+	}
+
+	if err := page.Mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		log.Debug().Err(err).Msg("Failed positional click")
+		return fmt.Errorf("failed to click at (%d, %d): %w", centerX, centerY, err)
+	}
+
+	log.Info().
+		Float64("x", clickX).
+		Float64("y", clickY).
+		Msg("Performed positional click on Turnstile")
+
+	// Wait for the click to register
+	if !sleepWithContext(ctx, 1*time.Second) {
+		return fmt.Errorf("context canceled after positional click")
+	}
+
+	return nil
+}
+
 // solveTurnstileWidget attempts to click directly on the Turnstile widget element.
-func (s *Solver) solveTurnstileWidget(page *rod.Page) error {
+// Fix #6: Accepts context for proper timeout/cancellation propagation.
+func (s *Solver) solveTurnstileWidget(ctx context.Context, page *rod.Page) error {
+	// Check context before starting
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	log.Debug().Msg("Trying direct widget click for Turnstile")
 
 	// Try clicking on .cf-turnstile widget or its checkbox
@@ -701,24 +1160,40 @@ func (s *Solver) solveTurnstileWidget(page *rod.Page) error {
 			log.Debug().Str("selector", selector).Float64("x", x).Float64("y", y).Msg("Clicking Turnstile widget")
 
 			// Move to position and click
-			page.Mouse.MustMoveTo(x, y)
+			if moveErr := page.Mouse.MoveTo(proto.NewPoint(x, y)); moveErr != nil {
+				log.Debug().Err(moveErr).Msg("Failed to move mouse")
+				continue
+			}
 			if clickErr := page.Mouse.Click(proto.InputMouseButtonLeft, 1); clickErr == nil {
 				log.Info().Str("selector", selector).Msg("Clicked Turnstile widget")
 			}
 		}
 
-		_ = element.Release()
+		if err := element.Release(); err != nil {
+			log.Debug().Err(err).Str("selector", selector).Msg("Error releasing DOM element")
+		}
 	}
 
 	return nil
 }
 
 // solveTurnstileKeyboard uses keyboard navigation to solve Turnstile.
-// This matches Python FlareSolverr's click_verify() function.
-func (s *Solver) solveTurnstileKeyboard(page *rod.Page) error {
-	log.Debug().Msg("Trying keyboard navigation for Turnstile")
+// This matches Python FlareSolverr v3.3.22's click_verify() function which uses Tab+Enter.
+// Using keyboard navigation instead of mouse clicks avoids fingerprinting detection.
+//
+// Fix #6: Accepts context for proper timeout/cancellation propagation.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - tabsTillVerify: Number of Tab presses to reach the Turnstile checkbox (0 uses default of 10)
+func (s *Solver) solveTurnstileKeyboard(ctx context.Context, page *rod.Page, tabsTillVerify int) error {
+	// Use default of 10 tabs if not specified (matches Python FlareSolverr default)
+	tabCount := tabsTillVerify
+	if tabCount <= 0 {
+		tabCount = 10
+	}
 
-	ctx := page.GetContext()
+	log.Debug().Int("tab_count", tabCount).Msg("Trying keyboard navigation for Turnstile")
 
 	// Wait a moment for Turnstile to fully load, but respect context (Bug 2)
 	if !sleepWithContext(ctx, 2*time.Second) {
@@ -728,8 +1203,7 @@ func (s *Solver) solveTurnstileKeyboard(page *rod.Page) error {
 	keyboard := page.Keyboard
 
 	// Tab through elements to reach the Turnstile checkbox
-	// Python uses 10 tabs by default
-	for i := 0; i < 10; i++ {
+	for i := 0; i < tabCount; i++ {
 		if err := keyboard.Press(input.Tab); err != nil {
 			log.Debug().Err(err).Int("tab", i).Msg("Tab press failed")
 			continue
@@ -740,46 +1214,61 @@ func (s *Solver) solveTurnstileKeyboard(page *rod.Page) error {
 		}
 	}
 
-	// Press Space to check the checkbox
-	if err := keyboard.Press(input.Space); err != nil {
-		log.Debug().Err(err).Msg("Space press failed")
-		return err
+	// Press Enter to activate the checkbox (matches Python v3.3.22)
+	if err := keyboard.Press(input.Enter); err != nil {
+		log.Debug().Err(err).Msg("Enter press failed")
+		return fmt.Errorf("failed to press Enter key: %w", err)
 	}
 
-	log.Info().Msg("Sent keyboard Tab+Space for Turnstile")
+	log.Info().Msg("Sent keyboard Tab+Enter for Turnstile")
 
-	// Wait a moment for the click to register, but respect context (Bug 2)
+	// Wait a moment for the action to register, but respect context (Bug 2)
 	if !sleepWithContext(ctx, 1*time.Second) {
 		return fmt.Errorf("context canceled during Turnstile solve")
 	}
 
-	// Try to find and click "Verify you are human" button
-	if btn, err := page.Element("//button[contains(text(),'Verify')]"); err == nil {
-		if clickErr := btn.Click(proto.InputMouseButtonLeft, 1); clickErr == nil {
-			log.Info().Msg("Clicked Verify button")
+	// Try to find and activate "Verify you are human" button using keyboard
+	// Use keyboard Enter instead of mouse click to avoid fingerprinting
+	if btn, err := page.Timeout(2 * time.Second).Element("//button[contains(text(),'Verify')]"); err == nil {
+		// Always defer element release to prevent memory leaks
+		defer func() {
+			if releaseErr := btn.Release(); releaseErr != nil {
+				log.Debug().Err(releaseErr).Msg("Error releasing Verify button element")
+			}
+		}()
+		if focusErr := btn.Focus(); focusErr == nil {
+			if enterErr := keyboard.Press(input.Enter); enterErr == nil {
+				log.Info().Msg("Pressed Enter on Verify button")
+			}
 		}
-		_ = btn.Release()
 	}
 
 	return nil
 }
 
 // solveTurnstileClick attempts to directly click the Turnstile checkbox in iframe.
-func (s *Solver) solveTurnstileClick(page *rod.Page) error {
+// Fix #6: Accepts context for proper timeout/cancellation propagation.
+func (s *Solver) solveTurnstileClick(ctx context.Context, page *rod.Page) error {
+	// Check context before starting
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	log.Debug().Msg("Trying direct iframe click for Turnstile")
 
 	sel := selectors.Get()
 
-	// Find all iframes on the page
-	iframes, err := page.Elements("iframe")
+	// Find all iframes on the page with timeout to prevent hanging
+	iframes, err := page.Timeout(5 * time.Second).Elements("iframe")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get iframes: %w", err)
 	}
 
 	// CRITICAL: Release all iframes when done to prevent memory leak
 	defer func() {
 		for _, iframe := range iframes {
-			_ = iframe.Release()
+			if err := iframe.Release(); err != nil {
+				log.Debug().Err(err).Msg("Failed to release iframe element")
+			}
 		}
 	}()
 
@@ -809,7 +1298,9 @@ func (s *Solver) solveTurnstileClick(page *rod.Page) error {
 
 				// Try to click the element, then release it immediately
 				clickErr := element.Click(proto.InputMouseButtonLeft, 1)
-				_ = element.Release() // Release element after use
+				if err := element.Release(); err != nil {
+					log.Debug().Err(err).Str("selector", selector).Msg("Error releasing Turnstile iframe element")
+				}
 
 				if clickErr != nil {
 					log.Debug().Err(clickErr).Str("selector", selector).Msg("Click failed")
@@ -828,9 +1319,46 @@ func (s *Solver) solveTurnstileClick(page *rod.Page) error {
 // Maximum response size to prevent memory exhaustion (10MB)
 const maxResponseSize = 10 * 1024 * 1024
 
+// Maximum number of cookies to extract to prevent resource exhaustion
+const maxExtractedCookies = 100
+
+// Maximum screenshot size to prevent memory exhaustion (5MB)
+const maxScreenshotSize = 5 * 1024 * 1024
+
+// Maximum number of localStorage/sessionStorage items to extract
+const maxStorageItems = 100
+
+// Maximum total size of localStorage/sessionStorage data (1MB)
+const maxStorageSize = 1 * 1024 * 1024
+
+// Maximum number of response headers to capture
+const maxResponseHeaders = 100
+
+// Maximum cookie value size (4KB per RFC 6265)
+const maxCookieValueSize = 4 * 1024
+
+// Maximum total response size including all extracted data (15MB)
+const maxTotalResponseSize = 15 * 1024 * 1024
+
 // validateResponseURL validates the current page URL to detect DNS rebinding attacks.
 // This should be called after navigation to ensure we haven't been redirected to a blocked IP.
-func (s *Solver) validateResponseURL(page *rod.Page) error {
+//
+// Parameters:
+//   - page: The browser page to validate
+//   - expectedIP: The IP that was resolved during initial validation (nil to skip pinning)
+//   - skipValidation: If true, skip all validation (for testing only - DO NOT use in production)
+//
+// DNS Pinning: If expectedIP is provided, the function verifies that the response URL
+// still resolves to the same IP. This prevents DNS rebinding attacks where an attacker:
+//  1. Initially resolves their domain to a safe IP (passes validation)
+//  2. Changes DNS to point to an internal IP before the browser navigates
+//  3. Browser ends up accessing internal resources
+func (s *Solver) validateResponseURL(page *rod.Page, expectedIP net.IP, skipValidation bool) error {
+	// Skip validation if requested (for testing only)
+	if skipValidation {
+		return nil
+	}
+
 	info, err := page.Info()
 	if err != nil {
 		// Can't get page info - allow to continue
@@ -842,7 +1370,24 @@ func (s *Solver) validateResponseURL(page *rod.Page) error {
 		return nil
 	}
 
-	// Re-validate the response URL to detect DNS rebinding
+	// Use DNS pinning validation if we have an expected IP
+	if expectedIP != nil {
+		if err := security.ValidateURLWithPinnedIP(info.URL, expectedIP); err != nil {
+			log.Warn().
+				Str("url", info.URL).
+				Str("expected_ip", expectedIP.String()).
+				Err(err).
+				Msg("Response URL failed DNS pinning validation (possible DNS rebinding attack)")
+			return fmt.Errorf("DNS rebinding detected: %w", err)
+		}
+		log.Debug().
+			Str("url", info.URL).
+			Str("expected_ip", expectedIP.String()).
+			Msg("Response URL passed DNS pinning validation")
+		return nil
+	}
+
+	// Fallback: Re-validate the response URL without pinning
 	if err := security.ValidateURL(info.URL); err != nil {
 		log.Warn().
 			Str("url", info.URL).
@@ -856,9 +1401,17 @@ func (s *Solver) validateResponseURL(page *rod.Page) error {
 
 // buildResult constructs the result after successful solve.
 // Fetches HTML from page - prefer buildResultWithHTML if you already have HTML.
-func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool) (*Result, error) {
+//
+// Parameters:
+//   - page: The browser page
+//   - url: The original request URL
+//   - captureScreenshot: Whether to capture a screenshot
+//   - expectedIP: The IP resolved during initial validation for DNS pinning (nil to skip)
+//   - skipValidation: If true, skip response URL validation (for testing only)
+//   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
+func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, skipValidation bool, networkCapture *NetworkCapture) (*Result, error) {
 	// Validate response URL to detect DNS rebinding attacks
-	if err := s.validateResponseURL(page); err != nil {
+	if err := s.validateResponseURL(page, expectedIP, skipValidation); err != nil {
 		return nil, err
 	}
 
@@ -866,12 +1419,19 @@ func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool)
 	if err != nil {
 		return nil, err
 	}
-	return s.buildResultWithHTML(page, url, html, captureScreenshot)
+	return s.buildResultWithHTML(page, url, html, captureScreenshot, networkCapture)
 }
 
 // buildResultWithHTML constructs the result using pre-fetched HTML.
 // This avoids redundant HTML fetching when HTML is already available.
-func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, captureScreenshot bool) (*Result, error) {
+//
+// Parameters:
+//   - page: The browser page
+//   - url: The original request URL
+//   - html: Pre-fetched HTML content
+//   - captureScreenshot: Whether to capture a screenshot
+//   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
+func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, captureScreenshot bool, networkCapture *NetworkCapture) (*Result, error) {
 	// Fix #15: Track if HTML was truncated
 	htmlTruncated := false
 
@@ -907,6 +1467,30 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		cookies = allCookiesResult.Cookies
 	}
 
+	// Enforce cookie count limit to prevent resource exhaustion
+	if len(cookies) > maxExtractedCookies {
+		log.Warn().
+			Int("count", len(cookies)).
+			Int("max", maxExtractedCookies).
+			Msg("Cookie count exceeds limit, truncating")
+		cookies = cookies[:maxExtractedCookies]
+	}
+
+	// Fix: Enforce per-cookie value size limit to prevent memory exhaustion
+	for i, cookie := range cookies {
+		if len(cookie.Value) > maxCookieValueSize {
+			log.Warn().
+				Str("cookie_name", cookie.Name).
+				Int("value_size", len(cookie.Value)).
+				Int("max_size", maxCookieValueSize).
+				Msg("Cookie value exceeds maximum size, truncating")
+			// Create a truncated copy to avoid modifying the original
+			truncatedCookie := *cookie
+			truncatedCookie.Value = cookie.Value[:maxCookieValueSize]
+			cookies[i] = &truncatedCookie
+		}
+	}
+
 	log.Debug().Int("cookie_count", len(cookies)).Msg("Retrieved all cookies via Network.getAllCookies")
 
 	// Get current URL (may have been redirected)
@@ -925,8 +1509,29 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 	localStorage := s.extractLocalStorage(page)
 	sessionStorage := s.extractSessionStorage(page)
 
-	// Extract response headers/metadata
-	responseHeaders := s.extractResponseHeaders(page)
+	// Get status code and headers from network capture, or use DOM extraction as fallback
+	statusCode := 200 // Default fallback
+	var responseHeaders map[string]string
+	if networkCapture != nil {
+		capturedStatus := networkCapture.StatusCode()
+		if capturedStatus > 0 {
+			statusCode = capturedStatus
+		}
+		capturedHeaders := networkCapture.Headers()
+		if len(capturedHeaders) > 0 {
+			responseHeaders = capturedHeaders
+			log.Debug().
+				Int("status_code", statusCode).
+				Int("header_count", len(responseHeaders)).
+				Msg("Using captured network response data")
+		}
+	}
+
+	// Fall back to DOM extraction if network capture didn't get headers
+	if len(responseHeaders) == 0 {
+		responseHeaders = s.extractResponseHeaders(page)
+		log.Debug().Msg("Using DOM-extracted response headers (fallback)")
+	}
 
 	// Capture screenshot if requested
 	var screenshotBase64 string
@@ -953,7 +1558,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 
 	return &Result{
 		Success:         true,
-		StatusCode:      200, // Assume success if we got here
+		StatusCode:      statusCode, // Use captured status code from network response
 		HTML:            html,
 		HTMLTruncated:   htmlTruncated, // Fix #15: Include truncation flag
 		Cookies:         cookies,
@@ -1002,15 +1607,12 @@ func (s *Solver) extractTurnstileToken(page *rod.Page) string {
 		return ""
 	}
 
-	if result.Result.Type == proto.RuntimeRemoteObjectTypeString {
-		token := result.Result.Value.Str()
-		return token
-	}
-
-	return ""
+	// Use safe helper to prevent nil pointer panic
+	return safeEvalResultString(result)
 }
 
 // extractLocalStorage extracts all localStorage key-value pairs from the page.
+// Enforces limits on item count and total size to prevent resource exhaustion.
 func (s *Solver) extractLocalStorage(page *rod.Page) map[string]string {
 	result, err := proto.RuntimeEvaluate{
 		Expression: `(function() {
@@ -1033,23 +1635,53 @@ func (s *Solver) extractLocalStorage(page *rod.Page) map[string]string {
 		return nil
 	}
 
-	if result.Result.Type == proto.RuntimeRemoteObjectTypeString {
-		jsonStr := result.Result.Value.Str()
-		var data map[string]string
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-			log.Debug().Err(err).Msg("Failed to parse localStorage JSON")
-			return nil
-		}
-		if len(data) > 0 {
-			log.Debug().Int("count", len(data)).Msg("Extracted localStorage items")
-		}
-		return data
+	// Use safe helper to extract string value
+	jsonStr := safeEvalResultString(result)
+	if jsonStr == "" {
+		return nil
 	}
 
-	return nil
+	// Check total size limit before parsing
+	if len(jsonStr) > maxStorageSize {
+		log.Warn().
+			Int("size", len(jsonStr)).
+			Int("max", maxStorageSize).
+			Msg("localStorage data exceeds size limit, truncating")
+		return nil
+	}
+
+	var data map[string]string
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		log.Debug().Err(err).Msg("Failed to parse localStorage JSON")
+		return nil
+	}
+
+	// Enforce item count limit
+	if len(data) > maxStorageItems {
+		log.Warn().
+			Int("count", len(data)).
+			Int("max", maxStorageItems).
+			Msg("localStorage item count exceeds limit, truncating")
+		truncated := make(map[string]string, maxStorageItems)
+		count := 0
+		for k, v := range data {
+			if count >= maxStorageItems {
+				break
+			}
+			truncated[k] = v
+			count++
+		}
+		data = truncated
+	}
+
+	if len(data) > 0 {
+		log.Debug().Int("count", len(data)).Msg("Extracted localStorage items")
+	}
+	return data
 }
 
 // extractSessionStorage extracts all sessionStorage key-value pairs from the page.
+// Enforces limits on item count and total size to prevent resource exhaustion.
 func (s *Solver) extractSessionStorage(page *rod.Page) map[string]string {
 	result, err := proto.RuntimeEvaluate{
 		Expression: `(function() {
@@ -1072,25 +1704,55 @@ func (s *Solver) extractSessionStorage(page *rod.Page) map[string]string {
 		return nil
 	}
 
-	if result.Result.Type == proto.RuntimeRemoteObjectTypeString {
-		jsonStr := result.Result.Value.Str()
-		var data map[string]string
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-			log.Debug().Err(err).Msg("Failed to parse sessionStorage JSON")
-			return nil
-		}
-		if len(data) > 0 {
-			log.Debug().Int("count", len(data)).Msg("Extracted sessionStorage items")
-		}
-		return data
+	// Use safe helper to extract string value
+	jsonStr := safeEvalResultString(result)
+	if jsonStr == "" {
+		return nil
 	}
 
-	return nil
+	// Check total size limit before parsing
+	if len(jsonStr) > maxStorageSize {
+		log.Warn().
+			Int("size", len(jsonStr)).
+			Int("max", maxStorageSize).
+			Msg("sessionStorage data exceeds size limit, truncating")
+		return nil
+	}
+
+	var data map[string]string
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		log.Debug().Err(err).Msg("Failed to parse sessionStorage JSON")
+		return nil
+	}
+
+	// Enforce item count limit
+	if len(data) > maxStorageItems {
+		log.Warn().
+			Int("count", len(data)).
+			Int("max", maxStorageItems).
+			Msg("sessionStorage item count exceeds limit, truncating")
+		truncated := make(map[string]string, maxStorageItems)
+		count := 0
+		for k, v := range data {
+			if count >= maxStorageItems {
+				break
+			}
+			truncated[k] = v
+			count++
+		}
+		data = truncated
+	}
+
+	if len(data) > 0 {
+		log.Debug().Int("count", len(data)).Msg("Extracted sessionStorage items")
+	}
+	return data
 }
 
 // extractResponseHeaders gets the response headers from the page's main document.
 // Note: This uses the Performance API to get resource timing info, but headers
 // are not directly accessible. For full headers, we'd need to intercept network requests.
+// Enforces limits on header count to prevent resource exhaustion.
 func (s *Solver) extractResponseHeaders(page *rod.Page) map[string]string {
 	// Try to get headers from the document's response
 	// This is limited - full header access requires network interception
@@ -1142,20 +1804,41 @@ func (s *Solver) extractResponseHeaders(page *rod.Page) map[string]string {
 		return nil
 	}
 
-	if result.Result.Type == proto.RuntimeRemoteObjectTypeString {
-		jsonStr := result.Result.Value.Str()
-		var data map[string]string
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-			log.Debug().Err(err).Msg("Failed to parse response headers JSON")
-			return nil
-		}
-		return data
+	// Use safe helper to extract string value
+	jsonStr := safeEvalResultString(result)
+	if jsonStr == "" {
+		return nil
 	}
 
-	return nil
+	var data map[string]string
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		log.Debug().Err(err).Msg("Failed to parse response headers JSON")
+		return nil
+	}
+
+	// Enforce header count limit
+	if len(data) > maxResponseHeaders {
+		log.Warn().
+			Int("count", len(data)).
+			Int("max", maxResponseHeaders).
+			Msg("Response header count exceeds limit, truncating")
+		truncated := make(map[string]string, maxResponseHeaders)
+		count := 0
+		for k, v := range data {
+			if count >= maxResponseHeaders {
+				break
+			}
+			truncated[k] = v
+			count++
+		}
+		data = truncated
+	}
+
+	return data
 }
 
 // captureScreenshot captures a PNG screenshot of the page.
+// Returns an error if the screenshot exceeds the maximum size limit.
 func (s *Solver) captureScreenshot(page *rod.Page) ([]byte, error) {
 	// Use full page screenshot
 	screenshot, err := page.Screenshot(true, &proto.PageCaptureScreenshot{
@@ -1165,6 +1848,16 @@ func (s *Solver) captureScreenshot(page *rod.Page) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("screenshot capture failed: %w", err)
 	}
+
+	// Enforce size limit to prevent memory exhaustion
+	if len(screenshot) > maxScreenshotSize {
+		log.Warn().
+			Int("size", len(screenshot)).
+			Int("max", maxScreenshotSize).
+			Msg("Screenshot exceeds maximum size limit, returning error")
+		return nil, fmt.Errorf("screenshot size %d exceeds maximum limit of %d bytes", len(screenshot), maxScreenshotSize)
+	}
+
 	return screenshot, nil
 }
 
@@ -1206,13 +1899,35 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	solveCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
+	// Set up network capture BEFORE navigation to capture response events
+	networkCapture, networkCleanup, err := setupNetworkCapture(solveCtx, page)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to setup network capture, using defaults")
+	}
+	defer networkCleanup()
+
 	// Navigate (GET or POST)
 	// Use page.Context() inline to avoid reassigning the page variable
 	if opts.IsPost && opts.PostData != "" {
-		if err := s.navigatePost(page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
-			return nil, err
+		// Dispatch POST based on content type
+		if opts.ContentType == types.ContentTypeJSON {
+			// JSON POST via Fetch API
+			if err := s.navigatePostJSON(page.Context(solveCtx), opts.URL, opts.PostData, opts.Headers); err != nil {
+				return nil, err
+			}
+		} else {
+			// Form POST (default, backward compatible)
+			if err := s.navigatePost(page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
+				return nil, err
+			}
 		}
 	} else {
+		// Set custom headers before navigation (for GET requests)
+		if len(opts.Headers) > 0 {
+			if err := s.setCustomHeaders(page, opts.Headers); err != nil {
+				log.Warn().Err(err).Msg("Failed to set custom headers")
+			}
+		}
 		if err := page.Context(solveCtx).Navigate(opts.URL); err != nil {
 			return nil, err
 		}
@@ -1223,7 +1938,8 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		log.Warn().Err(err).Msg("WaitLoad failed, continuing anyway")
 	}
 
-	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot)
+	// Solve with DNS pinning
+	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
 	if err != nil {
 		return nil, err
 	}

@@ -3,18 +3,21 @@ package types
 // Request represents an incoming API request.
 // This matches the FlareSolverr API specification.
 type Request struct {
-	Cmd               string          `json:"cmd"`
-	URL               string          `json:"url,omitempty"`
-	Session           string          `json:"session,omitempty"`
-	SessionTTL        int             `json:"session_ttl_minutes,omitempty"` // Reserved for future use - currently ignored
-	MaxTimeout        int             `json:"maxTimeout,omitempty"`
-	Cookies           []RequestCookie `json:"cookies,omitempty"`
-	ReturnOnlyCookies bool            `json:"returnOnlyCookies,omitempty"`
-	Proxy             *Proxy          `json:"proxy,omitempty"`
-	PostData          string          `json:"postData,omitempty"`
-	ReturnScreenshot  bool            `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
-	DisableMedia      bool            `json:"disableMedia,omitempty"`     // Disable loading of media (images, CSS, fonts)
-	WaitInSeconds     int             `json:"waitInSeconds,omitempty"`    // Wait N seconds before returning the response
+	Cmd               string            `json:"cmd"`
+	URL               string            `json:"url,omitempty"`
+	Session           string            `json:"session,omitempty"`
+	SessionTTL        int               `json:"session_ttl_minutes,omitempty"` // Reserved for future use - currently ignored
+	MaxTimeout        int               `json:"maxTimeout,omitempty"`
+	Cookies           []RequestCookie   `json:"cookies,omitempty"`
+	ReturnOnlyCookies bool              `json:"returnOnlyCookies,omitempty"`
+	Proxy             *Proxy            `json:"proxy,omitempty"`
+	PostData          string            `json:"postData,omitempty"`
+	ContentType       string            `json:"contentType,omitempty"`      // Content type for POST: "application/json" or "application/x-www-form-urlencoded" (default)
+	Headers           map[string]string `json:"headers,omitempty"`          // Custom HTTP headers to send with the request
+	ReturnScreenshot  bool              `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
+	DisableMedia      bool              `json:"disableMedia,omitempty"`     // Disable loading of media (images, CSS, fonts)
+	WaitInSeconds     int               `json:"waitInSeconds,omitempty"`    // Wait N seconds before returning the response
+	TabsTillVerify    int               `json:"tabsTillVerify,omitempty"`   // Number of Tab presses to reach Turnstile checkbox (default: 10)
 }
 
 // RequestCookie represents a cookie to be set before navigation.
@@ -101,4 +104,10 @@ const (
 const (
 	StatusOK    = "ok"
 	StatusError = "error"
+)
+
+// Content type constants for POST requests.
+const (
+	ContentTypeFormURLEncoded = "application/x-www-form-urlencoded"
+	ContentTypeJSON           = "application/json"
 )

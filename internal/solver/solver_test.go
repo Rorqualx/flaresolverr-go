@@ -164,3 +164,142 @@ func TestSolveOptionsDefaults(t *testing.T) {
 		t.Error("Cookies should default to empty")
 	}
 }
+
+// TestBuildFormFieldsJS_MultilinePostData tests that multiline and special characters
+// in POST data are properly escaped via JSON encoding, preventing JavaScript injection.
+// This is the Go equivalent fix for Python FlareSolverr PR #1320.
+// The Python version breaks when postData contains newlines because string interpolation
+// fails. The Go version uses json.Marshal() which properly escapes all special characters.
+func TestBuildFormFieldsJS_MultilinePostData(t *testing.T) {
+	s := &Solver{}
+
+	tests := []struct {
+		name        string
+		postData    string
+		shouldMatch []string // Strings that should appear in output (JSON-escaped)
+		shouldNot   []string // Strings that should NOT appear literally (unescaped)
+	}{
+		{
+			name:     "simple key-value",
+			postData: "key=value",
+			shouldMatch: []string{
+				`"key"`,   // JSON-encoded key
+				`"value"`, // JSON-encoded value
+			},
+		},
+		{
+			name:     "multiline value - newline in data (PR #1320 bug)",
+			postData: "field1=line1%0Aline2", // %0A is URL-encoded newline
+			shouldMatch: []string{
+				`"field1"`,       // Key should be JSON-encoded
+				`"line1\nline2"`, // Value with newline should be JSON-escaped as \n
+			},
+			shouldNot: []string{
+				"line1\nline2", // Raw newline should NOT appear (would break JS)
+			},
+		},
+		{
+			name:     "value with quotes",
+			postData: "field=%22quoted%22", // %22 is URL-encoded double quote
+			shouldMatch: []string{
+				`"field"`,
+				`"\"quoted\""`, // Quotes should be escaped
+			},
+		},
+		{
+			name:     "value with backslash",
+			postData: "path=C%3A%5CUsers%5Ctest", // C:\Users\test URL-encoded
+			shouldMatch: []string{
+				`"path"`,
+				`"C:\\Users\\test"`, // Backslashes should be escaped
+			},
+		},
+		{
+			name:     "value with script tag (XSS attempt)",
+			postData: "xss=%3Cscript%3Ealert(1)%3C%2Fscript%3E", // <script>alert(1)</script>
+			shouldMatch: []string{
+				`"xss"`,
+				`\u003cscript\u003e`, // json.Marshal escapes < > as unicode (even safer)
+			},
+			shouldNot: []string{
+				`<script>`, // Raw script tag should NOT appear
+			},
+		},
+		{
+			name:     "complex multiline with special chars",
+			postData: "data=line1%0Aline2%0D%0Aline3%09tabbed", // newlines, CRLF, tab
+			shouldMatch: []string{
+				`"data"`,
+				`\n`, // Newline escaped
+				`\t`, // Tab escaped
+			},
+		},
+		{
+			name:     "multiple fields with special chars",
+			postData: "field1=value%0Awith%0Anewlines&field2=has%22quotes%22",
+			shouldMatch: []string{
+				`"field1"`,
+				`"field2"`,
+				`\n`, // Newlines escaped
+				`\"`, // Quotes escaped
+			},
+		},
+		{
+			name:     "empty value",
+			postData: "empty=",
+			shouldMatch: []string{
+				`"empty"`,
+				`""`, // Empty string JSON
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := s.buildFormFieldsJS(tt.postData)
+			if err != nil {
+				t.Fatalf("buildFormFieldsJS() returned unexpected error: %v", err)
+			}
+
+			// Check that expected patterns appear
+			for _, pattern := range tt.shouldMatch {
+				if !containsString(result, pattern) {
+					t.Errorf("buildFormFieldsJS() output should contain %q\nGot: %s", pattern, result)
+				}
+			}
+
+			// Check that raw (unescaped) patterns do NOT appear
+			for _, pattern := range tt.shouldNot {
+				if containsString(result, pattern) {
+					t.Errorf("buildFormFieldsJS() output should NOT contain raw %q\nGot: %s", pattern, result)
+				}
+			}
+
+			// Verify the output is valid JavaScript (basic structure check)
+			if tt.postData != "" && result != "" {
+				if !containsString(result, "document.createElement('input')") {
+					t.Error("buildFormFieldsJS() should create input elements")
+				}
+				if !containsString(result, "form.appendChild") {
+					t.Error("buildFormFieldsJS() should append to form")
+				}
+			}
+		})
+	}
+}
+
+// containsString is a helper to check if a string contains a substring
+func containsString(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(s) < len(substr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
