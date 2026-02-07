@@ -83,7 +83,9 @@ func TestV1Endpoint(t *testing.T) {
 	}
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusOK {
 		t.Errorf("Expected status 'ok', got %q", resp.Status)
@@ -101,7 +103,9 @@ func TestV1EndpointRejectsGet(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status for GET /v1, got %q", resp.Status)
@@ -151,7 +155,9 @@ func TestInvalidJSON(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status, got %q", resp.Status)
@@ -175,7 +181,9 @@ func TestUnknownCommand(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status, got %q", resp.Status)
@@ -200,7 +208,9 @@ func TestSessionsList(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusOK {
 		t.Errorf("Expected ok status, got %q", resp.Status)
@@ -225,7 +235,9 @@ func TestSessionCreateMissingID(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status, got %q", resp.Status)
@@ -249,7 +261,9 @@ func TestSessionDestroyMissingID(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status, got %q", resp.Status)
@@ -272,7 +286,9 @@ func TestSessionDestroyNotFound(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status, got %q", resp.Status)
@@ -292,7 +308,9 @@ func TestRequestGetMissingURL(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status, got %q", resp.Status)
@@ -319,7 +337,9 @@ func TestRequestPostMissingPostData(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.Status != types.StatusError {
 		t.Errorf("Expected error status, got %q", resp.Status)
@@ -355,7 +375,9 @@ func TestResponseTimestamps(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	var resp types.Response
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
 
 	if resp.StartTime == 0 {
 		t.Error("StartTime should not be zero")

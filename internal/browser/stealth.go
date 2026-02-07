@@ -551,8 +551,23 @@ func BlockResources(ctx context.Context, page *rod.Page, blockImages, blockCSS, 
 }
 
 // buildBlockPatterns creates the list of URL patterns to block.
+// Pre-allocates capacity based on enabled flags to avoid reallocations.
 func buildBlockPatterns(blockImages, blockCSS, blockFonts, blockMedia bool) []*proto.FetchRequestPattern {
-	patterns := make([]*proto.FetchRequestPattern, 0)
+	// Calculate capacity: images=8, css=1, fonts=5, media=5
+	capacity := 0
+	if blockImages {
+		capacity += 8
+	}
+	if blockCSS {
+		capacity += 1
+	}
+	if blockFonts {
+		capacity += 5
+	}
+	if blockMedia {
+		capacity += 5
+	}
+	patterns := make([]*proto.FetchRequestPattern, 0, capacity)
 
 	if blockImages {
 		imagePatterns := []string{

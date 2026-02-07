@@ -36,7 +36,9 @@ func BenchmarkJSONDecodeWithPool(b *testing.B) {
 		reader.Reset(reqBody)
 
 		buf := getBuffer()
-		_, _ = io.Copy(buf, reader)
+		if _, err := io.Copy(buf, reader); err != nil {
+			b.Fatal(err)
+		}
 		var req types.Request
 		if err := json.Unmarshal(buf.Bytes(), &req); err != nil {
 			b.Fatal(err)
@@ -109,7 +111,9 @@ func BenchmarkRequestParsing(b *testing.B) {
 	b.Run("DirectUnmarshal", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			var req types.Request
-			_ = json.Unmarshal(reqBody, &req)
+			if err := json.Unmarshal(reqBody, &req); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 
@@ -117,9 +121,13 @@ func BenchmarkRequestParsing(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			reader := bytes.NewReader(reqBody)
 			buf := getBuffer()
-			_, _ = io.Copy(buf, reader)
+			if _, err := io.Copy(buf, reader); err != nil {
+				b.Fatal(err)
+			}
 			var req types.Request
-			_ = json.Unmarshal(buf.Bytes(), &req)
+			if err := json.Unmarshal(buf.Bytes(), &req); err != nil {
+				b.Fatal(err)
+			}
 			putBuffer(buf)
 		}
 	})
@@ -134,16 +142,25 @@ func BenchmarkHTTPHandler(b *testing.B) {
 		buf := getBuffer()
 		defer putBuffer(buf)
 
-		_, _ = io.Copy(buf, r.Body)
+		if _, err := io.Copy(buf, r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		var req types.Request
-		_ = json.Unmarshal(buf.Bytes(), &req)
+		if err := json.Unmarshal(buf.Bytes(), &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		// Simulate response writing
 		resp := types.Response{
 			Status:  types.StatusOK,
 			Message: "test",
 		}
-		_ = json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	})
 
 	reqBody := `{"cmd":"request.get","url":"https://example.com"}`
@@ -178,7 +195,9 @@ func BenchmarkCookieParsing(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var req types.Request
-		_ = json.Unmarshal(reqBody, &req)
+		if err := json.Unmarshal(reqBody, &req); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
