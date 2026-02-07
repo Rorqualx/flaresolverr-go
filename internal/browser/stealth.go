@@ -449,6 +449,193 @@ const stealthScript = `
         // AudioContext patching failed, continue
     }
 
+    // ========================================
+    // 14. Battery API Mock
+    // ========================================
+    // Mock navigator.getBattery() to return consistent values
+    // Some fingerprinting scripts use battery level to track users
+    try {
+        if (navigator.getBattery && !navigator.getBattery._stealth) {
+            // Generate session-consistent battery level (0.87-0.97)
+            if (!window.__batteryLevel) {
+                window.__batteryLevel = 0.87 + (Math.random() * 0.10);
+            }
+
+            const mockBatteryManager = {
+                charging: true,
+                chargingTime: 0,
+                dischargingTime: Infinity,
+                level: window.__batteryLevel,
+                addEventListener: function(type, listener) {
+                    // Store listeners but never fire them (battery doesn't change)
+                },
+                removeEventListener: function(type, listener) {},
+                dispatchEvent: function(event) { return true; }
+            };
+
+            // Freeze to prevent modification detection
+            Object.freeze(mockBatteryManager);
+
+            navigator.getBattery = function() {
+                return Promise.resolve(mockBatteryManager);
+            };
+            navigator.getBattery._stealth = true;
+
+            // Make it look native
+            Object.defineProperty(navigator.getBattery, 'toString', {
+                value: function() { return 'function getBattery() { [native code] }'; },
+                writable: false,
+                configurable: false
+            });
+        }
+    } catch (e) {
+        // Battery API patching failed, continue
+    }
+
+    // ========================================
+    // 15. Speech Synthesis Voice List
+    // ========================================
+    // Override speechSynthesis.getVoices() to return consistent Google voices
+    // Fingerprinting can use voice list as an entropy source
+    try {
+        if (window.speechSynthesis && !window.speechSynthesis.getVoices._stealth) {
+            const mockVoices = [
+                { voiceURI: 'Google US English', name: 'Google US English', lang: 'en-US', localService: false, default: true },
+                { voiceURI: 'Google UK English Female', name: 'Google UK English Female', lang: 'en-GB', localService: false, default: false },
+                { voiceURI: 'Google UK English Male', name: 'Google UK English Male', lang: 'en-GB', localService: false, default: false },
+                { voiceURI: 'Google Deutsch', name: 'Google Deutsch', lang: 'de-DE', localService: false, default: false },
+                { voiceURI: 'Google español', name: 'Google español', lang: 'es-ES', localService: false, default: false },
+                { voiceURI: 'Google français', name: 'Google français', lang: 'fr-FR', localService: false, default: false },
+                { voiceURI: 'Google italiano', name: 'Google italiano', lang: 'it-IT', localService: false, default: false },
+                { voiceURI: 'Google 日本語', name: 'Google 日本語', lang: 'ja-JP', localService: false, default: false },
+                { voiceURI: 'Google 한국의', name: 'Google 한국의', lang: 'ko-KR', localService: false, default: false },
+                { voiceURI: 'Google 中文（普通话）', name: 'Google 中文（普通话）', lang: 'zh-CN', localService: false, default: false }
+            ].map(v => {
+                // Freeze each voice object to prevent modification detection
+                Object.freeze(v);
+                return v;
+            });
+
+            const originalGetVoices = window.speechSynthesis.getVoices.bind(window.speechSynthesis);
+
+            window.speechSynthesis.getVoices = function() {
+                return mockVoices;
+            };
+            window.speechSynthesis.getVoices._stealth = true;
+
+            // Handle onvoiceschanged - fire once to simulate voices loaded
+            if (window.speechSynthesis.onvoiceschanged === null) {
+                setTimeout(function() {
+                    if (typeof window.speechSynthesis.onvoiceschanged === 'function') {
+                        window.speechSynthesis.onvoiceschanged();
+                    }
+                }, 50);
+            }
+        }
+    } catch (e) {
+        // Speech synthesis patching failed, continue
+    }
+
+    // ========================================
+    // 16. Font Enumeration Limiting
+    // ========================================
+    // Limit document.fonts API to prevent font-based fingerprinting
+    // Real browsers have many fonts; headless often has few - we normalize
+    try {
+        if (document.fonts && !document.fonts._stealthPatched) {
+            const maxFonts = 50;
+            const maxIterationFonts = 10;
+
+            // Get original size value before overriding
+            const originalSizeDescriptor = Object.getOwnPropertyDescriptor(FontFaceSet.prototype, 'size');
+            const getOriginalSize = originalSizeDescriptor && originalSizeDescriptor.get
+                ? originalSizeDescriptor.get.bind(document.fonts)
+                : function() { return maxFonts; };
+
+            // Override forEach to limit iterations
+            const originalForEach = document.fonts.forEach.bind(document.fonts);
+            document.fonts.forEach = function(callback, thisArg) {
+                let count = 0;
+                return originalForEach(function(font, key, parent) {
+                    if (count < maxIterationFonts) {
+                        callback.call(thisArg, font, key, parent);
+                        count++;
+                    }
+                }, thisArg);
+            };
+
+            // Override size property to return capped value
+            Object.defineProperty(document.fonts, 'size', {
+                get: function() {
+                    const realSize = getOriginalSize();
+                    return Math.min(maxFonts, realSize);
+                },
+                configurable: true
+            });
+
+            document.fonts._stealthPatched = true;
+        }
+    } catch (e) {
+        // Font enumeration patching failed, continue
+    }
+
+    // ========================================
+    // 17. Timezone/Geolocation Consistency
+    // ========================================
+    // Override timezone APIs for consistent fingerprinting defense
+    // Uses America/New_York as default, can be overridden via window.__stealthTimezone
+    try {
+        // Session timezone - default to America/New_York (offset 300 minutes = 5 hours)
+        // Can be set via window.__stealthTimezone before stealth script runs
+        const defaultTimezone = 'America/New_York';
+        const defaultOffset = 300; // minutes (EST = UTC-5)
+
+        const stealthTimezone = window.__stealthTimezone || defaultTimezone;
+        const stealthOffset = window.__stealthTimezoneOffset !== undefined ? window.__stealthTimezoneOffset : defaultOffset;
+
+        // Override getTimezoneOffset
+        if (!Date.prototype.getTimezoneOffset._stealth) {
+            const originalGetTimezoneOffset = Date.prototype.getTimezoneOffset;
+            Date.prototype.getTimezoneOffset = function() {
+                return stealthOffset;
+            };
+            Date.prototype.getTimezoneOffset._stealth = true;
+        }
+
+        // Override Intl.DateTimeFormat to return consistent timezone
+        if (window.Intl && window.Intl.DateTimeFormat && !window.Intl.DateTimeFormat._stealth) {
+            const OriginalDateTimeFormat = window.Intl.DateTimeFormat;
+
+            window.Intl.DateTimeFormat = function(locales, options) {
+                // Force our timezone if not explicitly set
+                const opts = options ? Object.assign({}, options) : {};
+                if (!opts.timeZone) {
+                    opts.timeZone = stealthTimezone;
+                }
+                return new OriginalDateTimeFormat(locales, opts);
+            };
+
+            // Copy static methods and properties
+            window.Intl.DateTimeFormat.supportedLocalesOf = OriginalDateTimeFormat.supportedLocalesOf;
+            Object.setPrototypeOf(window.Intl.DateTimeFormat, OriginalDateTimeFormat);
+
+            // Override resolvedOptions to return our timezone
+            const originalResolvedOptions = OriginalDateTimeFormat.prototype.resolvedOptions;
+            OriginalDateTimeFormat.prototype.resolvedOptions = function() {
+                const resolved = originalResolvedOptions.call(this);
+                // If no explicit timezone was set, return our default
+                if (resolved.timeZone === undefined || resolved.timeZone === 'UTC') {
+                    resolved.timeZone = stealthTimezone;
+                }
+                return resolved;
+            };
+
+            window.Intl.DateTimeFormat._stealth = true;
+        }
+    } catch (e) {
+        // Timezone patching failed, continue
+    }
+
     } catch (e) {
         // Silently ignore patching failures - don't log to avoid detection
     }
