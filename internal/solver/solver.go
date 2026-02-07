@@ -1352,7 +1352,6 @@ const maxResponseHeaders = 100
 // Maximum cookie value size (4KB per RFC 6265)
 const maxCookieValueSize = 4 * 1024
 
-
 // validateResponseURL validates the current page URL to detect DNS rebinding attacks.
 // This should be called after navigation to ensure we haven't been redirected to a blocked IP.
 //
