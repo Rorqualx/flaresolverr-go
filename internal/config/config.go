@@ -73,6 +73,18 @@ type Config struct {
 	// API Key Authentication
 	APIKeyEnabled bool   // Enable API key authentication
 	APIKey        string // Required API key for requests (only used if APIKeyEnabled is true)
+
+	// CAPTCHA Solver settings
+	CaptchaNativeAttempts  int           // Native solve attempts before external fallback (default: 3)
+	CaptchaFallbackEnabled bool          // Enable external CAPTCHA solver fallback
+	Captcha2CaptchaAPIKey  string        // 2Captcha API key (TWOCAPTCHA_API_KEY)
+	CaptchaCapSolverAPIKey string        // CapSolver API key (CAPSOLVER_API_KEY)
+	CaptchaPrimaryProvider string        // Primary provider: "2captcha" or "capsolver" (default: "2captcha")
+	CaptchaSolverTimeout   time.Duration // Timeout for external solver API (default: 120s)
+
+	// Selectors settings
+	SelectorsPath      string // Path to external selectors.yaml override file
+	SelectorsHotReload bool   // Enable file watching for hot-reload of selectors
 }
 
 // Load loads configuration from environment variables.
@@ -127,6 +139,18 @@ func Load() *Config {
 		// API Key Authentication
 		APIKeyEnabled: getEnvBool("API_KEY_ENABLED", false),
 		APIKey:        getEnvString("API_KEY", ""),
+
+		// CAPTCHA Solver settings
+		CaptchaNativeAttempts:  getEnvInt("CAPTCHA_NATIVE_ATTEMPTS", 3),
+		CaptchaFallbackEnabled: getEnvBool("CAPTCHA_FALLBACK_ENABLED", false),
+		Captcha2CaptchaAPIKey:  getEnvString("TWOCAPTCHA_API_KEY", ""),
+		CaptchaCapSolverAPIKey: getEnvString("CAPSOLVER_API_KEY", ""),
+		CaptchaPrimaryProvider: getEnvString("CAPTCHA_PRIMARY_PROVIDER", "2captcha"),
+		CaptchaSolverTimeout:   getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
+
+		// Selectors settings
+		SelectorsPath:      getEnvString("SELECTORS_PATH", ""),
+		SelectorsHotReload: getEnvBool("SELECTORS_HOT_RELOAD", false),
 	}
 }
 
@@ -392,6 +416,38 @@ func (c *Config) Validate() {
 		}
 	}
 
+	// CAPTCHA solver validation
+	c.validateCaptchaConfig()
+
+	// Selectors path validation
+	if c.SelectorsPath != "" {
+		// Check for path traversal sequences
+		if strings.Contains(c.SelectorsPath, "..") {
+			log.Error().
+				Str("path", c.SelectorsPath).
+				Msg("SelectorsPath contains path traversal sequence (..), ignoring")
+			c.SelectorsPath = ""
+		} else if !strings.HasPrefix(c.SelectorsPath, "/") && !strings.HasPrefix(c.SelectorsPath, "C:") && !strings.HasPrefix(c.SelectorsPath, "c:") {
+			log.Warn().
+				Str("path", c.SelectorsPath).
+				Msg("SelectorsPath should be an absolute path")
+		}
+		// Warn if hot-reload is enabled but path doesn't exist
+		if c.SelectorsHotReload && c.SelectorsPath != "" {
+			if _, err := os.Stat(c.SelectorsPath); os.IsNotExist(err) {
+				log.Warn().
+					Str("path", c.SelectorsPath).
+					Msg("SelectorsPath does not exist - hot-reload will watch for file creation")
+			}
+		}
+	}
+
+	// Warn if hot-reload is enabled but no path is set
+	if c.SelectorsHotReload && c.SelectorsPath == "" {
+		log.Warn().Msg("SELECTORS_HOT_RELOAD enabled but SELECTORS_PATH not set - hot-reload disabled")
+		c.SelectorsHotReload = false
+	}
+
 	// API key validation with minimum length enforcement
 	if c.APIKeyEnabled {
 		const maxAPIKeyLength = 256
@@ -519,4 +575,73 @@ func getEnvStringSlice(key string, defaultValue []string) []string {
 		}
 	}
 	return defaultValue
+}
+
+// validateCaptchaConfig validates CAPTCHA solver configuration.
+func (c *Config) validateCaptchaConfig() {
+	// Validate native attempts (min 1, max 10)
+	if c.CaptchaNativeAttempts < 1 {
+		log.Warn().
+			Int("attempts", c.CaptchaNativeAttempts).
+			Msg("CAPTCHA_NATIVE_ATTEMPTS too low, using 1")
+		c.CaptchaNativeAttempts = 1
+	} else if c.CaptchaNativeAttempts > 10 {
+		log.Warn().
+			Int("attempts", c.CaptchaNativeAttempts).
+			Msg("CAPTCHA_NATIVE_ATTEMPTS too high, capping at 10")
+		c.CaptchaNativeAttempts = 10
+	}
+
+	// Validate solver timeout (min 30s, max 300s)
+	const minSolverTimeout = 30 * time.Second
+	const maxSolverTimeout = 300 * time.Second
+	if c.CaptchaSolverTimeout < minSolverTimeout {
+		log.Warn().
+			Dur("timeout", c.CaptchaSolverTimeout).
+			Dur("min", minSolverTimeout).
+			Msg("CAPTCHA_SOLVER_TIMEOUT too short, using minimum")
+		c.CaptchaSolverTimeout = minSolverTimeout
+	} else if c.CaptchaSolverTimeout > maxSolverTimeout {
+		log.Warn().
+			Dur("timeout", c.CaptchaSolverTimeout).
+			Dur("max", maxSolverTimeout).
+			Msg("CAPTCHA_SOLVER_TIMEOUT too long, using maximum")
+		c.CaptchaSolverTimeout = maxSolverTimeout
+	}
+
+	// Validate primary provider
+	validProviders := map[string]bool{"2captcha": true, "capsolver": true}
+	if c.CaptchaPrimaryProvider != "" && !validProviders[strings.ToLower(c.CaptchaPrimaryProvider)] {
+		log.Warn().
+			Str("provider", c.CaptchaPrimaryProvider).
+			Msg("Invalid CAPTCHA_PRIMARY_PROVIDER, using '2captcha'")
+		c.CaptchaPrimaryProvider = "2captcha"
+	}
+	c.CaptchaPrimaryProvider = strings.ToLower(c.CaptchaPrimaryProvider)
+
+	// Warn if fallback enabled but no API keys configured
+	if c.CaptchaFallbackEnabled {
+		if c.Captcha2CaptchaAPIKey == "" && c.CaptchaCapSolverAPIKey == "" {
+			log.Warn().Msg("CAPTCHA_FALLBACK_ENABLED is true but no API keys configured (TWOCAPTCHA_API_KEY or CAPSOLVER_API_KEY)")
+		} else {
+			// Log which providers are configured
+			var configured []string
+			if c.Captcha2CaptchaAPIKey != "" {
+				configured = append(configured, "2captcha")
+			}
+			if c.CaptchaCapSolverAPIKey != "" {
+				configured = append(configured, "capsolver")
+			}
+			log.Info().
+				Strs("providers", configured).
+				Str("primary", c.CaptchaPrimaryProvider).
+				Int("native_attempts", c.CaptchaNativeAttempts).
+				Msg("External CAPTCHA solver fallback enabled")
+		}
+	}
+}
+
+// HasCaptchaFallback returns true if external CAPTCHA fallback is configured.
+func (c *Config) HasCaptchaFallback() bool {
+	return c.CaptchaFallbackEnabled && (c.Captcha2CaptchaAPIKey != "" || c.CaptchaCapSolverAPIKey != "")
 }

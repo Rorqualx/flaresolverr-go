@@ -3,6 +3,7 @@ module github.com/Rorqualx/flaresolverr-go
 go 1.24.0
 
 require (
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-rod/rod v0.116.2
 	github.com/go-rod/stealth v0.4.9
 	github.com/rs/zerolog v1.32.0
