@@ -76,7 +76,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - **Docker Hub registry** - Fixed image reference from ghcr.io to rorqualx/flaresolverr-go.
-- **Development roadmap** - Added ROADMAP.md documenting planned features.
 
 ## [0.3.0] - 2025-01-17
 

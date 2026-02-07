@@ -100,11 +100,16 @@ Before requesting review, verify:
 |---------|---------------|--------------|
 | `types/` | Request/response structs, errors | Business logic |
 | `config/` | Configuration loading | Runtime state |
-| `browser/` | Browser pool, stealth | Challenge solving |
+| `browser/` | Browser pool, stealth, proxy | Challenge solving |
 | `sessions/` | Session management | Browser operations |
 | `solver/` | Challenge detection/resolution | HTTP handling |
 | `handlers/` | HTTP endpoints | Business logic |
 | `middleware/` | Request/response processing | Routing |
+| `humanize/` | Mouse movement, timing, scroll | Challenge solving |
+| `captcha/` | External solver integration | Native solving |
+| `selectors/` | Selector loading, hot-reload | Challenge detection |
+| `stats/` | Domain statistics, method tracking | Business logic |
+| `security/` | URL validation, SSRF protection | HTTP handling |
 
 ## Getting Help
 
