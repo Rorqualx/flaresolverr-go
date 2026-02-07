@@ -9,7 +9,9 @@ import "runtime"
 var Version = "dev"
 
 // UserAgent is the default user agent string.
-var UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+// Fix MEDIUM: Updated Chrome version to 132 (current stable as of early 2025).
+// This should be kept up to date to avoid detection by anti-bot systems.
+var UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 
 // Full returns the full version string.
 func Full() string {
