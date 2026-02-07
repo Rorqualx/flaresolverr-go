@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 )
@@ -17,6 +18,9 @@ func skipCI(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("Skipping browser test in short mode (-short flag)")
+	}
+	if os.Getenv("CI") != "" {
+		t.Skip("Skipping browser test in CI environment")
 	}
 }
 
