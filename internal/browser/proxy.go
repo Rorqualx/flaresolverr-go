@@ -75,11 +75,16 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 		}
 
 		// Monitor for page close to auto-cleanup goroutines
+		// Fix CRITICAL #2: Don't call cleanupFunc from event handler to avoid deadlock.
+		// cleanupFunc calls wg.Wait() which would wait for this goroutine to finish,
+		// but this goroutine is waiting for cleanupFunc to complete - circular wait.
+		// Instead, just cancel the context which signals all listeners to stop.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			pageWithCtx.EachEvent(func(e *proto.TargetTargetDestroyed) bool {
-				cleanupFunc()
+				// Just cancel context - don't call cleanupFunc to avoid deadlock
+				cancel()
 				return true // Stop listening
 			})()
 		}()
