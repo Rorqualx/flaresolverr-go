@@ -67,11 +67,53 @@ var AllowedSchemes = map[string]bool{
 }
 
 // BlockedHosts contains hostnames that should never be accessed.
+// Fix HIGH: Added comprehensive list of cloud metadata hostnames.
 var BlockedHosts = map[string]bool{
-	"localhost":                true,
+	// Localhost variants
+	"localhost": true,
+
+	// AWS metadata
+	"instance-data":             true, // AWS instance metadata hostname
+	"instance-data.ec2.internal": true, // AWS EC2 internal hostname
+
+	// GCP metadata
 	"metadata.google.internal": true, // GCP metadata
 	"metadata":                 true, // Generic cloud metadata
-	"instance-data":            true, // AWS instance metadata hostname
+
+	// Azure metadata
+	"metadata.azure.com":          true, // Azure metadata (IMDS)
+	"management.azure.com":        true, // Azure management API
+	"login.microsoftonline.com":   true, // Azure AD (could leak tokens)
+	"graph.microsoft.com":         true, // Microsoft Graph API
+
+	// Alibaba Cloud metadata
+	"metadata.aliyun.com": true,
+
+	// Oracle Cloud metadata
+	"metadata.oraclecloud.com": true,
+
+	// IBM Cloud metadata
+	"metadata.softlayer.local": true,
+
+	// DigitalOcean metadata
+	"metadata.digitalocean.com": true,
+
+	// Hetzner Cloud metadata
+	"metadata.hetzner.cloud": true,
+
+	// Vultr metadata
+	"metadata.vultr.com": true,
+
+	// Linode metadata
+	"metadata.linode.com": true,
+
+	// Tencent Cloud metadata
+	"metadata.tencentyun.com": true,
+
+	// Generic patterns
+	"kubernetes.default.svc": true, // Kubernetes API
+	"kubernetes.default":     true,
+	"kubernetes":             true,
 }
 
 // cloudMetadataIPs contains IP addresses used by cloud provider metadata services.
@@ -399,10 +441,42 @@ func isCloudMetadataIP(ip net.IP) bool {
 
 // cloudMetadataHosts contains hostnames used by cloud provider metadata services.
 // These must be blocked to prevent SSRF attacks from accessing cloud credentials.
+// Fix HIGH: This is a subset of BlockedHosts focused specifically on metadata endpoints.
 var cloudMetadataHosts = map[string]bool{
-	"metadata.google.internal": true, // GCP metadata
-	"metadata":                 true, // Generic cloud metadata
-	"instance-data":            true, // AWS instance metadata hostname
+	// AWS metadata
+	"instance-data":              true,
+	"instance-data.ec2.internal": true,
+
+	// GCP metadata
+	"metadata.google.internal": true,
+	"metadata":                 true,
+
+	// Azure metadata
+	"metadata.azure.com": true,
+
+	// Alibaba Cloud metadata
+	"metadata.aliyun.com": true,
+
+	// Oracle Cloud metadata
+	"metadata.oraclecloud.com": true,
+
+	// IBM Cloud metadata
+	"metadata.softlayer.local": true,
+
+	// DigitalOcean metadata
+	"metadata.digitalocean.com": true,
+
+	// Hetzner Cloud metadata
+	"metadata.hetzner.cloud": true,
+
+	// Vultr metadata
+	"metadata.vultr.com": true,
+
+	// Linode metadata
+	"metadata.linode.com": true,
+
+	// Tencent Cloud metadata
+	"metadata.tencentyun.com": true,
 }
 
 // isCloudMetadataHost checks if a hostname is a cloud metadata service.
