@@ -2,9 +2,12 @@
 
 ## Executive Summary
 
-This analysis compares Cloudflare's current (2025-2026) anti-bot detection capabilities against FlareSolverr-Go's implementation, identifying gaps and creating a **defensive-to-offensive roadmap** to future-proof FlareSolverr-Go against evolving Cloudflare protections.
+This analysis compares Cloudflare's current (2025-2026) anti-bot detection capabilities against FlareSolverr-Go's implementation, identifying gaps and creating a **realistic, feasibility-assessed roadmap** to improve FlareSolverr-Go's evasion capabilities.
 
-**Strategic Vision**: Move from reactive patching to proactive resilience—anticipating Cloudflare's next moves and building infrastructure that adapts automatically.
+**Strategic Vision**: Focus on what's actually achievable with browser automation (Rod/Chrome DevTools Protocol) architecture, prioritizing high-impact improvements that are technically feasible.
+
+> **Last Updated**: February 2026
+> **Architecture**: Go + Rod (Chrome DevTools Protocol)
 
 ---
 
@@ -12,17 +15,17 @@ This analysis compares Cloudflare's current (2025-2026) anti-bot detection capab
 
 ### Detection Layers
 
-| Layer | Technique | Description |
-|-------|-----------|-------------|
-| **Network** | IP Reputation | Historical data on IP addresses, ASN scoring |
-| **Network** | TLS Fingerprinting (JA3/JA4) | Analyzes TLS handshake patterns unique to browsers |
-| **Network** | HTTP/2 Fingerprinting | Header order, pseudo-header patterns, SETTINGS frame |
-| **Browser** | JavaScript Challenges | Proof-of-work and environment verification |
-| **Browser** | Turnstile CAPTCHA | Non-interactive, invisible, or interactive challenges |
-| **Browser** | Browser Fingerprinting | Canvas, WebGL, AudioContext, fonts |
-| **Behavioral** | Mouse/Keyboard Patterns | Detects robotic movement patterns |
-| **Behavioral** | Navigation Timing | Request rate, sequence, dwell time |
-| **ML** | Per-Customer Models | Site-specific behavioral patterns learned over time |
+| Layer | Technique | Description | Can We Counter? |
+|-------|-----------|-------------|-----------------|
+| **Network** | IP Reputation | Historical data on IP addresses, ASN scoring | ⚠️ Proxy rotation only |
+| **Network** | TLS Fingerprinting (JA3/JA4) | Analyzes TLS handshake patterns unique to browsers | ❌ Chrome controls this |
+| **Network** | HTTP/2 Fingerprinting | Header order, pseudo-header patterns, SETTINGS frame | ❌ Chrome controls this |
+| **Browser** | JavaScript Challenges | Proof-of-work and environment verification | ✅ Stealth scripts |
+| **Browser** | Turnstile CAPTCHA | Non-interactive, invisible, or interactive challenges | ✅ Native + solver fallback |
+| **Browser** | Browser Fingerprinting | Canvas, WebGL, AudioContext, fonts | ✅ JS injection |
+| **Behavioral** | Mouse/Keyboard Patterns | Detects robotic movement patterns | ✅ Humanization |
+| **Behavioral** | Navigation Timing | Request rate, sequence, dwell time | ✅ Randomization |
+| **ML** | Per-Customer Models | Site-specific behavioral patterns learned over time | ⚠️ Per-domain profiles |
 
 ### Turnstile Modes (Current)
 
@@ -38,329 +41,384 @@ This analysis compares Cloudflare's current (2025-2026) anti-bot detection capab
 
 | Category | Feature | Status | Files |
 |----------|---------|--------|-------|
-| **Webdriver** | navigator.webdriver masking | ✅ Active | `browser/stealth.go:71-74` |
-| **Plugins** | Plugin array spoofing | ✅ Active | `browser/stealth.go:81-119` |
-| **WebGL** | GPU vendor/renderer spoofing | ✅ Active | `browser/stealth.go:274-315` |
-| **Chrome** | window.chrome mock | ✅ Active | `browser/stealth.go:133-165` |
-| **Functions** | toString leak prevention | ✅ Active | `browser/stealth.go:222-264` |
+| **Webdriver** | navigator.webdriver masking | ✅ Active | `browser/stealth.go` |
+| **Plugins** | Plugin array spoofing | ✅ Active | `browser/stealth.go` |
+| **WebGL** | GPU vendor/renderer spoofing | ✅ Active | `browser/stealth.go` |
+| **Chrome** | window.chrome mock | ✅ Active | `browser/stealth.go` |
+| **Functions** | toString leak prevention | ✅ Active | `browser/stealth.go` |
 | **Display** | Xvfb virtual display | ✅ Active | `browser/pool.go` |
 | **WebRTC** | IP leak prevention | ✅ Active | `browser/pool.go` |
 | **Proxy** | Per-request proxy support | ✅ Active | `browser/proxy.go` |
 | **UA** | User-Agent + Client Hints | ✅ Active | `browser/stealth.go` |
-| **Hardware** | Concurrency/memory spoofing | ✅ Active | `browser/stealth.go:204-215` |
-| **Challenge** | JS challenge detection | ✅ Active | `solver/solver.go:485-609` |
-| **Challenge** | Turnstile 3-pronged solve | ✅ Active | `solver/solver.go:640-826` |
-| **Challenge** | Access denied detection | ✅ Active | `solver/solver.go:611-638` |
+| **Hardware** | Concurrency/memory spoofing | ✅ Active | `browser/stealth.go` |
+| **Challenge** | JS challenge detection | ✅ Active | `solver/solver.go` |
+| **Challenge** | Turnstile 3-pronged solve | ✅ Active | `solver/solver.go` |
+| **Challenge** | Access denied detection | ✅ Active | `solver/solver.go` |
 | **Selectors** | YAML-configurable patterns | ✅ Active | `selectors/selectors.yaml` |
+| **Security** | SSRF protection | ✅ Active | `security/url_validator.go` |
+| **Security** | Rate limiting | ✅ Active | `middleware/ratelimit.go` |
+| **Stats** | Domain statistics tracking | ✅ Active | `stats/` |
+| **Sessions** | TTL-based session management | ✅ Active | `session/` |
 
 ---
 
-## Part 3: Gap Analysis
+## Part 3: Gap Analysis (Feasibility-Assessed)
 
-### Critical Gaps (High Detection Risk)
+### Architecture Constraint
 
-| Gap | Cloudflare Uses | FlareSolverr Status | Impact |
-|-----|-----------------|---------------------|--------|
-| **TLS Fingerprinting** | JA3/JA4 signatures | ❌ Not addressed | HIGH - Immediate detection |
-| **HTTP/2 Fingerprinting** | Header order, SETTINGS | ❌ Not addressed | HIGH - Immediate detection |
-| **Canvas Fingerprinting** | Unique canvas rendering | ❌ Not spoofed | MEDIUM-HIGH |
-| **AudioContext Fingerprinting** | Audio processing patterns | ❌ Not spoofed | MEDIUM |
-| **Behavioral Analysis** | Mouse movement, timing | ❌ Not implemented | HIGH - Pattern detection |
-| **Request Timing** | Inter-request delays | ❌ Static 1s polling | MEDIUM |
+> **Critical Understanding**: FlareSolverr-Go uses a real Chrome browser via Rod (Chrome DevTools Protocol). This means:
+> - **Chrome controls the network layer** - TLS handshakes, HTTP/2 negotiation, etc.
+> - **We can only inject JavaScript** - Browser fingerprint spoofing is feasible
+> - **We can control mouse/keyboard** - Behavioral simulation is feasible
+> - **We cannot modify Chrome's network stack** - TLS/HTTP2 fingerprinting is NOT addressable
 
-### Moderate Gaps
+### Gaps by Feasibility
 
-| Gap | Description | Status |
-|-----|-------------|--------|
-| **Font Fingerprinting** | System font enumeration | ❌ Not spoofed |
-| **Speech Synthesis** | Voice list fingerprinting | ❌ Not addressed |
-| **Battery API** | Battery status fingerprint | ❌ Not addressed |
-| **Screen Resolution** | Display metrics consistency | ⚠️ Fixed 1920x1080 |
-| **Timezone Consistency** | TZ vs geolocation mismatch | ❌ Not addressed |
+#### ✅ FEASIBLE - JavaScript Injection (High Priority)
 
-### Turnstile-Specific Gaps
+| Gap | Effort | Impact | Implementation |
+|-----|--------|--------|----------------|
+| **Canvas Fingerprinting** | 1-2 days | HIGH | Inject noise into `getImageData()`, `toDataURL()` |
+| **AudioContext Fingerprinting** | 1 day | MEDIUM | Override `createOscillator`, add processing noise |
+| **Font Enumeration** | 0.5 days | MEDIUM | Limit `document.fonts` API responses |
+| **Timezone Consistency** | 1 day | MEDIUM | Override `Date`, `Intl.DateTimeFormat` based on proxy |
+| **Speech Synthesis** | 0.5 days | LOW | Return consistent fake voice list |
+| **Battery API** | 0.5 days | LOW | Mock `navigator.getBattery()` (deprecated anyway) |
 
-| Gap | Description | Status |
-|-----|-------------|--------|
-| **Interactive Mode** | Checkbox click when trust low | ⚠️ Partial (keyboard fallback) |
-| **Token Validation** | Verify token before returning | ❌ Not validated |
-| **Retry Logic** | Smart retry on token failure | ⚠️ Basic polling |
-| **CAPTCHA Solver Integration** | 2Captcha, CapSolver APIs | ❌ Not implemented |
+#### ✅ FEASIBLE - Rod API (High Priority)
+
+| Gap | Effort | Impact | Implementation |
+|-----|--------|--------|----------------|
+| **Bezier Mouse Movement** | 2-3 days | HIGH | Use `page.Mouse.Move()` with Bezier curves |
+| **Click Timing Randomization** | 0.5 days | MEDIUM | Random delays before/after clicks |
+| **Scroll Simulation** | 1 day | MEDIUM | `page.Mouse.Scroll()` with natural patterns |
+| **Keyboard Timing** | 1 day | LOW | Variable delays between keystrokes |
+| **Random Polling Intervals** | 0.5 days | MEDIUM | Replace fixed 1s with 0.8-1.5s random |
+
+#### ✅ FEASIBLE - External APIs (Medium Priority)
+
+| Gap | Effort | Impact | Implementation |
+|-----|--------|--------|----------------|
+| **2Captcha Integration** | 1-2 days | HIGH | HTTP API for Turnstile token solving |
+| **CapSolver Integration** | 1-2 days | HIGH | Alternative solver service |
+| **Solver Fallback Chain** | 1 day | HIGH | Native → 2Captcha → CapSolver |
+
+#### ⚠️ MODERATE EFFORT (Lower Priority)
+
+| Gap | Effort | Impact | Notes |
+|-----|--------|--------|-------|
+| **Hot-reload Selectors** | 2-3 days | MEDIUM | `fsnotify` or periodic HTTP fetch |
+| **Per-domain Profiles** | 3-5 days | MEDIUM | Extend existing `internal/stats/` |
+| **WebGL Shader Noise** | 3-5 days | LOW | Complex shader interception |
+
+#### ❌ NOT FEASIBLE (Architecture Mismatch)
+
+| Gap | Why Not Feasible | Alternative |
+|-----|------------------|-------------|
+| **TLS Fingerprinting (JA3/JA4)** | Chrome handles TLS, not Go code. uTLS only works for Go HTTP clients. | Use real Chrome (already doing this) |
+| **HTTP/2 Fingerprinting** | Chrome controls HTTP/2 SETTINGS frames | None - Chrome's fingerprint is legitimate |
+| **JA4 Spoofing** | Same as above - network layer is Chrome's domain | None |
+
+> **Note**: The original roadmap incorrectly proposed uTLS integration. uTLS is for **headless HTTP clients** (colly, resty), not browser automation. When using a real browser, Cloudflare sees Chrome's actual TLS fingerprint, which is already legitimate.
+
+#### ❌ NOT WORTH THE EFFORT
+
+| Gap | Effort | Why Skip |
+|-----|--------|----------|
+| **Firefox Support** | 2-3 weeks | Doubles maintenance, Rod is Chrome-only, marginal benefit |
+| **ML Challenge Prediction** | Weeks+ | Training data unavailable, over-engineered |
+| **Distributed Testing Infra** | Weeks | DevOps project, not a code feature |
 
 ---
 
-## Part 4: Strategic Approach
+## Part 4: Strategic Approach (Revised)
 
-### Defensive → Offensive Evolution
+### Focus Areas
 
 ```
-Phase 1-2 (Defensive)     Phase 3-4 (Resilient)     Phase 5 (Offensive)
-──────────────────────    ─────────────────────     ────────────────────
-• Plug detection holes    • Never fail on CAPTCHA   • Anticipate updates
-• Match real browser      • Self-healing config     • Zero-day capability
-• Pass fingerprint tests  • Per-domain adaptation   • Community intel
+High Impact + Feasible          Medium Impact + Feasible       Skip
+─────────────────────────       ────────────────────────       ────
+• Canvas/Audio fingerprints     • Hot-reload selectors         • TLS fingerprinting
+• Bezier mouse movement         • Per-domain profiles          • HTTP/2 fingerprinting
+• CAPTCHA solver fallback       • WebGL shader noise           • Firefox support
+• Random timing patterns        • Extended stats               • ML prediction
 ```
 
-### Key Technical Decisions
+### Key Technical Decisions (Updated)
 
 | Decision | Rationale |
 |----------|-----------|
-| Use **uTLS** for TLS spoofing | Most mature, lowest overhead, active community |
-| **Bezier curves** for mouse | Matches human neuromotor patterns |
-| **External solver fallback** | 99.9% success rate guarantee |
-| **Per-domain profiles** | Counter per-customer ML models |
-| **Hot-reload selectors** | Adapt without downtime |
-
-See **Part 7** for detailed week-by-week implementation timeline.
+| ~~Use uTLS for TLS spoofing~~ | ❌ **REMOVED** - Not applicable to browser automation |
+| **Bezier curves** for mouse | ✅ Matches human neuromotor patterns, Rod supports it |
+| **External solver fallback** | ✅ Insurance for hard Turnstile challenges |
+| **Per-domain profiles** | ✅ Counter per-customer ML models, extend existing stats |
+| **Hot-reload selectors** | ✅ Adapt without downtime |
 
 ---
 
-## Part 5: Dependency Impact Analysis - TLS Fingerprinting
+## Part 5: Revised Phased Roadmap (8-Week Timeline)
 
-### Option 1: uTLS Library (Recommended)
+### PHASE 1: BROWSER FINGERPRINT HARDENING (Weeks 1-2)
+*Goal: Pass fingerprint detection tests*
 
-**Library**: [refraction-networking/utls](https://github.com/refraction-networking/utls)
+#### Week 1: Canvas & Audio Spoofing
 
-| Aspect | Impact |
-|--------|--------|
-| **Binary Size** | +2-3 MB (acceptable for Docker deployment) |
-| **Performance** | Minimal - TLS handshake adds ~10-50ms once per connection |
-| **Maintenance** | Active community, regularly updated with new browser fingerprints |
-| **Compatibility** | Drop-in replacement for crypto/tls |
+| Task | Priority | Effort | Files |
+|------|----------|--------|-------|
+| Canvas fingerprint noise injection | P0 | 1.5 days | `browser/stealth.go` |
+| AudioContext fingerprint spoofing | P1 | 1 day | `browser/stealth.go` |
+| Font enumeration limiting | P2 | 0.5 days | `browser/stealth.go` |
 
-**Features**:
-- Built-in Chrome, Firefox, Safari fingerprint presets
-- `utls.Roller` for automatic fingerprint rotation
-- Randomized fingerprints defeat blacklists
-- Supports JA3 and JA4 spoofing
-
-**Code Integration**:
-```go
-import tls "github.com/refraction-networking/utls"
-
-// Use Chrome 120 fingerprint
-config := &tls.Config{ServerName: host}
-conn := tls.UClient(tcpConn, config, tls.HelloChrome_120)
+**Implementation Notes**:
+```javascript
+// Canvas noise - add to stealth.go
+const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+    const imageData = originalGetImageData.apply(this, args);
+    // Add subtle noise to pixel data
+    for (let i = 0; i < imageData.data.length; i += 4) {
+        imageData.data[i] ^= (Math.random() * 2) | 0;     // R
+        imageData.data[i+1] ^= (Math.random() * 2) | 0;   // G
+    }
+    return imageData;
+};
 ```
 
-### Option 2: CycleTLS
+#### Week 2: Consistency & Minor Fingerprints
 
-**Library**: [Danny-Dasilva/CycleTLS](https://github.com/Danny-Dasilva/CycleTLS)
-
-| Aspect | Impact |
-|--------|--------|
-| **Binary Size** | +5-8 MB (includes Node.js bridge) |
-| **Performance** | Higher overhead due to IPC |
-| **Maintenance** | Active, but more complex architecture |
-| **Compatibility** | Separate client, not drop-in |
-
-**Best for**: JavaScript/Go hybrid applications
-
-### Option 3: spoofed-round-tripper
-
-**Library**: [juzeon/spoofed-round-tripper](https://github.com/juzeon/spoofed-round-tripper)
-
-| Aspect | Impact |
-|--------|--------|
-| **Binary Size** | +3-4 MB |
-| **Performance** | Minimal |
-| **Maintenance** | Newer, less battle-tested |
-| **Compatibility** | Implements http.RoundTripper |
-
-**Best for**: Easy integration with existing HTTP clients (resty, etc.)
-
-### Recommendation
-
-**Use uTLS** for FlareSolverr-Go because:
-1. Most mature and battle-tested
-2. Smallest overhead
-3. Direct integration with Go's TLS stack
-4. Automatic fingerprint rotation capability
-5. Active anti-censorship community maintains it
-
----
-
-## Part 6: Cloudflare's Future Direction (Intelligence)
-
-Based on Cloudflare's recent announcements and patterns:
-
-### September 2025: Per-Customer ML Models
-Cloudflare now deploys **bespoke ML models per customer** that learn site-specific traffic patterns. This means:
-- Generic evasion becomes less effective over time
-- Each target site has unique detection thresholds
-- Need for **per-domain behavioral profiles**
-
-### AI-Powered Scraper Detection
-Cloudflare reports 80% of AI bot activity is for model training. Their response:
-- Enhanced residential proxy detection via ML
-- Behavioral pattern analysis beyond fingerprinting
-- LLM-powered request sequence analysis
-
-### JA4 Adoption
-JA4 fingerprinting is now standard alongside JA3:
-- Alphabetically sorted extensions (defeats randomization)
-- Includes ALPN and SNI information
-- HTTP/3 and QUIC fingerprinting
-
-### Implications for FlareSolverr-Go
-
-| Cloudflare Move | Our Counter |
-|-----------------|-------------|
-| Per-customer ML | Per-domain behavioral profiles |
-| Residential proxy detection | Distributed proxy rotation with reputation tracking |
-| JA4 fingerprinting | uTLS with browser-accurate fingerprints |
-| AI pattern analysis | Randomized request sequences, human-like timing |
-
----
-
-## Part 7: Comprehensive Phased Roadmap (12-Week Timeline)
-
-### PHASE 1: DEFENSIVE FOUNDATION (Weeks 1-2)
-*Goal: Plug critical detection vectors*
-
-#### Week 1: Network Layer Hardening
 | Task | Priority | Effort | Files |
 |------|----------|--------|-------|
-| Integrate uTLS library | P0 | 2 days | New `internal/network/tls.go` |
-| Add Chrome/Firefox fingerprint presets | P0 | 1 day | `network/tls.go` |
-| Implement fingerprint rotation | P1 | 1 day | `network/tls.go` |
-| HTTP/2 SETTINGS frame matching | P0 | 2 days | New `internal/network/http2.go` |
-
-**Deliverable**: Pass JA3/JA4 fingerprint checks on [browserleaks.com](https://browserleaks.com)
-
-#### Week 2: Browser Fingerprint Hardening
-| Task | Priority | Effort | Files |
-|------|----------|--------|-------|
-| Canvas fingerprint spoofing | P0 | 1 day | `browser/stealth.go` |
-| AudioContext fingerprint spoofing | P1 | 0.5 days | `browser/stealth.go` |
-| Font enumeration limiting | P2 | 0.5 days | `browser/stealth.go` |
 | Timezone/geolocation consistency | P1 | 1 day | `browser/stealth.go` |
+| Speech synthesis voice list | P2 | 0.5 days | `browser/stealth.go` |
+| Battery API mock | P3 | 0.5 days | `browser/stealth.go` |
 
-**Deliverable**: Pass CreepJS and BrowserScan tests with 0% detection
+**Deliverable**: Pass [CreepJS](https://abrahamjuliot.github.io/creepjs/) and [BrowserScan](https://browserscan.net/) with minimal detection flags
 
 ---
 
-### PHASE 2: BEHAVIORAL INTELLIGENCE (Weeks 3-4)
-*Goal: Simulate human interaction patterns*
+### PHASE 2: BEHAVIORAL SIMULATION (Weeks 3-4)
+*Goal: Human-like interaction patterns*
 
-#### Week 3: Human-Like Interaction
+#### Week 3: Mouse Movement
+
 | Task | Priority | Effort | Files |
 |------|----------|--------|-------|
-| Bezier curve mouse movement | P0 | 2 days | New `internal/humanize/mouse.go` |
-| Click timing randomization | P1 | 1 day | `humanize/mouse.go` |
-| Scroll behavior simulation | P1 | 1 day | New `internal/humanize/scroll.go` |
-| Keyboard timing patterns | P2 | 0.5 days | New `internal/humanize/keyboard.go` |
+| Bezier curve mouse movement library | P0 | 2 days | New `internal/humanize/mouse.go` |
+| Integrate with Turnstile clicking | P0 | 1 day | `solver/solver.go` |
+| Click position randomization | P1 | 0.5 days | `humanize/mouse.go` |
 
-#### Week 4: Request Pattern Normalization
+**Implementation Notes**:
+```go
+// Bezier curve implementation
+func (h *Humanizer) MoveTo(page *rod.Page, x, y float64) error {
+    current := page.Mouse.Position()
+    points := generateBezierPath(current, Point{x, y}, 3) // 3 control points
+
+    for _, p := range points {
+        page.Mouse.Move(p.X, p.Y)
+        time.Sleep(randomDuration(5*time.Millisecond, 15*time.Millisecond))
+    }
+    return nil
+}
+```
+
+#### Week 4: Timing Randomization
+
 | Task | Priority | Effort | Files |
 |------|----------|--------|-------|
 | Random polling intervals (0.8-1.5s) | P0 | 0.5 days | `solver/solver.go` |
-| Page dwell time simulation | P1 | 0.5 days | `solver/solver.go` |
-| Request sequence randomization | P1 | 1 day | `solver/solver.go` |
-| Reading time before actions | P2 | 0.5 days | `solver/solver.go` |
+| Pre-click hover delay | P1 | 0.5 days | `solver/solver.go` |
+| Post-action dwell time | P2 | 0.5 days | `solver/solver.go` |
+| Scroll behavior before actions | P2 | 1 day | `humanize/scroll.go` |
 
-**Deliverable**: Pass behavioral analysis on Cloudflare-protected test sites
+**Deliverable**: Natural-looking mouse trails in browser recordings
 
 ---
 
 ### PHASE 3: CAPTCHA RESILIENCE (Weeks 5-6)
-*Goal: Never fail on CAPTCHA challenges*
+*Goal: 99%+ Turnstile success rate*
 
 #### Week 5: External Solver Integration
+
 | Task | Priority | Effort | Files |
 |------|----------|--------|-------|
-| CAPTCHA solver interface | P0 | 1 day | New `internal/captcha/solver.go` |
-| 2Captcha integration | P0 | 1 day | New `internal/captcha/twocaptcha.go` |
+| Solver interface definition | P0 | 0.5 days | New `internal/captcha/solver.go` |
+| 2Captcha Turnstile integration | P0 | 1.5 days | New `internal/captcha/twocaptcha.go` |
 | CapSolver integration | P1 | 1 day | New `internal/captcha/capsolver.go` |
-| AntiCaptcha integration | P2 | 0.5 days | New `internal/captcha/anticaptcha.go` |
 
-#### Week 6: Smart Fallback Chain
+**API Flow**:
+```
+1. Extract Turnstile sitekey from page
+2. POST to solver API with sitekey + URL
+3. Poll for token (typically 10-30 seconds)
+4. Inject token: turnstileCallback(token)
+5. Verify challenge resolved
+```
+
+#### Week 6: Fallback Chain
+
 | Task | Priority | Effort | Files |
 |------|----------|--------|-------|
-| Automatic solver fallback after 3 failures | P0 | 1 day | `solver/solver.go` |
-| Token injection and verification | P0 | 1 day | `solver/solver.go` |
-| Solver health monitoring | P1 | 0.5 days | `captcha/solver.go` |
-| Cost tracking per solve | P2 | 0.5 days | `captcha/solver.go` |
+| Automatic fallback after N native failures | P0 | 1 day | `solver/solver.go` |
+| Token injection mechanism | P0 | 1 day | `solver/solver.go` |
+| Solver selection configuration | P1 | 0.5 days | `config/config.go` |
+| Cost/usage metrics | P2 | 0.5 days | `captcha/solver.go` |
 
-**Deliverable**: 99.9% Turnstile success rate with solver fallback
+**Configuration**:
+```yaml
+captcha:
+  native_attempts: 3          # Try native solving first
+  fallback_enabled: true
+  providers:
+    - name: 2captcha
+      api_key: ${TWOCAPTCHA_API_KEY}
+      priority: 1
+    - name: capsolver
+      api_key: ${CAPSOLVER_API_KEY}
+      priority: 2
+```
+
+**Deliverable**: Configurable solver fallback with metrics
 
 ---
 
 ### PHASE 4: ADAPTIVE INTELLIGENCE (Weeks 7-8)
-*Goal: Self-updating detection evasion*
+*Goal: Self-tuning per-domain behavior*
 
-#### Week 7: Dynamic Configuration
+#### Week 7: Hot-Reload & Dynamic Config
+
 | Task | Priority | Effort | Files |
 |------|----------|--------|-------|
-| Hot-reload selectors without restart | P0 | 1 day | `selectors/selectors.go` |
-| Remote selector update endpoint | P1 | 1 day | New `internal/updates/remote.go` |
-| Community selector repository | P2 | 1 day | New GitHub repo |
-| Version-specific stealth scripts | P1 | 1 day | `browser/stealth.go` |
+| File watcher for selectors.yaml | P1 | 1 day | `selectors/selectors.go` |
+| Reload without restart | P1 | 1 day | `selectors/selectors.go` |
+| Remote selector fetch (optional) | P2 | 1 day | New `internal/updates/remote.go` |
 
 #### Week 8: Per-Domain Profiling
+
 | Task | Priority | Effort | Files |
 |------|----------|--------|-------|
-| Domain success rate tracking | P0 | 1 day | New `internal/profiles/domain.go` |
-| Adaptive retry strategies | P1 | 1 day | `profiles/domain.go` |
-| Fingerprint persistence per domain | P1 | 1 day | `profiles/domain.go` |
-| Blacklist detection and alerting | P2 | 0.5 days | `profiles/domain.go` |
+| Extend stats with fingerprint preferences | P1 | 1 day | `stats/domain.go` |
+| Adaptive timing based on success rate | P1 | 1 day | `stats/domain.go` |
+| Domain-specific solver preferences | P2 | 1 day | `stats/domain.go` |
 
-**Deliverable**: Self-tuning system that adapts to per-site detection
+**Deliverable**: System learns optimal settings per target domain
 
 ---
 
-### PHASE 5: OFFENSIVE CAPABILITIES (Weeks 9-12)
-*Goal: Stay ahead of Cloudflare*
+## Part 6: What We're NOT Doing (And Why)
 
-#### Weeks 9-10: Advanced Evasion
-| Task | Priority | Effort | Files |
-|------|----------|--------|-------|
-| WebGL shader fingerprint randomization | P1 | 2 days | `browser/stealth.go` |
-| Battery API spoofing | P2 | 0.5 days | `browser/stealth.go` |
-| Speech synthesis fingerprint | P2 | 0.5 days | `browser/stealth.go` |
-| Credential isolation per session | P1 | 1 day | `browser/pool.go` |
-| Multiple browser engine support | P2 | 3 days | New Firefox support |
+### TLS/HTTP2 Fingerprinting - Architecture Mismatch
 
-#### Weeks 11-12: Intelligence System
-| Task | Priority | Effort | Files |
-|------|----------|--------|-------|
-| Cloudflare version detection | P1 | 1 day | New `internal/intel/detector.go` |
-| Automatic stealth script updates | P1 | 2 days | `intel/detector.go` |
-| Challenge type prediction | P2 | 2 days | ML model integration |
-| Distributed testing infrastructure | P2 | 3 days | New testing framework |
+The original roadmap proposed integrating uTLS for JA3/JA4 spoofing. This was incorrect because:
 
-**Deliverable**: Proactive evasion that anticipates Cloudflare updates
+1. **FlareSolverr uses a real browser** - Chrome handles all network operations
+2. **uTLS replaces Go's TLS stack** - Useful for `http.Client`, not browser automation
+3. **Chrome's TLS fingerprint is already legitimate** - It's actual Chrome!
 
----
+When Cloudflare checks TLS fingerprints against FlareSolverr traffic, they see Chrome's real fingerprint because we're using real Chrome. This is actually an advantage.
 
-## Part 8: Success Metrics
+### Firefox Support - Not Worth It
 
-### Phase 1-2 (Defensive)
-- [ ] JA3/JA4 fingerprint matches Chrome 120+
-- [ ] CreepJS detection score: 0%
-- [ ] BrowserScan detection score: 0%
+| Factor | Assessment |
+|--------|------------|
+| Effort | 2-3 weeks minimum |
+| Benefit | Marginal - Chrome fingerprint is already valid |
+| Maintenance | Doubles ongoing work |
+| Rod compatibility | Would need playwright-go or custom CDP |
 
-### Phase 3-4 (Resilient)
-- [ ] Turnstile solve rate: >99%
-- [ ] JS challenge solve rate: >99.5%
-- [ ] Average solve time: <5 seconds
+### ML-Based Prediction - Over-Engineered
 
-### Phase 5 (Offensive)
-- [ ] Zero-day evasion capability
-- [ ] Automatic adaptation to new protections
-- [ ] Community contribution system active
+Challenge prediction via ML would require:
+- Training data from diverse Cloudflare-protected sites
+- Continuous model updates as Cloudflare changes
+- Significant infrastructure for inference
+
+The reactive approach (detect → solve → learn) is simpler and more maintainable.
 
 ---
 
-## Part 9: Risk Assessment
+## Part 7: Success Metrics (Realistic)
+
+### Phase 1-2 (Fingerprint + Behavioral)
+- [ ] CreepJS detection flags: <3 (down from current)
+- [ ] BrowserScan bot probability: <10%
+- [ ] Mouse movement appears natural in recordings
+
+### Phase 3-4 (CAPTCHA + Adaptive)
+- [ ] Turnstile solve rate: >99% (with solver fallback)
+- [ ] JS challenge solve rate: >99%
+- [ ] Average solve time: <8 seconds
+- [ ] Per-domain success tracking active
+
+### NOT Measuring (Removed)
+- ~~JA3/JA4 fingerprint matches Chrome~~ (Already true - we use real Chrome)
+- ~~Zero-day evasion capability~~ (Unrealistic goal)
+
+---
+
+## Part 8: Risk Assessment (Updated)
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| Cloudflare updates break evasion | High | High | Remote selector updates, version detection |
-| uTLS fingerprints become detected | Medium | High | Fingerprint rotation, multiple presets |
-| Per-customer ML defeats patterns | Medium | Medium | Per-domain behavioral profiling |
-| CAPTCHA solver services blocked | Low | High | Multiple solver fallbacks |
-| Legal challenges | Low | Medium | Clear documentation of legitimate use |
+| Cloudflare updates break selectors | High | Medium | Hot-reload selectors, community updates |
+| Behavioral analysis defeats patterns | Medium | Medium | Continuous humanization improvements |
+| CAPTCHA solver services go down | Low | High | Multiple solver fallbacks |
+| Canvas noise detected | Medium | Low | Randomize noise patterns |
+| Per-customer ML defeats us on specific sites | Medium | Medium | Per-domain profile adaptation |
+
+### Risks Removed
+- ~~uTLS fingerprints become detected~~ - Not using uTLS
+- ~~HTTP/2 fingerprinting~~ - Chrome handles this, not our concern
+
+---
+
+## Part 9: Implementation Priority Summary
+
+### Must Have (Weeks 1-6)
+1. Canvas fingerprint spoofing
+2. AudioContext spoofing
+3. Bezier curve mouse movement
+4. Random timing patterns
+5. 2Captcha/CapSolver integration
+6. Solver fallback chain
+
+### Should Have (Weeks 7-8)
+7. Hot-reload selectors
+8. Per-domain profiling
+9. Timezone consistency
+
+### Nice to Have (Future)
+10. WebGL shader noise
+11. Remote selector updates
+12. Extended keyboard humanization
+
+---
+
+## Appendix A: Reference Implementations
+
+### Canvas Spoofing
+- [puppeteer-extra-plugin-stealth](https://github.com/AtoMiq/puppeteer-extra-plugin-stealth) - `evasions/canvas.fp.js`
+- [playwright-stealth](https://github.com/nicjac/playwright_stealth)
+
+### Bezier Mouse Movement
+- [ghost-cursor](https://github.com/Xetera/ghost-cursor) - TypeScript, easily portable
+- [bezier-easing](https://github.com/gre/bezier-easing) - Math reference
+
+### CAPTCHA Solver APIs
+- [2Captcha Turnstile Docs](https://2captcha.com/2captcha-api#turnstile)
+- [CapSolver Turnstile Docs](https://docs.capsolver.com/guide/captcha/cloudflare_turnstile.html)
+
+---
+
+## Appendix B: Removed Sections
+
+The following sections from the original roadmap have been removed as not applicable:
+
+1. **Part 5: TLS Fingerprinting Options** - uTLS, CycleTLS, spoofed-round-tripper analysis removed. These tools are for Go HTTP clients, not browser automation.
+
+2. **Week 1: Network Layer Hardening** - All TLS/HTTP2 tasks removed.
+
+3. **Phase 5: Offensive Capabilities** - Firefox support, ML prediction, distributed testing removed as over-scoped.
 
 ---
 
@@ -368,12 +426,12 @@ JA4 fingerprinting is now standard alongside JA3:
 
 - [ZenRows - Bypass Cloudflare 2026](https://www.zenrows.com/blog/bypass-cloudflare)
 - [Scrapfly - Bypass Cloudflare 2026](https://scrapfly.io/blog/posts/how-to-bypass-cloudflare-anti-scraping)
-- [BrightData - Bypass Cloudflare 2026](https://brightdata.com/blog/web-data/bypass-cloudflare)
 - [CapSolver - Solve Cloudflare 2026](https://www.capsolver.com/blog/Cloudflare/solve-cloudflare-in-2026)
-- [Scrapeless - Defeat Turnstile](https://www.scrapeless.com/en/blog/defeat-cloudflare-turnstile)
-- [uTLS Library](https://github.com/refraction-networking/utls)
-- [CycleTLS](https://github.com/Danny-Dasilva/CycleTLS)
-- [spoofed-round-tripper](https://github.com/juzeon/spoofed-round-tripper)
-- [Cloudflare Per-Customer Bot Defenses](https://blog.cloudflare.com/per-customer-bot-defenses/)
-- [Cloudflare ML Bot Detection](https://developers.cloudflare.com/bots/reference/machine-learning-models/)
-- [Cloudflare Residential Proxy Detection](https://blog.cloudflare.com/residential-proxy-bot-detection-using-machine-learning/)
+- [puppeteer-extra-plugin-stealth](https://github.com/berstend/puppeteer-extra/tree/master/packages/puppeteer-extra-plugin-stealth)
+- [ghost-cursor](https://github.com/Xetera/ghost-cursor)
+- [Cloudflare Bot Management](https://developers.cloudflare.com/bots/)
+
+---
+
+*Last updated: February 2026*
+*Architecture: Go + Rod (Chrome DevTools Protocol)*

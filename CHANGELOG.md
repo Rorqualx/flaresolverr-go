@@ -5,6 +5,51 @@ All notable changes to FlareSolverr Go Edition will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-02-06
+
+### Added
+- **Browser state extraction** - API response now includes `localStorage`, `sessionStorage`, and `responseHeaders` fields for debugging sites that use browser storage instead of cookies.
+- **Improved Turnstile solving** - Added `.cf-turnstile` selector detection, widget click with coordinates, and tries all methods (widget, iframe, keyboard) regardless of individual success.
+- **browserVersion in API response** - Exposes Chrome major version to help users select matching tls-client profiles for JA3 fingerprint compatibility.
+- **Per-request proxy support** - Requests can specify a proxy that spawns a dedicated browser instance with WebRTC leak prevention flags.
+- **Security hardening** - Bind to localhost by default, header validation with size limits and security-sensitive header blocking, DNS pinning to detect rebinding attacks.
+- **Shadow DOM traversal** - CDP-native access to closed shadow roots for Turnstile checkbox detection in nested shadow DOM.
+- **Network capture** - Thread-safe HTTP response capture with status codes and headers from main document.
+- **Custom headers support** - Pass custom headers to solver (validated via security/headers.go) with `contentType` for POST requests.
+- **Enhanced domain statistics** - Success/failure rate tracking, average response time, challenge type tracking per domain.
+- **Comprehensive test suite** - Added proxy extension tests, probe tests covering config, errors, health, integration, sessions, solver, stealth, and Turnstile.
+
+### Changed
+- **Chrome user agent updated to v132** - Updated to match current stable version and avoid anti-bot detection.
+- **Improved stealth evasion** - WebRTC blocking at JavaScript level, Chrome loadTimes() caching, updated challenge selectors for newer Cloudflare versions.
+- **Improved middleware** - Better error handling, configurable CORS origins, request ID tracking, rate limit burst support, improved panic logging with stack traces.
+- **Removed Prometheus metrics** - Module was unused; will reconsider in future iteration if needed.
+- **Alpine upgraded to 3.21** - Provides newer Chromium (136 vs 124) for better compatibility.
+- **Slice pre-allocation in stealth** - `buildBlockPatterns()` now pre-allocates slice capacity.
+
+### Fixed
+- **SwiftShader WebGL support** - Added chromium-swiftshader and Mesa packages in Docker for software WebGL rendering that was causing Cloudflare to not set cookies.
+- **Cookie retrieval** - Use `Network.getAllCookies` CDP API instead of `page.Cookies()` to match Python FlareSolverr's Selenium behavior.
+- **User-Agent consistency** - Use browser's actual UA and normalize format instead of hardcoding, which caused detection when versions mismatched.
+- **Rate limit false positives** - CAPTCHA detection pattern now only matches actual challenges, not pages with background reCAPTCHA scripts.
+- **Headless mode bug** - Explicitly disable headless when `HEADLESS=false` to properly use Xvfb virtual display.
+- **Timer leak prevention** - Replaced `time.After()` with `time.NewTimer()` in solver with explicit `timer.Stop()`.
+- **Variable shadowing in solver** - Renamed error variables to avoid shadowing outer `err` used by panic recovery.
+- **Concurrent session manager close** - Added closing flag and reference count draining with timeout to prevent races.
+- **Race conditions in timeout middleware** - Use `atomic.Bool` for timedOut flag and synchronized ResponseWriter writes.
+- **Deadlocks in page event handlers** - Event handlers now cancel context instead of calling cleanup to prevent circular waits.
+- **Context cleanup in browser pool** - Added `defer spawnCancel()` in `recycleBrowser()` to prevent context leaks.
+- **Error handling in tests** - Added proper error checks for `json.Unmarshal` calls in handlers tests and benchmarks.
+- **Golangci-lint errors** - Fixed errcheck, gocritic, and gofmt issues.
+
+### Security
+- **XSS prevention** - Version string sanitization with `html.EscapeString` and `html/template` for health page to prevent injection via malicious ldflags.
+- **SSRF protection expanded** - Added cloud metadata endpoints for AWS, GCP, Azure, Alibaba, Oracle, IBM, DigitalOcean, Hetzner, Vultr, Linode, Tencent, and Kubernetes API.
+
+### Documentation
+- **Docker Hub registry** - Fixed image reference from ghcr.io to rorqualx/flaresolverr-go.
+- **Development roadmap** - Added ROADMAP.md documenting planned features.
+
 ## [0.3.0] - 2025-01-17
 
 ### Added
