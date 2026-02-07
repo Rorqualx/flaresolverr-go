@@ -16,6 +16,79 @@ const maxDomains = 10000
 // evictionBatchSize is the number of domains to evict at once to reduce eviction overhead.
 const evictionBatchSize = 100
 
+// TurnstileMethodStats tracks which Turnstile solving method works best for a domain.
+// Methods: "wait", "shadow", "keyboard", "widget", "iframe", "positional"
+type TurnstileMethodStats struct {
+	MethodAttempts  map[string]int64 `json:"methodAttempts,omitempty"`  // Attempts per method
+	MethodSuccesses map[string]int64 `json:"methodSuccesses,omitempty"` // Successes per method
+	LastSuccess     string           `json:"lastSuccess,omitempty"`     // Last method that worked
+	LastSuccessTime time.Time        `json:"lastSuccessTime,omitempty"`
+}
+
+// GetBestMethod returns the method with highest success rate for this domain.
+// Returns empty string if no successful method found.
+func (t *TurnstileMethodStats) GetBestMethod() string {
+	if t == nil || len(t.MethodSuccesses) == 0 {
+		return ""
+	}
+
+	// If we have a recent success, prefer that method
+	if t.LastSuccess != "" && !t.LastSuccessTime.IsZero() {
+		// If last success was within 1 hour, strongly prefer it
+		if time.Since(t.LastSuccessTime) < time.Hour {
+			return t.LastSuccess
+		}
+	}
+
+	// Otherwise find the method with highest success rate
+	bestMethod := ""
+	bestRate := 0.0
+
+	for method, successes := range t.MethodSuccesses {
+		attempts := t.MethodAttempts[method]
+		if attempts > 0 {
+			rate := float64(successes) / float64(attempts)
+			if rate > bestRate {
+				bestRate = rate
+				bestMethod = method
+			}
+		}
+	}
+
+	return bestMethod
+}
+
+// SolveMethodStats tracks success/failure by solve method.
+// This enables per-domain profiling to determine which solving approach works best.
+type SolveMethodStats struct {
+	// Native solving statistics
+	NativeAttempts    int64 `json:"nativeAttempts"`
+	NativeSuccesses   int64 `json:"nativeSuccesses"`
+	NativeTotalTimeMs int64 `json:"nativeTotalTimeMs"` // For calculating average
+
+	// External solver statistics (keyed by provider name)
+	ExternalAttempts  map[string]int64 `json:"externalAttempts,omitempty"`
+	ExternalSuccesses map[string]int64 `json:"externalSuccesses,omitempty"`
+	ExternalTotalTime map[string]int64 `json:"externalTotalTime,omitempty"` // For calculating averages
+
+	// Turnstile method-specific tracking
+	TurnstileMethods *TurnstileMethodStats `json:"turnstileMethods,omitempty"`
+
+	// Last successful method
+	LastSuccessMethod string    `json:"lastSuccessMethod,omitempty"`
+	LastSuccessTime   time.Time `json:"lastSuccessTime,omitempty"`
+}
+
+// SolverPreferences stores per-domain solver configuration.
+// These preferences can be set manually or learned from solve history.
+type SolverPreferences struct {
+	NativeFirst       bool     `json:"nativeFirst"`                 // Try native solving first (default: true)
+	NativeAttempts    *int     `json:"nativeAttempts,omitempty"`    // Override native attempts before fallback
+	PreferredProvider string   `json:"preferredProvider,omitempty"` // Preferred external provider
+	TimeoutOverrideMs *int     `json:"timeoutOverrideMs,omitempty"` // Domain-specific timeout
+	DisableMethods    []string `json:"disableMethods,omitempty"`    // Methods to skip for this domain
+}
+
 // DomainStats tracks request statistics for a single domain.
 type DomainStats struct {
 	mu sync.RWMutex
@@ -39,6 +112,12 @@ type DomainStats struct {
 	CrawlDelay    *int `json:"crawlDelay,omitempty"`    // Seconds, from robots.txt
 	ManualDelayMs *int `json:"manualDelayMs,omitempty"` // User override
 
+	// Solve method statistics
+	SolveStats SolveMethodStats `json:"solveStats,omitempty"`
+
+	// Domain-specific solver preferences
+	SolverPrefs *SolverPreferences `json:"solverPrefs,omitempty"`
+
 	// Cached calculation
 	// Audit Issue 8: Use -1 as invalid marker since 0 is a valid delay value
 	cachedDelay int // -1 means cache is invalid
@@ -48,18 +127,32 @@ type DomainStats struct {
 	lastCalculation time.Time
 }
 
+// SolveMethodStatsJSON is the JSON-serializable representation of SolveMethodStats.
+type SolveMethodStatsJSON struct {
+	NativeAttempts    int64            `json:"nativeAttempts"`
+	NativeSuccesses   int64            `json:"nativeSuccesses"`
+	NativeAvgTimeMs   int64            `json:"nativeAvgTimeMs"`
+	NativeSuccessRate float64          `json:"nativeSuccessRate"`
+	ExternalAttempts  map[string]int64 `json:"externalAttempts,omitempty"`
+	ExternalSuccesses map[string]int64 `json:"externalSuccesses,omitempty"`
+	LastSuccessMethod string           `json:"lastSuccessMethod,omitempty"`
+	LastSuccessTime   time.Time        `json:"lastSuccessTime,omitempty"`
+}
+
 // DomainStatsJSON is the JSON-serializable representation of DomainStats.
 type DomainStatsJSON struct {
-	RequestCount     int64     `json:"requestCount"`
-	SuccessCount     int64     `json:"successCount"`
-	ErrorCount       int64     `json:"errorCount"`
-	RateLimitCount   int64     `json:"rateLimitCount"`
-	AvgLatencyMs     int64     `json:"avgLatencyMs"`
-	LastRequestTime  time.Time `json:"lastRequestTime,omitempty"`
-	LastSuccessTime  time.Time `json:"lastSuccessTime,omitempty"`
-	LastRateLimited  time.Time `json:"lastRateLimited,omitempty"`
-	SuggestedDelayMs int       `json:"suggestedDelayMs"`
-	CrawlDelay       *int      `json:"crawlDelay,omitempty"`
+	RequestCount     int64                 `json:"requestCount"`
+	SuccessCount     int64                 `json:"successCount"`
+	ErrorCount       int64                 `json:"errorCount"`
+	RateLimitCount   int64                 `json:"rateLimitCount"`
+	AvgLatencyMs     int64                 `json:"avgLatencyMs"`
+	LastRequestTime  time.Time             `json:"lastRequestTime,omitempty"`
+	LastSuccessTime  time.Time             `json:"lastSuccessTime,omitempty"`
+	LastRateLimited  time.Time             `json:"lastRateLimited,omitempty"`
+	SuggestedDelayMs int                   `json:"suggestedDelayMs"`
+	CrawlDelay       *int                  `json:"crawlDelay,omitempty"`
+	SolveStats       *SolveMethodStatsJSON `json:"solveStats,omitempty"`
+	SolverPrefs      *SolverPreferences    `json:"solverPrefs,omitempty"`
 }
 
 // ToJSON converts DomainStats to its JSON-serializable form.
@@ -72,7 +165,7 @@ func (s *DomainStats) ToJSON(minDelay, maxDelay int) DomainStatsJSON {
 		avgLatency = s.totalLatencyMs / s.RequestCount
 	}
 
-	return DomainStatsJSON{
+	result := DomainStatsJSON{
 		RequestCount:     s.RequestCount,
 		SuccessCount:     s.SuccessCount,
 		ErrorCount:       s.ErrorCount,
@@ -83,7 +176,31 @@ func (s *DomainStats) ToJSON(minDelay, maxDelay int) DomainStatsJSON {
 		LastRateLimited:  s.LastRateLimited,
 		SuggestedDelayMs: s.suggestedDelayMs(minDelay, maxDelay),
 		CrawlDelay:       s.CrawlDelay,
+		SolverPrefs:      s.SolverPrefs,
 	}
+
+	// Include solve stats if there are any attempts
+	if s.SolveStats.NativeAttempts > 0 || len(s.SolveStats.ExternalAttempts) > 0 {
+		var nativeAvgTime int64
+		var nativeSuccessRate float64
+		if s.SolveStats.NativeAttempts > 0 {
+			nativeAvgTime = s.SolveStats.NativeTotalTimeMs / s.SolveStats.NativeAttempts
+			nativeSuccessRate = float64(s.SolveStats.NativeSuccesses) / float64(s.SolveStats.NativeAttempts)
+		}
+
+		result.SolveStats = &SolveMethodStatsJSON{
+			NativeAttempts:    s.SolveStats.NativeAttempts,
+			NativeSuccesses:   s.SolveStats.NativeSuccesses,
+			NativeAvgTimeMs:   nativeAvgTime,
+			NativeSuccessRate: nativeSuccessRate,
+			ExternalAttempts:  s.SolveStats.ExternalAttempts,
+			ExternalSuccesses: s.SolveStats.ExternalSuccesses,
+			LastSuccessMethod: s.SolveStats.LastSuccessMethod,
+			LastSuccessTime:   s.SolveStats.LastSuccessTime,
+		}
+	}
+
+	return result
 }
 
 // suggestedDelayMs calculates the recommended delay (must hold read lock).
@@ -512,4 +629,356 @@ func (m *Manager) DomainCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.domains)
+}
+
+// RecordSolveOutcome records the result of a solve attempt for a domain.
+// method should be "native" or the external provider name (e.g., "2captcha", "capsolver").
+// success indicates whether the solve succeeded.
+// durationMs is the time taken for the solve attempt.
+func (m *Manager) RecordSolveOutcome(domain, method string, success bool, durationMs int64) {
+	if domain == "" || method == "" {
+		return
+	}
+
+	stats := m.getOrCreate(domain)
+
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	if method == "native" {
+		stats.SolveStats.NativeAttempts++
+		if durationMs > 0 && stats.SolveStats.NativeTotalTimeMs < maxCounterValue-durationMs {
+			stats.SolveStats.NativeTotalTimeMs += durationMs
+		}
+		if success {
+			stats.SolveStats.NativeSuccesses++
+			stats.SolveStats.LastSuccessMethod = method
+			stats.SolveStats.LastSuccessTime = time.Now()
+		}
+	} else {
+		// External provider
+		if stats.SolveStats.ExternalAttempts == nil {
+			stats.SolveStats.ExternalAttempts = make(map[string]int64)
+		}
+		if stats.SolveStats.ExternalSuccesses == nil {
+			stats.SolveStats.ExternalSuccesses = make(map[string]int64)
+		}
+		if stats.SolveStats.ExternalTotalTime == nil {
+			stats.SolveStats.ExternalTotalTime = make(map[string]int64)
+		}
+
+		stats.SolveStats.ExternalAttempts[method]++
+		if durationMs > 0 {
+			current := stats.SolveStats.ExternalTotalTime[method]
+			if current < maxCounterValue-durationMs {
+				stats.SolveStats.ExternalTotalTime[method] = current + durationMs
+			}
+		}
+		if success {
+			stats.SolveStats.ExternalSuccesses[method]++
+			stats.SolveStats.LastSuccessMethod = method
+			stats.SolveStats.LastSuccessTime = time.Now()
+		}
+	}
+}
+
+// GetPreferredSolveMethod returns the best solving method for a domain based on history.
+// Returns "native" if native solving has >20% success rate or no external history exists.
+// Returns the external provider name if it has a better success rate.
+// Returns empty string if no solve history exists for this domain.
+func (m *Manager) GetPreferredSolveMethod(domain string) string {
+	stats := m.Get(domain)
+	if stats == nil {
+		return ""
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	// No solve history
+	if stats.SolveStats.NativeAttempts == 0 && len(stats.SolveStats.ExternalAttempts) == 0 {
+		return ""
+	}
+
+	// Check if solver preferences override history
+	if stats.SolverPrefs != nil && stats.SolverPrefs.PreferredProvider != "" {
+		return stats.SolverPrefs.PreferredProvider
+	}
+
+	// Calculate native success rate
+	var nativeSuccessRate float64
+	if stats.SolveStats.NativeAttempts > 0 {
+		nativeSuccessRate = float64(stats.SolveStats.NativeSuccesses) / float64(stats.SolveStats.NativeAttempts)
+	}
+
+	// Find best external provider
+	bestExternal := ""
+	bestExternalRate := 0.0
+	for provider, attempts := range stats.SolveStats.ExternalAttempts {
+		if attempts > 0 {
+			successes := stats.SolveStats.ExternalSuccesses[provider]
+			rate := float64(successes) / float64(attempts)
+			if rate > bestExternalRate {
+				bestExternalRate = rate
+				bestExternal = provider
+			}
+		}
+	}
+
+	// Prefer native if it has decent success rate
+	if nativeSuccessRate >= 0.2 || bestExternal == "" {
+		if stats.SolveStats.NativeAttempts > 0 {
+			return "native"
+		}
+	}
+
+	// Otherwise prefer the best external provider
+	if bestExternalRate > nativeSuccessRate {
+		return bestExternal
+	}
+
+	return "native"
+}
+
+// ShouldSkipNative returns true if native solving has consistently failed (<20% success rate)
+// and should be skipped in favor of external solvers.
+// Requires at least 5 native attempts before making this determination.
+func (m *Manager) ShouldSkipNative(domain string) bool {
+	stats := m.Get(domain)
+	if stats == nil {
+		return false
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	// Check if preferences explicitly disable native
+	if stats.SolverPrefs != nil {
+		for _, method := range stats.SolverPrefs.DisableMethods {
+			if method == "native" {
+				return true
+			}
+		}
+	}
+
+	// Need sufficient attempts to make a determination
+	const minAttempts = 5
+	if stats.SolveStats.NativeAttempts < minAttempts {
+		return false
+	}
+
+	// Calculate success rate
+	successRate := float64(stats.SolveStats.NativeSuccesses) / float64(stats.SolveStats.NativeAttempts)
+
+	// Skip native if success rate is below 20%
+	return successRate < 0.2
+}
+
+// SetDomainSolverPrefs sets solver preferences for a domain.
+func (m *Manager) SetDomainSolverPrefs(domain string, prefs *SolverPreferences) {
+	if domain == "" {
+		return
+	}
+
+	stats := m.getOrCreate(domain)
+
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	stats.SolverPrefs = prefs
+}
+
+// GetDomainSolverPrefs returns solver preferences for a domain.
+// Returns nil if no preferences are set.
+func (m *Manager) GetDomainSolverPrefs(domain string) *SolverPreferences {
+	stats := m.Get(domain)
+	if stats == nil {
+		return nil
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	return stats.SolverPrefs
+}
+
+// NativeSuccessRate returns the native solve success rate for a domain (0.0 to 1.0).
+// Returns -1 if no native attempts have been made.
+func (m *Manager) NativeSuccessRate(domain string) float64 {
+	stats := m.Get(domain)
+	if stats == nil {
+		return -1
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	if stats.SolveStats.NativeAttempts == 0 {
+		return -1
+	}
+
+	return float64(stats.SolveStats.NativeSuccesses) / float64(stats.SolveStats.NativeAttempts)
+}
+
+// RecordTurnstileMethod records a Turnstile method attempt and its outcome.
+// method should be one of: "wait", "shadow", "keyboard", "widget", "iframe", "positional"
+func (m *Manager) RecordTurnstileMethod(domain, method string, success bool) {
+	if domain == "" || method == "" {
+		return
+	}
+
+	stats := m.getOrCreate(domain)
+
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	// Initialize TurnstileMethods if nil
+	if stats.SolveStats.TurnstileMethods == nil {
+		stats.SolveStats.TurnstileMethods = &TurnstileMethodStats{
+			MethodAttempts:  make(map[string]int64),
+			MethodSuccesses: make(map[string]int64),
+		}
+	}
+
+	tm := stats.SolveStats.TurnstileMethods
+
+	// Initialize maps if nil (defensive)
+	if tm.MethodAttempts == nil {
+		tm.MethodAttempts = make(map[string]int64)
+	}
+	if tm.MethodSuccesses == nil {
+		tm.MethodSuccesses = make(map[string]int64)
+	}
+
+	// Record attempt
+	tm.MethodAttempts[method]++
+
+	// Record success
+	if success {
+		tm.MethodSuccesses[method]++
+		tm.LastSuccess = method
+		tm.LastSuccessTime = time.Now()
+	}
+}
+
+// GetBestTurnstileMethod returns the best Turnstile method for a domain based on history.
+// Returns empty string if no history exists.
+func (m *Manager) GetBestTurnstileMethod(domain string) string {
+	stats := m.Get(domain)
+	if stats == nil {
+		return ""
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	if stats.SolveStats.TurnstileMethods == nil {
+		return ""
+	}
+
+	return stats.SolveStats.TurnstileMethods.GetBestMethod()
+}
+
+// GetTurnstileMethodOrder returns the ordered list of methods to try based on domain history.
+// Methods with higher success rates come first. Untried methods are tried before consistently
+// failing methods (negative learning). Methods that always fail are deprioritized.
+func (m *Manager) GetTurnstileMethodOrder(domain string) []string {
+	// Default order - "wait" first because invisible Turnstile auto-solves without interaction
+	defaultOrder := []string{"wait", "shadow", "keyboard", "widget", "iframe", "positional"}
+
+	stats := m.Get(domain)
+	if stats == nil {
+		return defaultOrder
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	tm := stats.SolveStats.TurnstileMethods
+	if tm == nil || len(tm.MethodAttempts) == 0 {
+		return defaultOrder
+	}
+
+	// Build ordered list based on success rates with negative learning
+	// Score system:
+	// - Methods with successes: score = success_rate (0.0 to 1.0) + 0.5 for recent success
+	// - Untried methods: score = 0.5 (neutral, tried before failing methods)
+	// - Methods with only failures: score = -failure_count * 0.1 (negative, penalize more failures)
+	type methodScore struct {
+		name  string
+		score float64
+	}
+
+	scores := make([]methodScore, 0, len(defaultOrder))
+
+	for _, method := range defaultOrder {
+		attempts := tm.MethodAttempts[method]
+		successes := tm.MethodSuccesses[method]
+
+		var score float64
+		if attempts == 0 {
+			// Untried method - give it a neutral positive score
+			score = 0.5
+		} else if successes > 0 {
+			// Has some successes - use success rate
+			score = float64(successes) / float64(attempts)
+			// Boost recent success
+			if tm.LastSuccess == method && time.Since(tm.LastSuccessTime) < time.Hour {
+				score += 0.5
+			}
+		} else {
+			// Only failures - negative score based on failure count
+			// More failures = lower priority (but cap the penalty)
+			failures := attempts
+			if failures > 10 {
+				failures = 10 // Cap penalty at 10 failures
+			}
+			score = -float64(failures) * 0.1
+		}
+
+		scores = append(scores, methodScore{method, score})
+	}
+
+	// Sort by score descending (simple bubble sort for small array)
+	for i := 0; i < len(scores)-1; i++ {
+		for j := i + 1; j < len(scores); j++ {
+			if scores[j].score > scores[i].score {
+				scores[i], scores[j] = scores[j], scores[i]
+			}
+		}
+	}
+
+	// Build result from sorted scores
+	result := make([]string, 0, len(defaultOrder))
+	for _, s := range scores {
+		result = append(result, s.name)
+	}
+
+	return result
+}
+
+// GetTurnstileMethodStats returns a map of method -> (attempts, successes) for a domain.
+// Useful for debugging and testing the learning system.
+func (m *Manager) GetTurnstileMethodStats(domain string) map[string][2]int64 {
+	stats := m.Get(domain)
+	if stats == nil {
+		return nil
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	if stats.SolveStats.TurnstileMethods == nil {
+		return nil
+	}
+
+	tm := stats.SolveStats.TurnstileMethods
+	result := make(map[string][2]int64)
+
+	for method, attempts := range tm.MethodAttempts {
+		successes := tm.MethodSuccesses[method]
+		result[method] = [2]int64{attempts, successes}
+	}
+
+	return result
 }
