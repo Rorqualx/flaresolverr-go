@@ -92,9 +92,15 @@ func New(pool *browser.Pool, userAgent string) *Solver {
 
 // sleepWithContext sleeps for the specified duration or until context is canceled.
 // Returns true if the sleep completed normally, false if interrupted by context cancellation.
+//
+// Fix MEDIUM: Uses time.NewTimer instead of time.After to prevent timer leak
+// when context is canceled before timer fires.
 func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop() // Ensure timer is cleaned up
+
 	select {
-	case <-time.After(d):
+	case <-timer.C:
 		return true
 	case <-ctx.Done():
 		return false
@@ -182,10 +188,14 @@ func setupMediaBlocking(page *rod.Page) func() {
 		}
 
 		// Wait for the goroutine to exit with a timeout
+		// Fix MEDIUM: Use time.NewTimer instead of time.After to prevent timer leak
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+
 		select {
 		case <-done:
 			// Clean exit
-		case <-time.After(5 * time.Second):
+		case <-timer.C:
 			log.Warn().Msg("Media blocking goroutine did not exit cleanly within timeout")
 		}
 	}
@@ -247,24 +257,29 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		log.Info().
 			Str("proxy_url", security.RedactProxyURL(opts.Proxy.URL)).
 			Msg("Spawning dedicated browser with per-request proxy")
-		var err error
-		browserInstance, err = s.pool.SpawnWithProxy(ctx, opts.Proxy.URL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to spawn browser with proxy: %w", err)
+		// Fix HIGH: Use separate variable name to avoid shadowing the outer 'err'
+		// which is used by panic recovery
+		var spawnErr error
+		browserInstance, spawnErr = s.pool.SpawnWithProxy(ctx, opts.Proxy.URL)
+		if spawnErr != nil {
+			return nil, fmt.Errorf("failed to spawn browser with proxy: %w", spawnErr)
 		}
 		defer func() {
-			if err := browserInstance.Close(); err != nil {
-				log.Warn().Err(err).Msg("failed to close dedicated browser")
+			// Fix HIGH: Use explicit variable name to avoid shadowing outer 'err'
+			if closeErr := browserInstance.Close(); closeErr != nil {
+				log.Warn().Err(closeErr).Msg("failed to close dedicated browser")
 			}
 		}()
 		usePooledBrowser = false
 	} else {
 		// No per-request proxy: use pooled browser (may have default proxy from config)
 		log.Debug().Msg("Using pooled browser (no per-request proxy specified)")
-		var err error
-		browserInstance, err = s.pool.Acquire(ctx)
-		if err != nil {
-			return nil, types.NewPoolAcquireError("failed to acquire browser", err)
+		// Fix HIGH: Use separate variable name to avoid shadowing the outer 'err'
+		// which is used by panic recovery
+		var acquireErr error
+		browserInstance, acquireErr = s.pool.Acquire(ctx)
+		if acquireErr != nil {
+			return nil, types.NewPoolAcquireError("failed to acquire browser", acquireErr)
 		}
 		defer s.pool.Release(browserInstance)
 		usePooledBrowser = true
