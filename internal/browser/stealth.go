@@ -559,7 +559,7 @@ func buildBlockPatterns(blockImages, blockCSS, blockFonts, blockMedia bool) []*p
 		capacity += 8
 	}
 	if blockCSS {
-		capacity += 1
+		capacity++
 	}
 	if blockFonts {
 		capacity += 5

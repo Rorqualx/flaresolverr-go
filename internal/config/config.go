@@ -394,16 +394,17 @@ func (c *Config) Validate() {
 
 	// API key validation with minimum length enforcement
 	if c.APIKeyEnabled {
-		if c.APIKey == "" {
+		const maxAPIKeyLength = 256
+		switch {
+		case c.APIKey == "":
 			log.Error().Msg("API_KEY_ENABLED is true but API_KEY is empty - authentication will always fail")
-		} else if len(c.APIKey) < minAPIKeyLength {
+		case len(c.APIKey) < minAPIKeyLength:
 			log.Error().
 				Int("length", len(c.APIKey)).
 				Int("min_required", minAPIKeyLength).
 				Msg("API_KEY is too short for secure authentication - consider using a longer key")
-		} else {
+		default:
 			// Fix #45: Validate API key format (alphanumeric with - or _)
-			const maxAPIKeyLength = 256
 			if len(c.APIKey) > maxAPIKeyLength {
 				log.Error().
 					Int("length", len(c.APIKey)).

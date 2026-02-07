@@ -73,7 +73,7 @@ var BlockedHosts = map[string]bool{
 	"localhost": true,
 
 	// AWS metadata
-	"instance-data":             true, // AWS instance metadata hostname
+	"instance-data":              true, // AWS instance metadata hostname
 	"instance-data.ec2.internal": true, // AWS EC2 internal hostname
 
 	// GCP metadata
@@ -81,10 +81,10 @@ var BlockedHosts = map[string]bool{
 	"metadata":                 true, // Generic cloud metadata
 
 	// Azure metadata
-	"metadata.azure.com":          true, // Azure metadata (IMDS)
-	"management.azure.com":        true, // Azure management API
-	"login.microsoftonline.com":   true, // Azure AD (could leak tokens)
-	"graph.microsoft.com":         true, // Microsoft Graph API
+	"metadata.azure.com":        true, // Azure metadata (IMDS)
+	"management.azure.com":      true, // Azure management API
+	"login.microsoftonline.com": true, // Azure AD (could leak tokens)
+	"graph.microsoft.com":       true, // Microsoft Graph API
 
 	// Alibaba Cloud metadata
 	"metadata.aliyun.com": true,

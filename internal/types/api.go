@@ -64,7 +64,7 @@ func (r *Request) Validate() error {
 		// Valid command
 	default:
 		// Use %q format for security (prevents log injection) - matches test expectations
-		return fmt.Errorf("Unknown command: %q", r.Cmd)
+		return fmt.Errorf("unknown command: %q", r.Cmd)
 	}
 
 	// Validate URL if present
