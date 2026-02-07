@@ -56,17 +56,28 @@ func main() {
 	// Initialize session manager with pool reference for browser cleanup
 	sessionMgr := session.NewManager(cfg, pool)
 
-	// Initialize selectors manager with optional hot-reload
+	// Initialize selectors manager with optional hot-reload and remote fetch
 	var selectorsManager *selectors.Manager
-	if cfg.SelectorsPath != "" || cfg.SelectorsHotReload {
+	if cfg.SelectorsPath != "" || cfg.SelectorsHotReload || cfg.SelectorsRemoteURL != "" {
 		var err error
-		selectorsManager, err = selectors.NewManager(cfg.SelectorsPath, cfg.SelectorsHotReload)
+		selectorsManager, err = selectors.NewManagerWithRemote(
+			cfg.SelectorsPath,
+			cfg.SelectorsHotReload,
+			cfg.SelectorsRemoteURL,
+			cfg.SelectorsRemoteRefresh,
+		)
 		if err != nil {
 			log.Warn().Err(err).Msg("Failed to create selectors manager, using embedded defaults")
 			selectorsManager = selectors.GetManager()
 		}
 		if cfg.SelectorsHotReload && cfg.SelectorsPath != "" {
 			log.Info().Str("path", cfg.SelectorsPath).Msg("Selectors hot-reload enabled")
+		}
+		if cfg.SelectorsRemoteURL != "" {
+			log.Info().
+				Str("url", cfg.SelectorsRemoteURL).
+				Dur("refresh", cfg.SelectorsRemoteRefresh).
+				Msg("Remote selector fetch enabled")
 		}
 	} else {
 		selectorsManager = selectors.GetManager()

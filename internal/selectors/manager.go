@@ -2,7 +2,10 @@
 package selectors
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -13,37 +16,67 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Maximum size for remote selectors response (10MB)
+const maxRemoteResponseSize = 10 * 1024 * 1024
+
 // ReloadStats contains statistics about selector reloads.
 type ReloadStats struct {
-	LastReloadTime time.Time `json:"lastReloadTime,omitempty"`
-	ReloadCount    int64     `json:"reloadCount"`
-	LastError      error     `json:"-"`
-	LastErrorStr   string    `json:"lastError,omitempty"`
+	LastReloadTime     time.Time `json:"lastReloadTime,omitempty"`
+	ReloadCount        int64     `json:"reloadCount"`
+	LastError          error     `json:"-"`
+	LastErrorStr       string    `json:"lastError,omitempty"`
+	RemoteSuccesses    int64     `json:"remoteSuccesses,omitempty"`
+	RemoteFailures     int64     `json:"remoteFailures,omitempty"`
+	LastRemoteFetch    time.Time `json:"lastRemoteFetch,omitempty"`
+	LastRemoteError    error     `json:"-"`
+	LastRemoteErrorStr string    `json:"lastRemoteError,omitempty"`
 }
 
 // Manager provides hot-reload capable selector management.
 // It maintains embedded default selectors and optionally watches an external
 // file for runtime updates. Reads are lock-free using atomic.Value.
 type Manager struct {
-	embedded     *Selectors      // Compiled-in defaults (immutable)
-	current      atomic.Value    // *Selectors - atomic swap for lock-free reads
-	externalPath string          // Path to external override file
-	watcher      *fsnotify.Watcher
-	stopCh       chan struct{}
-	wg           sync.WaitGroup
-	mu           sync.Mutex // Protects reload operations
-	stats        ReloadStats
-	closed       bool       // Tracks if Close has been called
+	embedded        *Selectors   // Compiled-in defaults (immutable)
+	current         atomic.Value // *Selectors - atomic swap for lock-free reads
+	externalPath    string       // Path to external override file
+	watcher         *fsnotify.Watcher
+	stopCh          chan struct{}
+	wg              sync.WaitGroup
+	mu              sync.Mutex  // Protects reload operations
+	stats           ReloadStats
+	closed          bool        // Tracks if Close has been called
+
+	// Remote fetch fields
+	remoteURL       string
+	refreshInterval time.Duration
+	httpClient      *http.Client
+	refreshTicker   *time.Ticker
 }
 
 // NewManager creates a new SelectorsManager.
 // If externalPath is empty, only embedded selectors are used.
 // If hotReload is true and externalPath is set, file changes trigger reloads.
 func NewManager(externalPath string, hotReload bool) (*Manager, error) {
+	return NewManagerWithRemote(externalPath, hotReload, "", 0)
+}
+
+// NewManagerWithRemote creates a new SelectorsManager with optional remote fetch support.
+// If remoteURL is set and refreshInterval > 0, selectors will be periodically fetched from the URL.
+// File selectors take priority over remote; remote supplements if file is not available.
+func NewManagerWithRemote(externalPath string, hotReload bool, remoteURL string, refreshInterval time.Duration) (*Manager, error) {
 	m := &Manager{
-		embedded:     Get(), // Use the singleton embedded selectors
-		externalPath: externalPath,
-		stopCh:       make(chan struct{}),
+		embedded:        Get(), // Use the singleton embedded selectors
+		externalPath:    externalPath,
+		stopCh:          make(chan struct{}),
+		remoteURL:       remoteURL,
+		refreshInterval: refreshInterval,
+	}
+
+	// Initialize HTTP client for remote fetch
+	if remoteURL != "" {
+		m.httpClient = &http.Client{
+			Timeout: 30 * time.Second,
+		}
 	}
 
 	// Start with embedded selectors
@@ -78,6 +111,45 @@ func NewManager(externalPath string, hotReload bool) (*Manager, error) {
 		}
 	}
 
+	// If remote URL is provided, try initial fetch and start refresh loop
+	if remoteURL != "" && refreshInterval > 0 {
+		// Try initial remote fetch (non-blocking, just log on failure)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if sel, err := m.loadRemote(ctx); err != nil {
+			m.mu.Lock()
+			m.stats.RemoteFailures++
+			m.stats.LastRemoteError = err
+			m.stats.LastRemoteFetch = time.Now()
+			m.mu.Unlock()
+			log.Warn().
+				Err(err).
+				Str("url", remoteURL).
+				Msg("Initial remote selector fetch failed, using current selectors")
+		} else {
+			m.mu.Lock()
+			m.stats.RemoteSuccesses++
+			m.stats.LastRemoteFetch = time.Now()
+			m.stats.LastRemoteError = nil
+			m.mu.Unlock()
+			// Only use remote if we don't have external file loaded
+			if externalPath == "" {
+				merged := m.mergeWithEmbedded(sel)
+				m.current.Store(merged)
+				log.Info().
+					Str("url", remoteURL).
+					Msg("Loaded selectors from remote URL")
+			} else {
+				log.Debug().
+					Str("url", remoteURL).
+					Msg("Remote selectors fetched but file selectors take priority")
+			}
+		}
+		cancel()
+
+		// Start refresh loop
+		m.startRemoteRefresh()
+	}
+
 	return m, nil
 }
 
@@ -109,6 +181,9 @@ func (m *Manager) Stats() ReloadStats {
 	stats := m.stats
 	if stats.LastError != nil {
 		stats.LastErrorStr = stats.LastError.Error()
+	}
+	if stats.LastRemoteError != nil {
+		stats.LastRemoteErrorStr = stats.LastRemoteError.Error()
 	}
 	return stats
 }
@@ -186,6 +261,123 @@ func parseAndValidate(data []byte) (*Selectors, error) {
 	}
 
 	return &s, nil
+}
+
+// loadRemote fetches selectors from the remote URL.
+func (m *Manager) loadRemote(ctx context.Context) (*Selectors, error) {
+	if m.remoteURL == "" {
+		return nil, fmt.Errorf("no remote URL configured")
+	}
+	if m.httpClient == nil {
+		return nil, fmt.Errorf("HTTP client not initialized")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.remoteURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add User-Agent header
+	req.Header.Set("User-Agent", "FlareSolverr-Go/1.0")
+	req.Header.Set("Accept", "application/yaml, application/x-yaml, text/yaml, text/x-yaml, */*")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Limit response size to prevent memory exhaustion
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	selectors, err := parseAndValidate(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse remote selectors: %w", err)
+	}
+
+	return selectors, nil
+}
+
+// startRemoteRefresh starts the periodic remote selector refresh loop.
+func (m *Manager) startRemoteRefresh() {
+	if m.remoteURL == "" || m.refreshInterval <= 0 {
+		return
+	}
+
+	m.refreshTicker = time.NewTicker(m.refreshInterval)
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		defer func() {
+			if m.refreshTicker != nil {
+				m.refreshTicker.Stop()
+			}
+		}()
+
+		log.Info().
+			Str("url", m.remoteURL).
+			Dur("interval", m.refreshInterval).
+			Msg("Started remote selector refresh loop")
+
+		for {
+			select {
+			case <-m.stopCh:
+				log.Debug().Msg("Remote selector refresh loop stopped")
+				return
+			case <-m.refreshTicker.C:
+				m.refreshFromRemote()
+			}
+		}
+	}()
+}
+
+// refreshFromRemote fetches selectors from remote and updates if successful.
+func (m *Manager) refreshFromRemote() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	sel, err := m.loadRemote(ctx)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.stats.LastRemoteFetch = time.Now()
+
+	if err != nil {
+		m.stats.RemoteFailures++
+		m.stats.LastRemoteError = err
+		log.Warn().
+			Err(err).
+			Str("url", m.remoteURL).
+			Int64("failures", m.stats.RemoteFailures).
+			Msg("Remote selector fetch failed, keeping previous selectors")
+		return
+	}
+
+	// Only update if no external file is configured (file takes priority)
+	if m.externalPath == "" {
+		merged := m.mergeWithEmbedded(sel)
+		m.current.Store(merged)
+		m.stats.RemoteSuccesses++
+		m.stats.LastRemoteError = nil
+		log.Info().
+			Int64("successes", m.stats.RemoteSuccesses).
+			Msg("Remote selectors refreshed successfully")
+	} else {
+		m.stats.RemoteSuccesses++
+		m.stats.LastRemoteError = nil
+		log.Debug().
+			Str("url", m.remoteURL).
+			Msg("Remote selectors fetched but file selectors take priority")
+	}
 }
 
 // Validate checks that the Selectors have minimum required patterns.

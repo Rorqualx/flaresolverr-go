@@ -83,8 +83,10 @@ type Config struct {
 	CaptchaSolverTimeout   time.Duration // Timeout for external solver API (default: 120s)
 
 	// Selectors settings
-	SelectorsPath      string // Path to external selectors.yaml override file
-	SelectorsHotReload bool   // Enable file watching for hot-reload of selectors
+	SelectorsPath          string        // Path to external selectors.yaml override file
+	SelectorsHotReload     bool          // Enable file watching for hot-reload of selectors
+	SelectorsRemoteURL     string        // HTTP(S) URL to fetch selectors from
+	SelectorsRemoteRefresh time.Duration // Refresh interval for remote selectors (default: 1h)
 }
 
 // Load loads configuration from environment variables.
@@ -149,8 +151,10 @@ func Load() *Config {
 		CaptchaSolverTimeout:   getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
 
 		// Selectors settings
-		SelectorsPath:      getEnvString("SELECTORS_PATH", ""),
-		SelectorsHotReload: getEnvBool("SELECTORS_HOT_RELOAD", false),
+		SelectorsPath:          getEnvString("SELECTORS_PATH", ""),
+		SelectorsHotReload:     getEnvBool("SELECTORS_HOT_RELOAD", false),
+		SelectorsRemoteURL:     getEnvString("SELECTORS_REMOTE_URL", ""),
+		SelectorsRemoteRefresh: getEnvDuration("SELECTORS_REMOTE_REFRESH", 1*time.Hour),
 	}
 }
 
@@ -446,6 +450,44 @@ func (c *Config) Validate() {
 	if c.SelectorsHotReload && c.SelectorsPath == "" {
 		log.Warn().Msg("SELECTORS_HOT_RELOAD enabled but SELECTORS_PATH not set - hot-reload disabled")
 		c.SelectorsHotReload = false
+	}
+
+	// Remote selectors URL validation
+	if c.SelectorsRemoteURL != "" {
+		// Validate URL scheme
+		if !strings.HasPrefix(c.SelectorsRemoteURL, "http://") && !strings.HasPrefix(c.SelectorsRemoteURL, "https://") {
+			log.Error().
+				Str("url", c.SelectorsRemoteURL).
+				Msg("SELECTORS_REMOTE_URL must use http:// or https:// scheme, ignoring")
+			c.SelectorsRemoteURL = ""
+		}
+
+		// Warn if both file and remote are configured
+		if c.SelectorsPath != "" {
+			log.Warn().
+				Str("file_path", c.SelectorsPath).
+				Str("remote_url", c.SelectorsRemoteURL).
+				Msg("Both SELECTORS_PATH and SELECTORS_REMOTE_URL are set - file takes priority, remote will supplement")
+		}
+	}
+
+	// Remote selectors refresh interval validation (min 5m, max 24h)
+	if c.SelectorsRemoteURL != "" {
+		const minRemoteRefresh = 5 * time.Minute
+		const maxRemoteRefresh = 24 * time.Hour
+		if c.SelectorsRemoteRefresh < minRemoteRefresh {
+			log.Warn().
+				Dur("interval", c.SelectorsRemoteRefresh).
+				Dur("min", minRemoteRefresh).
+				Msg("SELECTORS_REMOTE_REFRESH too short, using minimum")
+			c.SelectorsRemoteRefresh = minRemoteRefresh
+		} else if c.SelectorsRemoteRefresh > maxRemoteRefresh {
+			log.Warn().
+				Dur("interval", c.SelectorsRemoteRefresh).
+				Dur("max", maxRemoteRefresh).
+				Msg("SELECTORS_REMOTE_REFRESH too long, using maximum")
+			c.SelectorsRemoteRefresh = maxRemoteRefresh
+		}
 	}
 
 	// API key validation with minimum length enforcement
