@@ -20,6 +20,7 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 	"github.com/Rorqualx/flaresolverr-go/internal/ratelimit"
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
+	"github.com/Rorqualx/flaresolverr-go/internal/selectors"
 	"github.com/Rorqualx/flaresolverr-go/internal/session"
 	"github.com/Rorqualx/flaresolverr-go/internal/solver"
 	"github.com/Rorqualx/flaresolverr-go/internal/stats"
@@ -139,12 +140,13 @@ func extractChromeVersion(userAgent string) string {
 
 // Handler handles all FlareSolverr API requests.
 type Handler struct {
-	pool        *browser.Pool
-	sessions    *session.Manager
-	solver      *solver.Solver
-	config      *config.Config
-	userAgent   string
-	domainStats *stats.Manager
+	pool             *browser.Pool
+	sessions         *session.Manager
+	solver           *solver.Solver
+	config           *config.Config
+	userAgent        string
+	domainStats      *stats.Manager
+	selectorsManager *selectors.Manager
 }
 
 // Fix #11: closeBody closes an io.ReadCloser and logs any error at debug level.
@@ -157,6 +159,12 @@ func closeBody(body io.ReadCloser) {
 
 // New creates a new Handler.
 func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Handler {
+	return NewWithSelectors(pool, sessions, cfg, nil)
+}
+
+// NewWithSelectors creates a new Handler with an optional SelectorsManager.
+// If selectorsManager is nil, a default manager using embedded selectors is created.
+func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config.Config, selectorsManager *selectors.Manager) *Handler {
 	// Get the real user agent from the browser
 	// This is critical: using a mismatched UA (e.g., claiming Chrome 142 when the browser is 124)
 	// is detected by Cloudflare. Python FlareSolverr gets the UA from the browser itself.
@@ -164,13 +172,29 @@ func New(pool *browser.Pool, sessions *session.Manager, cfg *config.Config) *Han
 
 	log.Info().Str("user_agent", userAgent).Msg("Using browser's actual user agent")
 
+	// Create default selectors manager if not provided
+	if selectorsManager == nil {
+		selectorsManager = selectors.GetManager()
+	}
+
+	// Create stats manager for domain tracking
+	domainStats := stats.NewManager()
+
+	// Create solver with selectors manager
+	solverInstance := solver.NewWithSelectors(pool, userAgent, selectorsManager)
+
+	// Wire up stats manager to solver for Turnstile method tracking
+	// This enables per-domain learning of which solving methods work best
+	solverInstance.SetStatsManager(domainStats)
+
 	return &Handler{
-		pool:        pool,
-		sessions:    sessions,
-		solver:      solver.New(pool, userAgent),
-		config:      cfg,
-		userAgent:   userAgent,
-		domainStats: stats.NewManager(),
+		pool:             pool,
+		sessions:         sessions,
+		solver:           solverInstance,
+		config:           cfg,
+		userAgent:        userAgent,
+		domainStats:      domainStats,
+		selectorsManager: selectorsManager,
 	}
 }
 
@@ -358,16 +382,24 @@ type PoolStats struct {
 	Errors    int64 `json:"errors"`
 }
 
+// SelectorsStats contains statistics about selector hot-reloading.
+type SelectorsStats struct {
+	LastReloadTime string `json:"lastReloadTime,omitempty"`
+	ReloadCount    int64  `json:"reloadCount"`
+	LastError      string `json:"lastError,omitempty"`
+}
+
 // HealthResponse is the response format for the /health endpoint.
 type HealthResponse struct {
-	Status      string                           `json:"status"`
-	Message     string                           `json:"message,omitempty"`
-	StartTime   int64                            `json:"startTimestamp,omitempty"`
-	EndTime     int64                            `json:"endTimestamp,omitempty"`
-	Version     string                           `json:"version,omitempty"`
-	Pool        *PoolStats                       `json:"pool,omitempty"`
-	DomainStats map[string]stats.DomainStatsJSON `json:"domainStats,omitempty"`
-	Defaults    *DelayDefaults                   `json:"defaults,omitempty"`
+	Status         string                           `json:"status"`
+	Message        string                           `json:"message,omitempty"`
+	StartTime      int64                            `json:"startTimestamp,omitempty"`
+	EndTime        int64                            `json:"endTimestamp,omitempty"`
+	Version        string                           `json:"version,omitempty"`
+	Pool           *PoolStats                       `json:"pool,omitempty"`
+	DomainStats    map[string]stats.DomainStatsJSON `json:"domainStats,omitempty"`
+	Defaults       *DelayDefaults                   `json:"defaults,omitempty"`
+	SelectorsStats *SelectorsStats                  `json:"selectorsStats,omitempty"`
 }
 
 // DelayDefaults contains default delay configuration.
@@ -405,6 +437,23 @@ func (h *Handler) handleHealth(w http.ResponseWriter, startTime time.Time) {
 		resp.Defaults = &DelayDefaults{
 			MinDelayMs: h.domainStats.DefaultMinDelayMs,
 			MaxDelayMs: h.domainStats.DefaultMaxDelayMs,
+		}
+	}
+
+	// Include selectors stats if hot-reload has been used
+	if h.selectorsManager != nil {
+		selectorStats := h.selectorsManager.Stats()
+		if selectorStats.ReloadCount > 0 || selectorStats.LastError != nil {
+			selStats := &SelectorsStats{
+				ReloadCount: selectorStats.ReloadCount,
+			}
+			if !selectorStats.LastReloadTime.IsZero() {
+				selStats.LastReloadTime = selectorStats.LastReloadTime.Format(time.RFC3339)
+			}
+			if selectorStats.LastErrorStr != "" {
+				selStats.LastError = selectorStats.LastErrorStr
+			}
+			resp.SelectorsStats = selStats
 		}
 	}
 

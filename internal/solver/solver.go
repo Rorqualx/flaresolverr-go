@@ -20,6 +20,8 @@ import (
 	"github.com/ysmood/gson"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
+	"github.com/Rorqualx/flaresolverr-go/internal/captcha"
+	"github.com/Rorqualx/flaresolverr-go/internal/humanize"
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
 	"github.com/Rorqualx/flaresolverr-go/internal/selectors"
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
@@ -78,8 +80,27 @@ type SolveOptions struct {
 
 // Solver handles Cloudflare challenge resolution.
 type Solver struct {
-	pool      *browser.Pool
-	userAgent string
+	pool             *browser.Pool
+	userAgent        string
+	solverChain      *captcha.SolverChain    // External CAPTCHA solver fallback
+	selectorsManager *selectors.Manager      // Hot-reload capable selectors manager
+	statsManager     StatsManager            // Domain stats for method tracking (optional)
+}
+
+// StatsManager interface for domain statistics tracking.
+// This allows the solver to record and retrieve Turnstile method performance.
+type StatsManager interface {
+	RecordTurnstileMethod(domain, method string, success bool)
+	GetTurnstileMethodOrder(domain string) []string
+}
+
+// SolverConfig contains configuration for creating a Solver.
+type SolverConfig struct {
+	Pool             *browser.Pool
+	UserAgent        string
+	SolverChain      *captcha.SolverChain // Optional external solver fallback
+	SelectorsManager *selectors.Manager   // Optional hot-reload capable selectors manager
+	StatsManager     StatsManager         // Optional stats manager for method tracking
 }
 
 // New creates a new Solver instance.
@@ -88,6 +109,53 @@ func New(pool *browser.Pool, userAgent string) *Solver {
 		pool:      pool,
 		userAgent: userAgent,
 	}
+}
+
+// NewWithSelectors creates a new Solver with a SelectorsManager.
+func NewWithSelectors(pool *browser.Pool, userAgent string, selectorsManager *selectors.Manager) *Solver {
+	return &Solver{
+		pool:             pool,
+		userAgent:        userAgent,
+		selectorsManager: selectorsManager,
+	}
+}
+
+// NewWithConfig creates a new Solver with full configuration.
+func NewWithConfig(cfg SolverConfig) *Solver {
+	return &Solver{
+		pool:             cfg.Pool,
+		userAgent:        cfg.UserAgent,
+		solverChain:      cfg.SolverChain,
+		selectorsManager: cfg.SelectorsManager,
+		statsManager:     cfg.StatsManager,
+	}
+}
+
+// SetStatsManager sets the stats manager for tracking Turnstile method performance.
+func (s *Solver) SetStatsManager(sm StatsManager) {
+	s.statsManager = sm
+}
+
+// SetSolverChain sets the external CAPTCHA solver chain.
+func (s *Solver) SetSolverChain(chain *captcha.SolverChain) {
+	s.solverChain = chain
+}
+
+// getSelectors returns the current selectors, using the manager if available.
+// This enables hot-reload of selectors at runtime.
+func (s *Solver) getSelectors() *selectors.Selectors {
+	if s.selectorsManager != nil {
+		return s.selectorsManager.Get()
+	}
+	return selectors.Get()
+}
+
+// GetSolverChainMetrics returns metrics from the solver chain.
+func (s *Solver) GetSolverChainMetrics() map[string]interface{} {
+	if s.solverChain == nil {
+		return nil
+	}
+	return s.solverChain.GetMetrics()
 }
 
 // sleepWithContext sleeps for the specified duration or until context is canceled.
@@ -834,17 +902,22 @@ var challengeSelectors = []string{
 //   - skipValidation: If true, skip response URL validation (for testing only)
 //   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
 func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, tabsTillVerify int, skipValidation bool, networkCapture *NetworkCapture) (*Result, error) {
-	const pollInterval = 1 * time.Second
+	// Phase 2: Use randomized poll interval (0.8-1.5s) instead of fixed 1s
+	// This makes polling patterns appear more human-like
+	avgPollInterval := 1150 * time.Millisecond // Average of 800-1500ms for calculation
 
 	// Calculate max attempts from context deadline (Bug 3: poll attempts vs timeout mismatch)
-	maxAttempts := 300 // Fallback: 5 minutes at 1s intervals
+	maxAttempts := 300 // Fallback: 5 minutes at ~1.15s intervals
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
-		maxAttempts = int(remaining/pollInterval) + 1
+		maxAttempts = int(remaining/avgPollInterval) + 1
 		if maxAttempts < 1 {
 			maxAttempts = 1
 		}
 	}
+
+	// Track Turnstile solve attempts for external solver fallback
+	turnstileAttempts := 0
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Check context at the start of each iteration to fail fast
@@ -859,8 +932,9 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 		title, err := s.getPageTitle(page)
 		if err != nil {
 			log.Debug().Err(err).Msg("Failed to get page title")
-			// Use context-aware sleep (Bug 2: time.Sleep ignores context)
-			if !sleepWithContext(ctx, pollInterval) {
+			// Use context-aware sleep with randomized interval (Bug 2: time.Sleep ignores context)
+			// Phase 2: Random interval 0.8-1.5s for human-like behavior
+			if !sleepWithContext(ctx, humanize.RandomPollInterval()) {
 				return nil, types.NewChallengeTimeoutError(url)
 			}
 			continue
@@ -893,6 +967,13 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture)
 		}
 
+		// For invisible Turnstile: if cf_clearance cookie is present, challenge is solved
+		// even if the widget is still visible on the page
+		if s.hasCfClearanceCookie(page) {
+			log.Info().Msg("cf_clearance cookie present - challenge solved (invisible Turnstile)")
+			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture)
+		}
+
 		// Check for access denied
 		html, err := page.HTML()
 		if err != nil {
@@ -907,16 +988,34 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 		// If Turnstile is present, try to solve it
 		// Check for both #turnstile-wrapper (ID) and .cf-turnstile (class)
 		if challengeSelector == "#turnstile-wrapper" || challengeSelector == ".cf-turnstile" {
-			log.Debug().Str("selector", challengeSelector).Msg("Turnstile detected, attempting to solve...")
+			turnstileAttempts++
+			log.Debug().
+				Str("selector", challengeSelector).
+				Int("attempt", turnstileAttempts).
+				Msg("Turnstile detected, attempting to solve...")
+
+			// Try native solving methods first (Methods 1-5)
 			if err := s.solveTurnstile(ctx, page, tabsTillVerify); err != nil {
 				// Fix: Log but continue - Turnstile solve is best-effort, the loop will
 				// check again and return error if challenge persists past timeout
 				log.Warn().Err(err).Msg("Turnstile solve attempt failed, will retry")
 			}
+
+			// Method 6: Try external solver fallback if native attempts exhausted
+			if s.solverChain != nil && s.solverChain.ShouldFallback(turnstileAttempts) {
+				log.Info().
+					Int("native_attempts", turnstileAttempts).
+					Msg("Native Turnstile solving exhausted, trying external solver")
+
+				if err := s.solveTurnstileExternal(ctx, page, url); err != nil {
+					log.Warn().Err(err).Msg("External solver fallback failed")
+				}
+			}
 		}
 
 		// Wait and retry with context-aware sleep (Bug 2)
-		if !sleepWithContext(ctx, pollInterval) {
+		// Phase 2: Random interval 0.8-1.5s for human-like behavior
+		if !sleepWithContext(ctx, humanize.RandomPollInterval()) {
 			return nil, types.NewChallengeTimeoutError(url)
 		}
 	}
@@ -972,7 +1071,7 @@ func (s *Solver) findChallengeSelector(page *rod.Page) string {
 // detectChallenge analyzes HTML to determine the challenge type.
 func (s *Solver) detectChallenge(html string) ChallengeType {
 	htmlLower := strings.ToLower(html)
-	sel := selectors.Get()
+	sel := s.getSelectors()
 
 	// Check for access denied
 	for _, pattern := range sel.AccessDenied {
@@ -999,50 +1098,293 @@ func (s *Solver) detectChallenge(html string) ChallengeType {
 }
 
 // solveTurnstile attempts to solve the Turnstile challenge.
-// Uses multiple approaches in order of preference (detection risk):
-// 1. Shadow DOM traversal (CDP-native, low detection risk)
-// 2. Keyboard navigation (natural behavior, low detection risk)
-// 3. Direct widget click (medium detection risk)
-// 4. iframe click (medium detection risk)
-// 5. Positional click (last resort, medium detection risk)
+// Uses multiple approaches ordered by past success for this domain:
+// - Wait (passive wait for invisible Turnstile to auto-solve, lowest detection risk)
+// - Shadow DOM traversal (CDP-native, low detection risk)
+// - Keyboard navigation (natural behavior, low detection risk)
+// - Direct widget click (medium detection risk)
+// - iframe click (medium detection risk)
+// - Positional click (last resort, medium detection risk)
 //
-// Properly releases DOM element references to prevent memory leaks.
+// Phase 2: Uses humanized timing throughout for natural behavior.
+// Uses stats-based method ordering and records outcomes.
+// Checks for success after each method and exits early.
+//
+// NOTE: The "wait" method is highly effective for invisible Turnstile which
+// auto-solves based on browser fingerprinting. Clicking may trigger bot detection.
 //
 // Parameters:
-//   - tabsTillVerify: Number of Tab presses to reach the Turnstile checkbox (0 uses default of 10)
+//   - tabsTillVerify: Number of Tab presses to reach the Turnstile checkbox (0 uses default)
 func (s *Solver) solveTurnstile(ctx context.Context, page *rod.Page, tabsTillVerify int) error {
-	log.Debug().Msg("Attempting to solve Turnstile challenge")
+	log.Debug().Msg("Attempting to solve Turnstile challenge with humanized timing")
 
-	// Method 1: Try CDP-native shadow DOM traversal first (lowest detection risk)
-	// This uses Rod's ShadowRoot() which accesses closed shadow roots via CDP debugger API
-	if err := s.solveTurnstileShadow(ctx, page); err == nil {
-		log.Debug().Msg("Turnstile shadow DOM traversal attempted")
+	// Phase 2: Randomized wait for Turnstile to fully initialize (400-700ms)
+	if !sleepWithContext(ctx, humanize.RandomDuration(400, 700)) {
+		return ctx.Err()
 	}
 
-	// Fix #6: Pass context to all Turnstile methods
-	// Method 2: Try keyboard navigation (low fingerprinting, natural user behavior)
-	if err := s.solveTurnstileKeyboard(ctx, page, tabsTillVerify); err == nil {
-		log.Debug().Msg("Turnstile keyboard navigation attempted")
+	// Get domain for stats tracking
+	domain := ""
+	if info, err := page.Info(); err == nil && info.URL != "" {
+		domain = extractDomainFromURL(info.URL)
 	}
 
-	// Method 3: Try direct widget click as fallback (for visible Turnstile widgets)
-	if err := s.solveTurnstileWidget(ctx, page); err == nil {
-		log.Debug().Msg("Turnstile widget click attempted")
-	}
+	// Get method order based on past success for this domain
+	methods := s.getTurnstileMethodOrder(domain)
 
-	// Method 4: Try iframe click (for challenges.cloudflare.com iframe)
-	if err := s.solveTurnstileClick(ctx, page); err == nil {
-		log.Debug().Msg("Turnstile iframe click attempted")
-	}
+	log.Debug().
+		Strs("method_order", methods).
+		Str("domain", domain).
+		Msg("Turnstile method order")
 
-	// Method 5: Try positional click as last resort
-	// This clicks at a fixed offset from the Turnstile container bounds
-	if err := s.solveTurnstilePositional(ctx, page); err == nil {
-		log.Debug().Msg("Turnstile positional click attempted")
+	// Try each method in order
+	for _, method := range methods {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		var err error
+		switch method {
+		case "wait":
+			err = s.solveTurnstileWait(ctx, page)
+		case "shadow":
+			err = s.solveTurnstileShadow(ctx, page)
+		case "keyboard":
+			err = s.solveTurnstileKeyboard(ctx, page, tabsTillVerify)
+		case "widget":
+			err = s.solveTurnstileWidget(ctx, page)
+		case "iframe":
+			err = s.solveTurnstileClick(ctx, page)
+		case "positional":
+			err = s.solveTurnstilePositional(ctx, page)
+		default:
+			continue
+		}
+
+		// Record attempt regardless of error (for method learning)
+		log.Debug().Str("method", method).Err(err).Msg("Turnstile method attempted")
+
+		if err != nil {
+			// Method returned error - record failure and continue to next method
+			s.recordTurnstileMethod(domain, method, false)
+			continue
+		}
+
+		// Check for success (method completed without error)
+		if s.isTurnstileSolved(page) {
+			log.Info().Str("method", method).Msg("Turnstile solved!")
+
+			// Record successful method for future reference
+			s.recordTurnstileMethod(domain, method, true)
+			return nil
+		}
+
+		// Method didn't work - record failure
+		s.recordTurnstileMethod(domain, method, false)
 	}
 
 	// Don't return error - the solveLoop will check if challenge is still present
 	return nil
+}
+
+// solveTurnstileWait uses passive waiting for invisible Turnstile to auto-solve.
+// This method is highly effective for invisible Turnstile (mode: 'invisible' or 'managed')
+// which automatically validates based on browser fingerprinting and behavior analysis.
+//
+// Detection risk: LOWEST - no interaction, just natural page behavior
+// Effectiveness: HIGH for invisible mode, LOW for explicit checkbox mode
+//
+// Phase 2: Uses randomized wait intervals for more natural behavior.
+// The wait is done in multiple shorter intervals with success checks in between.
+// For invisible Turnstile, the cf_clearance cookie may appear while the widget is still visible.
+func (s *Solver) solveTurnstileWait(ctx context.Context, page *rod.Page) error {
+	log.Debug().Msg("Trying passive wait for invisible Turnstile auto-solve")
+
+	// Phase 2: Randomized wait intervals (4-6 seconds) instead of fixed 5 seconds
+	// Total wait time: up to ~30 seconds per attempt (invisible Turnstile can take 20-30s)
+	const maxWaitIterations = 6
+
+	for i := 0; i < maxWaitIterations; i++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Phase 2: Randomized wait interval (4000-6000ms)
+		if !sleepWithContext(ctx, humanize.RandomDuration(4000, 6000)) {
+			return fmt.Errorf("context canceled during wait")
+		}
+
+		// Check if cf_clearance cookie appeared (invisible Turnstile success indicator)
+		// This is the most reliable indicator for invisible mode
+		if s.hasCfClearanceCookie(page) {
+			log.Info().
+				Int("iteration", i+1).
+				Msg("cf_clearance cookie appeared - Turnstile auto-solved during passive wait")
+			return nil
+		}
+
+		// Check if Turnstile auto-solved via token or success state
+		if s.isTurnstileSolved(page) {
+			log.Info().
+				Int("iteration", i+1).
+				Msg("Turnstile success indicators detected during passive wait")
+			return nil
+		}
+
+		// Check if Turnstile widget disappeared (page redirected after success)
+		has, _, _ := page.Has(".cf-turnstile")
+		if !has {
+			// Also check for #turnstile-wrapper
+			has2, _, _ := page.Has("#turnstile-wrapper")
+			if !has2 {
+				log.Debug().
+					Int("iteration", i+1).
+					Msg("Turnstile widget disappeared during wait")
+				return nil
+			}
+		}
+
+		log.Debug().
+			Int("iteration", i+1).
+			Int("max", maxWaitIterations).
+			Msg("Turnstile still present, continuing wait")
+	}
+
+	// Wait method completed but didn't solve - not an error, will try next method
+	log.Debug().Msg("Passive wait completed without solving Turnstile")
+	return nil
+}
+
+// hasCfClearanceCookie checks if the cf_clearance cookie has been set.
+// This is the primary indicator that Cloudflare protection has been bypassed.
+func (s *Solver) hasCfClearanceCookie(page *rod.Page) bool {
+	cookies, err := page.Cookies(nil)
+	if err != nil {
+		return false
+	}
+
+	for _, cookie := range cookies {
+		if cookie.Name == "cf_clearance" && len(cookie.Value) > 50 {
+			log.Debug().Msg("cf_clearance cookie found")
+			return true
+		}
+	}
+	return false
+}
+
+// getTurnstileMethodOrder returns the order of methods to try based on domain history.
+func (s *Solver) getTurnstileMethodOrder(domain string) []string {
+	// Default order (if no stats or no history)
+	// "wait" is first because invisible Turnstile auto-solves without interaction
+	defaultOrder := []string{"wait", "shadow", "keyboard", "widget", "iframe", "positional"}
+
+	if s.statsManager == nil || domain == "" {
+		return defaultOrder
+	}
+
+	order := s.statsManager.GetTurnstileMethodOrder(domain)
+	if len(order) == 0 {
+		return defaultOrder
+	}
+
+	return order
+}
+
+// recordTurnstileMethod records the outcome of a Turnstile method attempt.
+func (s *Solver) recordTurnstileMethod(domain, method string, success bool) {
+	if s.statsManager == nil || domain == "" {
+		return
+	}
+
+	s.statsManager.RecordTurnstileMethod(domain, method, success)
+
+	log.Debug().
+		Str("domain", domain).
+		Str("method", method).
+		Bool("success", success).
+		Msg("Recorded Turnstile method outcome")
+}
+
+// extractDomainFromURL extracts the domain from a URL string.
+func extractDomainFromURL(rawURL string) string {
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
+// isTurnstileSolved checks if the Turnstile challenge has been solved.
+// Returns true ONLY if we're confident the challenge is actually resolved.
+// This prevents false positives from partial token states.
+//
+// Checks (in order of reliability):
+// 1. cf_clearance cookie present (most reliable for invisible Turnstile)
+// 2. Widget success indicators (class, data attribute)
+// 3. Response token in DOM or via Turnstile API
+// 4. Widget disappeared
+func (s *Solver) isTurnstileSolved(page *rod.Page) bool {
+	// First check: cf_clearance cookie (most reliable indicator)
+	// For invisible Turnstile, this cookie appears when verification succeeds
+	if s.hasCfClearanceCookie(page) {
+		log.Debug().Msg("isTurnstileSolved: cf_clearance cookie present")
+		return true
+	}
+
+	// Check for success indicators via JavaScript
+	result, err := proto.RuntimeEvaluate{
+		Expression: `(function() {
+			// Check if Turnstile widget still exists
+			var widget = document.querySelector('.cf-turnstile');
+			if (!widget) {
+				// Widget disappeared - check if page actually changed
+				return document.title !== 'Just a moment...' && !document.querySelector('#challenge-running');
+			}
+
+			// Check for success class on widget (green checkmark state)
+			if (widget.classList.contains('cf-turnstile-success') ||
+				widget.querySelector('[data-turnstile-complete="true"]') ||
+				widget.querySelector('.success')) {
+				return true;
+			}
+
+			// Check for response token AND verify it's a valid long token
+			var input = document.querySelector('input[name="cf-turnstile-response"]');
+			if (input && input.value && input.value.length > 100) {
+				// Valid tokens are typically 300+ characters
+				return true;
+			}
+
+			// Check Turnstile API for completed state
+			if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
+				try {
+					var token = window.turnstile.getResponse();
+					if (token && token.length > 100) {
+						return true;
+					}
+				} catch(e) {}
+			}
+
+			// Check if the widget is in a processing/waiting state
+			// If it's still spinning, it's not solved
+			var iframe = widget.querySelector('iframe');
+			if (iframe) {
+				// Widget has iframe and no token yet - still processing
+				return false;
+			}
+
+			return false;
+		})()`,
+		ReturnByValue: true,
+	}.Call(page)
+
+	if err == nil && result != nil && result.Result != nil {
+		if result.Result.Type == proto.RuntimeRemoteObjectTypeBoolean {
+			return result.Result.Value.Bool()
+		}
+	}
+
+	return false
 }
 
 // solveTurnstileShadow uses CDP-native shadow root traversal to find and click
@@ -1050,10 +1392,12 @@ func (s *Solver) solveTurnstile(ctx context.Context, page *rod.Page, tabsTillVer
 // Rod's ShadowRoot() uses CDP's DOM.describeNode with debugger-level access.
 //
 // Detection risk: LOW - uses debugger API, no JavaScript modification
+// Phase 2: Uses randomized post-click dwell time
 func (s *Solver) solveTurnstileShadow(ctx context.Context, page *rod.Page) error {
 	log.Debug().Msg("Trying CDP-native shadow DOM traversal for Turnstile")
 
-	traverser := NewShadowRootTraverser(page)
+	// Use shorter timeout for shadow traverser
+	traverser := NewShadowRootTraverser(page).WithTimeout(2 * time.Second)
 
 	// Try to find and click the checkbox via shadow DOM
 	if err := traverser.ClickCheckbox(ctx); err != nil {
@@ -1063,8 +1407,8 @@ func (s *Solver) solveTurnstileShadow(ctx context.Context, page *rod.Page) error
 
 	log.Info().Msg("Clicked Turnstile checkbox via shadow DOM traversal")
 
-	// Wait for the click to register
-	if !sleepWithContext(ctx, 1*time.Second) {
+	// Phase 2: Randomized post-click dwell time (250-450ms)
+	if !sleepWithContext(ctx, humanize.RandomDuration(250, 450)) {
 		return fmt.Errorf("context canceled after shadow DOM click")
 	}
 
@@ -1076,10 +1420,12 @@ func (s *Solver) solveTurnstileShadow(ctx context.Context, page *rod.Page) error
 // The checkbox is typically at offset (20, 20) from the container's top-left.
 //
 // Detection risk: MEDIUM - coordinates may reveal automation patterns
+// Phase 2: Now uses Bezier curve mouse movement for human-like behavior
 func (s *Solver) solveTurnstilePositional(ctx context.Context, page *rod.Page) error {
-	log.Debug().Msg("Trying positional click for Turnstile")
+	log.Debug().Msg("Trying positional click for Turnstile with humanized movement")
 
-	traverser := NewShadowRootTraverser(page)
+	// OPTIMIZATION: Use shorter timeout for traverser
+	traverser := NewShadowRootTraverser(page).WithTimeout(1 * time.Second)
 
 	// Get the Turnstile container bounds
 	bounds, err := traverser.GetTurnstileContainerBounds(ctx)
@@ -1088,104 +1434,145 @@ func (s *Solver) solveTurnstilePositional(ctx context.Context, page *rod.Page) e
 		return fmt.Errorf("failed to get container bounds: %w", err)
 	}
 
-	// Calculate checkbox position (typically offset 20-25 pixels from top-left)
-	// The checkbox is usually near the left edge, vertically centered
-	checkboxOffsetX := 20.0
-	checkboxOffsetY := bounds.Height / 2 // Center vertically
-
-	clickX := bounds.X + checkboxOffsetX
-	clickY := bounds.Y + checkboxOffsetY
-
 	log.Debug().
 		Float64("container_x", bounds.X).
 		Float64("container_y", bounds.Y).
 		Float64("container_width", bounds.Width).
 		Float64("container_height", bounds.Height).
-		Float64("click_x", clickX).
-		Float64("click_y", clickY).
 		Msg("Calculated positional click coordinates")
 
-	// Move to position and click
-	centerX := int(clickX)
-	centerY := int(clickY)
-	if err := page.Mouse.MoveTo(proto.NewPoint(clickX, clickY)); err != nil {
-		log.Debug().Err(err).Msg("Failed to move mouse for positional click")
-		return fmt.Errorf("failed to move mouse to (%d, %d): %w", centerX, centerY, err)
+	// Phase 2: Create humanized mouse controller
+	mouse := humanize.NewMouse(page)
+
+	// Try multiple click positions within the widget
+	// The checkbox position varies between different Turnstile implementations
+	clickOffsets := []struct {
+		xPercent float64
+		yPercent float64
+	}{
+		{0.08, 0.50}, // 8% from left, center (typical checkbox position)
+		{0.15, 0.45}, // 15% from left, 45% down
+		{0.05, 0.55}, // 5% from left, 55% down
+		{0.12, 0.40}, // 12% from left, 40% down
 	}
 
-	if err := page.Mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		log.Debug().Err(err).Msg("Failed positional click")
-		return fmt.Errorf("failed to click at (%d, %d): %w", centerX, centerY, err)
+	for i, offset := range clickOffsets {
+		clickX := bounds.X + (bounds.Width * offset.xPercent)
+		clickY := bounds.Y + (bounds.Height * offset.yPercent)
+
+		// Phase 2: Use humanized click with Bezier movement, hover, and dwell
+		if err := mouse.Click(ctx, clickX, clickY); err != nil {
+			log.Debug().Err(err).Int("attempt", i).Msg("Humanized click failed")
+			continue
+		}
+
+		log.Info().
+			Float64("x", clickX).
+			Float64("y", clickY).
+			Int("attempt", i).
+			Msg("Performed humanized positional click on Turnstile")
+
+		// Check if this click worked
+		if s.isTurnstileSolved(page) {
+			return nil
+		}
+	}
+
+	return nil
+}
+
+// solveTurnstileExternal uses external CAPTCHA solvers (2Captcha, CapSolver) as a fallback.
+// This method is called after native solving methods have been exhausted.
+//
+// Detection risk: LOW - uses legitimate CAPTCHA solving service
+func (s *Solver) solveTurnstileExternal(ctx context.Context, page *rod.Page, pageURL string) error {
+	if s.solverChain == nil {
+		return fmt.Errorf("solver chain not configured")
+	}
+
+	log.Debug().Msg("Trying external CAPTCHA solver for Turnstile")
+
+	result, err := s.solverChain.Solve(ctx, page, pageURL, s.userAgent)
+	if err != nil {
+		return fmt.Errorf("external solver failed: %w", err)
 	}
 
 	log.Info().
-		Float64("x", clickX).
-		Float64("y", clickY).
-		Msg("Performed positional click on Turnstile")
+		Str("provider", result.Provider).
+		Dur("solve_time", result.SolveTime).
+		Float64("cost", result.Cost).
+		Bool("injected", result.Injected).
+		Msg("External CAPTCHA solver succeeded")
 
-	// Wait for the click to register
-	if !sleepWithContext(ctx, 1*time.Second) {
-		return fmt.Errorf("context canceled after positional click")
+	// Wait for the page to process the injected token
+	if result.Injected {
+		if err := captcha.WaitForTokenInjectionEffect(ctx, page, 5*time.Second); err != nil {
+			log.Debug().Err(err).Msg("Error waiting for token injection effect")
+		}
 	}
 
 	return nil
 }
 
 // solveTurnstileWidget attempts to click directly on the Turnstile widget element.
-// Fix #6: Accepts context for proper timeout/cancellation propagation.
+// Phase 2: Uses humanized mouse movement with Bezier curves.
 func (s *Solver) solveTurnstileWidget(ctx context.Context, page *rod.Page) error {
 	// Check context before starting
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	log.Debug().Msg("Trying direct widget click for Turnstile")
+	log.Debug().Msg("Trying direct widget click for Turnstile with humanized movement")
+
+	// Phase 2: Create humanized mouse and scroller
+	mouse := humanize.NewMouse(page)
+	scroller := humanize.NewScroller(page)
 
 	// Try clicking on .cf-turnstile widget or its checkbox
+	// Prioritized selectors - iframe first as it's more likely to contain the checkbox
 	widgetSelectors := []string{
 		".cf-turnstile iframe",
-		".cf-turnstile",
-		"#turnstile-wrapper iframe",
-		"#turnstile-wrapper",
 		"[data-sitekey] iframe",
+		".cf-turnstile",
 		"[data-sitekey]",
 	}
 
 	for _, selector := range widgetSelectors {
+		// Check context at each iteration
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		// Use Has() to check if element exists without waiting
 		has, _, _ := page.Has(selector)
 		if !has {
 			continue
 		}
 
-		// Use timeout to prevent hanging
-		element, err := page.Timeout(2 * time.Second).Element(selector)
+		// Reduced timeout from 2s to 500ms
+		element, err := page.Timeout(500 * time.Millisecond).Element(selector)
 		if err != nil {
-			log.Debug().Str("selector", selector).Err(err).Msg("Failed to get element")
 			continue
 		}
 
-		// Try to get the element's bounding box and click in the center
-		box, err := element.Shape()
-		if err == nil && box != nil && len(box.Quads) > 0 {
-			// Get center of the element
-			quad := box.Quads[0]
-			x := (quad[0] + quad[2] + quad[4] + quad[6]) / 4
-			y := (quad[1] + quad[3] + quad[5] + quad[7]) / 4
-
-			log.Debug().Str("selector", selector).Float64("x", x).Float64("y", y).Msg("Clicking Turnstile widget")
-
-			// Move to position and click
-			if moveErr := page.Mouse.MoveTo(proto.NewPoint(x, y)); moveErr != nil {
-				log.Debug().Err(moveErr).Msg("Failed to move mouse")
-				continue
-			}
-			if clickErr := page.Mouse.Click(proto.InputMouseButtonLeft, 1); clickErr == nil {
-				log.Info().Str("selector", selector).Msg("Clicked Turnstile widget")
-			}
+		// Phase 2: Scroll element into view if needed
+		scrolled, _ := scroller.EnsureElementVisible(ctx, element)
+		if scrolled {
+			log.Debug().Str("selector", selector).Msg("Scrolled to Turnstile widget")
 		}
 
-		if err := element.Release(); err != nil {
-			log.Debug().Err(err).Str("selector", selector).Msg("Error releasing DOM element")
+		// Phase 2: Use humanized click on element
+		if err := mouse.ClickElement(ctx, element); err != nil {
+			log.Debug().Err(err).Str("selector", selector).Msg("Humanized widget click failed")
+			element.Release()
+			continue
+		}
+
+		log.Info().Str("selector", selector).Msg("Performed humanized click on Turnstile widget")
+		element.Release()
+
+		// Check for success after click
+		if s.isTurnstileSolved(page) {
+			return nil
 		}
 	}
 
@@ -1196,37 +1583,38 @@ func (s *Solver) solveTurnstileWidget(ctx context.Context, page *rod.Page) error
 // This matches Python FlareSolverr v3.3.22's click_verify() function which uses Tab+Enter.
 // Using keyboard navigation instead of mouse clicks avoids fingerprinting detection.
 //
-// Fix #6: Accepts context for proper timeout/cancellation propagation.
+// Phase 2: Uses randomized delays between keystrokes for human-like behavior.
 //
 // Parameters:
 //   - ctx: Context for cancellation
-//   - tabsTillVerify: Number of Tab presses to reach the Turnstile checkbox (0 uses default of 10)
+//   - tabsTillVerify: Number of Tab presses to reach the Turnstile checkbox (0 uses default of 6)
 func (s *Solver) solveTurnstileKeyboard(ctx context.Context, page *rod.Page, tabsTillVerify int) error {
-	// Use default of 10 tabs if not specified (matches Python FlareSolverr default)
+	// Use default of 6 tabs if not specified (reduced from 10 - most Turnstile widgets need fewer tabs)
 	tabCount := tabsTillVerify
 	if tabCount <= 0 {
-		tabCount = 10
+		tabCount = 6
 	}
 
 	log.Debug().Int("tab_count", tabCount).Msg("Trying keyboard navigation for Turnstile")
 
-	// Wait a moment for Turnstile to fully load, but respect context (Bug 2)
-	if !sleepWithContext(ctx, 2*time.Second) {
-		return fmt.Errorf("context canceled during Turnstile solve")
-	}
-
 	keyboard := page.Keyboard
 
 	// Tab through elements to reach the Turnstile checkbox
+	// Phase 2: Randomized delay between tabs (60-120ms) for human-like behavior
 	for i := 0; i < tabCount; i++ {
 		if err := keyboard.Press(input.Tab); err != nil {
 			log.Debug().Err(err).Int("tab", i).Msg("Tab press failed")
 			continue
 		}
-		// Context-aware sleep (Bug 2)
-		if !sleepWithContext(ctx, 200*time.Millisecond) {
+		// Phase 2: Randomized delay for natural keyboard timing
+		if !sleepWithContext(ctx, humanize.RandomDuration(60, 120)) {
 			return fmt.Errorf("context canceled during Turnstile solve")
 		}
+	}
+
+	// Phase 2: Pre-action delay before pressing Enter
+	if !sleepWithContext(ctx, humanize.RandomDuration(100, 250)) {
+		return fmt.Errorf("context canceled during Turnstile solve")
 	}
 
 	// Press Enter to activate the checkbox (matches Python v3.3.22)
@@ -1237,14 +1625,14 @@ func (s *Solver) solveTurnstileKeyboard(ctx context.Context, page *rod.Page, tab
 
 	log.Info().Msg("Sent keyboard Tab+Enter for Turnstile")
 
-	// Wait a moment for the action to register, but respect context (Bug 2)
-	if !sleepWithContext(ctx, 1*time.Second) {
+	// Phase 2: Post-action dwell time (400-700ms)
+	if !sleepWithContext(ctx, humanize.RandomDuration(400, 700)) {
 		return fmt.Errorf("context canceled during Turnstile solve")
 	}
 
 	// Try to find and activate "Verify you are human" button using keyboard
 	// Use keyboard Enter instead of mouse click to avoid fingerprinting
-	if btn, err := page.Timeout(2 * time.Second).Element("//button[contains(text(),'Verify')]"); err == nil {
+	if btn, err := page.Timeout(500 * time.Millisecond).Element("//button[contains(text(),'Verify')]"); err == nil {
 		// Always defer element release to prevent memory leaks
 		defer func() {
 			if releaseErr := btn.Release(); releaseErr != nil {
@@ -1252,6 +1640,8 @@ func (s *Solver) solveTurnstileKeyboard(ctx context.Context, page *rod.Page, tab
 			}
 		}()
 		if focusErr := btn.Focus(); focusErr == nil {
+			// Phase 2: Small delay before pressing Enter on Verify button
+			sleepWithContext(ctx, humanize.RandomDuration(80, 200))
 			if enterErr := keyboard.Press(input.Enter); enterErr == nil {
 				log.Info().Msg("Pressed Enter on Verify button")
 			}
@@ -1270,7 +1660,7 @@ func (s *Solver) solveTurnstileClick(ctx context.Context, page *rod.Page) error 
 	}
 	log.Debug().Msg("Trying direct iframe click for Turnstile")
 
-	sel := selectors.Get()
+	sel := s.getSelectors()
 
 	// Find all iframes on the page with timeout to prevent hanging
 	iframes, err := page.Timeout(5 * time.Second).Elements("iframe")

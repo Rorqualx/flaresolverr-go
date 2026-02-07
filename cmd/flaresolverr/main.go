@@ -19,6 +19,7 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 	"github.com/Rorqualx/flaresolverr-go/internal/handlers"
 	"github.com/Rorqualx/flaresolverr-go/internal/middleware"
+	"github.com/Rorqualx/flaresolverr-go/internal/selectors"
 	"github.com/Rorqualx/flaresolverr-go/internal/session"
 	"github.com/Rorqualx/flaresolverr-go/pkg/version"
 )
@@ -55,8 +56,24 @@ func main() {
 	// Initialize session manager with pool reference for browser cleanup
 	sessionMgr := session.NewManager(cfg, pool)
 
+	// Initialize selectors manager with optional hot-reload
+	var selectorsManager *selectors.Manager
+	if cfg.SelectorsPath != "" || cfg.SelectorsHotReload {
+		var err error
+		selectorsManager, err = selectors.NewManager(cfg.SelectorsPath, cfg.SelectorsHotReload)
+		if err != nil {
+			log.Warn().Err(err).Msg("Failed to create selectors manager, using embedded defaults")
+			selectorsManager = selectors.GetManager()
+		}
+		if cfg.SelectorsHotReload && cfg.SelectorsPath != "" {
+			log.Info().Str("path", cfg.SelectorsPath).Msg("Selectors hot-reload enabled")
+		}
+	} else {
+		selectorsManager = selectors.GetManager()
+	}
+
 	// Create handler
-	handler := handlers.New(pool, sessionMgr, cfg)
+	handler := handlers.NewWithSelectors(pool, sessionMgr, cfg, selectorsManager)
 
 	// Build middleware chain
 	var finalHandler http.Handler = handler
@@ -174,6 +191,13 @@ func main() {
 	// Close rate limiter to stop cleanup goroutine
 	if rateLimiter != nil {
 		rateLimiter.Close()
+	}
+
+	// Close selectors manager to stop file watcher
+	if selectorsManager != nil {
+		if err := selectorsManager.Close(); err != nil {
+			log.Error().Err(err).Msg("Selectors manager close error")
+		}
 	}
 
 	// Close session manager
