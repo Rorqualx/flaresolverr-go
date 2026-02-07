@@ -209,8 +209,12 @@ func setupNetworkCapture(ctx context.Context, page *rod.Page) (*NetworkCapture, 
 	// We use a short timeout since EachEvent should subscribe quickly.
 	// The actual confirmation comes from receiving events, but we need to
 	// let navigation start for events to flow.
+	// Fix MEDIUM: Use time.NewTimer with defer Stop() to prevent timer leak
+	initTimer := time.NewTimer(100 * time.Millisecond)
+	defer initTimer.Stop()
+
 	select {
-	case <-time.After(100 * time.Millisecond):
+	case <-initTimer.C:
 		// Subscription should be active by now
 		log.Debug().Msg("Network capture subscription initialized")
 	case <-ctx.Done():

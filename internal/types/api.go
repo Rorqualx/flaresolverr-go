@@ -1,5 +1,32 @@
 package types
 
+import (
+	"fmt"
+	"net/url"
+	"strings"
+)
+
+// Request validation limits.
+const (
+	MaxCmdLength           = 64
+	MaxURLLength           = 8192
+	MaxSessionIDLength     = 128
+	MaxTimeoutMs           = 600000 // 10 minutes in milliseconds
+	MaxCookies             = 100
+	MaxCookieNameLength    = 256
+	MaxCookieValueLength   = 4096
+	MaxCookieDomainLength  = 256
+	MaxCookiePathLength    = 2048
+	MaxPostDataLength      = 256 * 1024 // 256KB
+	MaxHeaders             = 50
+	MaxHeaderNameLength    = 256
+	MaxHeaderValueLength   = 8192
+	MaxProxyUsernameLength = 256
+	MaxProxyPasswordLength = 256
+	MaxWaitSeconds         = 60
+	MaxTabsTillVerify      = 50
+)
+
 // Request represents an incoming API request.
 // This matches the FlareSolverr API specification.
 type Request struct {
@@ -20,6 +47,134 @@ type Request struct {
 	TabsTillVerify    int               `json:"tabsTillVerify,omitempty"`   // Number of Tab presses to reach Turnstile checkbox (default: 10)
 }
 
+// Validate validates the request and returns an error if invalid.
+// Fix HIGH: Add comprehensive input validation to prevent resource exhaustion and injection.
+func (r *Request) Validate() error {
+	// Validate cmd field
+	if r.Cmd == "" {
+		return fmt.Errorf("cmd is required")
+	}
+	if len(r.Cmd) > MaxCmdLength {
+		return fmt.Errorf("cmd exceeds maximum length of %d", MaxCmdLength)
+	}
+
+	// Validate cmd is a known command
+	switch r.Cmd {
+	case CmdRequestGet, CmdRequestPost, CmdSessionsCreate, CmdSessionsList, CmdSessionsDestroy:
+		// Valid command
+	default:
+		// Use %q format for security (prevents log injection) - matches test expectations
+		return fmt.Errorf("Unknown command: %q", r.Cmd)
+	}
+
+	// Validate URL if present
+	if r.URL != "" {
+		if len(r.URL) > MaxURLLength {
+			return fmt.Errorf("url exceeds maximum length of %d", MaxURLLength)
+		}
+		// Check URL scheme
+		u, err := url.Parse(r.URL)
+		if err != nil {
+			return fmt.Errorf("invalid url: %w", err)
+		}
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != "http" && scheme != "https" {
+			return fmt.Errorf("url scheme must be http or https, got: %s", scheme)
+		}
+	}
+
+	// Validate session ID if present
+	if r.Session != "" && len(r.Session) > MaxSessionIDLength {
+		return fmt.Errorf("session exceeds maximum length of %d", MaxSessionIDLength)
+	}
+
+	// Validate maxTimeout bounds
+	if r.MaxTimeout < 0 {
+		return fmt.Errorf("maxTimeout cannot be negative")
+	}
+	if r.MaxTimeout > MaxTimeoutMs {
+		return fmt.Errorf("maxTimeout exceeds maximum of %d ms", MaxTimeoutMs)
+	}
+
+	// Validate cookies
+	if len(r.Cookies) > MaxCookies {
+		return fmt.Errorf("too many cookies (maximum %d)", MaxCookies)
+	}
+	for i, cookie := range r.Cookies {
+		if cookie.Name == "" {
+			return fmt.Errorf("cookie[%d]: name is required", i)
+		}
+		if len(cookie.Name) > MaxCookieNameLength {
+			return fmt.Errorf("cookie[%d]: name exceeds maximum length of %d", i, MaxCookieNameLength)
+		}
+		if len(cookie.Value) > MaxCookieValueLength {
+			return fmt.Errorf("cookie[%d]: value exceeds maximum length of %d", i, MaxCookieValueLength)
+		}
+		if len(cookie.Domain) > MaxCookieDomainLength {
+			return fmt.Errorf("cookie[%d]: domain exceeds maximum length of %d", i, MaxCookieDomainLength)
+		}
+		if len(cookie.Path) > MaxCookiePathLength {
+			return fmt.Errorf("cookie[%d]: path exceeds maximum length of %d", i, MaxCookiePathLength)
+		}
+		if strings.Contains(cookie.Path, "..") {
+			return fmt.Errorf("cookie[%d]: path cannot contain '..'", i)
+		}
+	}
+
+	// Validate proxy if present
+	if r.Proxy != nil {
+		if err := r.Proxy.Validate(); err != nil {
+			return fmt.Errorf("proxy: %w", err)
+		}
+	}
+
+	// Validate postData
+	if len(r.PostData) > MaxPostDataLength {
+		return fmt.Errorf("postData exceeds maximum length of %d", MaxPostDataLength)
+	}
+
+	// Validate contentType
+	if r.ContentType != "" {
+		switch r.ContentType {
+		case ContentTypeFormURLEncoded, ContentTypeJSON:
+			// Valid
+		default:
+			return fmt.Errorf("contentType must be '%s' or '%s'", ContentTypeFormURLEncoded, ContentTypeJSON)
+		}
+	}
+
+	// Validate headers
+	if len(r.Headers) > MaxHeaders {
+		return fmt.Errorf("too many headers (maximum %d)", MaxHeaders)
+	}
+	for name, value := range r.Headers {
+		if len(name) > MaxHeaderNameLength {
+			return fmt.Errorf("header name exceeds maximum length of %d", MaxHeaderNameLength)
+		}
+		if len(value) > MaxHeaderValueLength {
+			return fmt.Errorf("header value exceeds maximum length of %d", MaxHeaderValueLength)
+		}
+	}
+
+	// Validate waitInSeconds bounds
+	if r.WaitInSeconds < 0 {
+		return fmt.Errorf("waitInSeconds cannot be negative")
+	}
+	if r.WaitInSeconds > MaxWaitSeconds {
+		return fmt.Errorf("waitInSeconds exceeds maximum of %d", MaxWaitSeconds)
+	}
+
+	// Validate tabsTillVerify bounds
+	if r.TabsTillVerify < 0 {
+		return fmt.Errorf("tabsTillVerify cannot be negative")
+	}
+	if r.TabsTillVerify > MaxTabsTillVerify {
+		return fmt.Errorf("tabsTillVerify exceeds maximum of %d", MaxTabsTillVerify)
+	}
+
+	return nil
+}
+
 // RequestCookie represents a cookie to be set before navigation.
 type RequestCookie struct {
 	Name     string `json:"name"`
@@ -35,6 +190,43 @@ type Proxy struct {
 	URL      string `json:"url"`
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+}
+
+// Validate validates the proxy configuration.
+func (p *Proxy) Validate() error {
+	if p.URL == "" {
+		return nil // Empty proxy is valid (means no proxy)
+	}
+
+	// Validate proxy URL format
+	u, err := url.Parse(p.URL)
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+
+	// Validate scheme
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "http", "https", "socks4", "socks5":
+		// Valid proxy schemes
+	default:
+		return fmt.Errorf("unsupported scheme: %s (must be http, https, socks4, or socks5)", scheme)
+	}
+
+	// Validate host is present
+	if u.Host == "" {
+		return fmt.Errorf("host is required")
+	}
+
+	// Validate credential lengths
+	if len(p.Username) > MaxProxyUsernameLength {
+		return fmt.Errorf("username exceeds maximum length of %d", MaxProxyUsernameLength)
+	}
+	if len(p.Password) > MaxProxyPasswordLength {
+		return fmt.Errorf("password exceeds maximum length of %d", MaxProxyPasswordLength)
+	}
+
+	return nil
 }
 
 // Response represents an API response.

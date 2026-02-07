@@ -272,11 +272,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate cmd field length to prevent memory abuse
-	const maxCmdLength = 64
-	if len(req.Cmd) > maxCmdLength {
-		log.Warn().Int("len", len(req.Cmd)).Msg("Command too long")
-		h.writeError(w, "Invalid command", startTime)
+	// Fix HIGH: Call centralized validation instead of duplicating checks
+	// This validates cmd, url, session, cookies, proxy, headers, etc.
+	if err := req.Validate(); err != nil {
+		log.Warn().Err(err).Msg("Request validation failed")
+		h.writeError(w, err.Error(), startTime)
 		return
 	}
 
@@ -321,11 +321,11 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate cmd field length to prevent memory abuse
-	const maxCmdLength = 64
-	if len(req.Cmd) > maxCmdLength {
-		log.Warn().Int("len", len(req.Cmd)).Msg("Command too long")
-		h.writeError(w, "Invalid command", startTime)
+	// Fix HIGH: Call centralized validation instead of duplicating checks
+	// This validates cmd, url, session, cookies, proxy, headers, etc.
+	if err := req.Validate(); err != nil {
+		log.Warn().Err(err).Msg("Request validation failed")
+		h.writeError(w, err.Error(), startTime)
 		return
 	}
 

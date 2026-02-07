@@ -300,6 +300,9 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 // This is an internal method - external code should use Acquire/Release.
 // Each call creates a fresh launcher since launchers can only be used once.
 // The context parameter allows for cancellation during shutdown.
+//
+// Fix HIGH: Properly handles Chrome process cleanup on Connect() failure,
+// and adds timeout to Launch() operation to prevent indefinite blocking.
 func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	// Check context before starting expensive operation
 	if ctx != nil {
@@ -316,15 +319,44 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	// Pass the default proxy from config (may be empty)
 	l := p.createLauncher(p.config.ProxyURL)
 
-	// Launch the browser process
-	url, err := l.Launch()
-	if err != nil {
-		return nil, fmt.Errorf("failed to launch browser: %w", err)
+	// Fix HIGH: Add timeout to Launch() to prevent indefinite blocking
+	const launchTimeout = 60 * time.Second
+	launchCtx, launchCancel := context.WithTimeout(context.Background(), launchTimeout)
+	defer launchCancel()
+
+	// Launch the browser process with timeout
+	launchDone := make(chan struct{})
+	var url string
+	var launchErr error
+	go func() {
+		url, launchErr = l.Launch()
+		close(launchDone)
+	}()
+
+	select {
+	case <-launchDone:
+		if launchErr != nil {
+			return nil, fmt.Errorf("failed to launch browser: %w", launchErr)
+		}
+	case <-launchCtx.Done():
+		// Launch timed out - try to kill any orphaned process
+		l.Kill()
+		return nil, fmt.Errorf("browser launch timed out after %v", launchTimeout)
+	case <-ctx.Done():
+		// Parent context canceled
+		l.Kill()
+		return nil, ctx.Err()
 	}
 
 	// Connect to the browser via CDP
 	browser := rod.New().ControlURL(url)
 	if err := browser.Connect(); err != nil {
+		// Fix HIGH: Chrome process was launched but Connect failed
+		// We must close the browser to clean up the orphaned Chrome process
+		log.Warn().Err(err).Str("url", url).Msg("Failed to connect to browser, cleaning up process")
+		if closeErr := browser.Close(); closeErr != nil {
+			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
+		}
 		return nil, fmt.Errorf("failed to connect to browser: %w", err)
 	}
 
@@ -352,6 +384,9 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 //	    return err
 //	}
 //	defer browser.Close()
+//
+// Fix HIGH: Properly handles Chrome process cleanup on Connect() failure,
+// and adds timeout to Launch() operation to prevent indefinite blocking.
 func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browser, error) {
 	// Check context before starting expensive operation
 	if ctx != nil {
@@ -368,15 +403,44 @@ func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browse
 	// Create launcher with the specified proxy
 	l := p.createLauncher(proxyURL)
 
-	// Launch the browser process
-	url, err := l.Launch()
-	if err != nil {
-		return nil, fmt.Errorf("failed to launch browser with proxy: %w", err)
+	// Fix HIGH: Add timeout to Launch() to prevent indefinite blocking
+	const launchTimeout = 60 * time.Second
+	launchCtx, launchCancel := context.WithTimeout(context.Background(), launchTimeout)
+	defer launchCancel()
+
+	// Launch the browser process with timeout
+	launchDone := make(chan struct{})
+	var url string
+	var launchErr error
+	go func() {
+		url, launchErr = l.Launch()
+		close(launchDone)
+	}()
+
+	select {
+	case <-launchDone:
+		if launchErr != nil {
+			return nil, fmt.Errorf("failed to launch browser with proxy: %w", launchErr)
+		}
+	case <-launchCtx.Done():
+		// Launch timed out - try to kill any orphaned process
+		l.Kill()
+		return nil, fmt.Errorf("browser launch timed out after %v", launchTimeout)
+	case <-ctx.Done():
+		// Parent context canceled
+		l.Kill()
+		return nil, ctx.Err()
 	}
 
 	// Connect to the browser via CDP
 	browser := rod.New().ControlURL(url)
 	if err := browser.Connect(); err != nil {
+		// Fix HIGH: Chrome process was launched but Connect failed
+		// We must close the browser to clean up the orphaned Chrome process
+		log.Warn().Err(err).Str("url", url).Msg("Failed to connect to browser, cleaning up process")
+		if closeErr := browser.Close(); closeErr != nil {
+			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
+		}
 		return nil, fmt.Errorf("failed to connect to browser: %w", err)
 	}
 
@@ -611,7 +675,10 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 	var spawnErr error
 
 	// Create context with timeout for spawn operation
+	// Fix CRITICAL: Use defer to ensure context is always canceled, preventing leaks
+	// if the function exits unexpectedly (panic, early return, etc.)
 	spawnCtx, spawnCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer spawnCancel()
 
 	spawnDone := make(chan struct{})
 	go func() {
@@ -622,10 +689,9 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 	// Fix #4: Add shutdown awareness to spawn timeout
 	select {
 	case <-spawnDone:
-		// Spawn completed
-		spawnCancel()
+		// Spawn completed (spawnCancel is deferred)
 	case <-p.stopCh:
-		spawnCancel()
+		// spawnCancel is deferred, no need to call explicitly
 		log.Warn().Msg("Browser spawn abandoned during pool shutdown")
 		p.removeBrowserEntry(oldBrowser)
 		// Wait briefly for spawning goroutine to notice context cancellation
@@ -636,7 +702,7 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 		}
 		return
 	case <-time.After(30 * time.Second):
-		spawnCancel()
+		// spawnCancel is deferred, no need to call explicitly
 		log.Error().Msg("Browser spawn timed out during recycle")
 		p.removeBrowserEntry(oldBrowser)
 		return
@@ -973,6 +1039,12 @@ func (p *Pool) Close() error {
 		}
 	}
 
+	// Fix MEDIUM: Capture stats before resetting so we can log actual values
+	finalAcquired := p.stats.Acquired.Load()
+	finalReleased := p.stats.Released.Load()
+	finalRecycled := p.stats.Recycled.Load()
+	finalErrors := p.stats.Errors.Load()
+
 	// Fix #38: Reset stats on close
 	p.stats.Acquired.Store(0)
 	p.stats.Released.Store(0)
@@ -980,10 +1052,10 @@ func (p *Pool) Close() error {
 	p.stats.Errors.Store(0)
 
 	log.Info().
-		Int64("total_acquired", p.stats.Acquired.Load()).
-		Int64("total_released", p.stats.Released.Load()).
-		Int64("total_recycled", p.stats.Recycled.Load()).
-		Int64("total_errors", p.stats.Errors.Load()).
+		Int64("total_acquired", finalAcquired).
+		Int64("total_released", finalReleased).
+		Int64("total_recycled", finalRecycled).
+		Int64("total_errors", finalErrors).
 		Msg("Browser pool closed")
 
 	return closeErr
