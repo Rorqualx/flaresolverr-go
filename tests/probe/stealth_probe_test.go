@@ -539,3 +539,300 @@ func TestBlockResources_ContextCancellation(t *testing.T) {
 	// Cleanup should still work
 	cleanup()
 }
+
+// TestApplyStealthToPage_BatteryAPI tests that Battery API returns consistent values.
+func TestApplyStealthToPage_BatteryAPI(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Navigate to a real page first (Battery API needs secure context)
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Check Battery API
+	result, err := page.Eval(`() => {
+		return new Promise((resolve) => {
+			if (typeof navigator.getBattery !== 'function') {
+				resolve({ available: false });
+				return;
+			}
+			navigator.getBattery().then(battery => {
+				resolve({
+					available: true,
+					charging: battery.charging,
+					level: battery.level,
+					chargingTime: battery.chargingTime,
+					dischargingTime: battery.dischargingTime
+				});
+			}).catch(() => {
+				resolve({ available: false });
+			});
+		});
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+	if !obj["available"].Bool() {
+		t.Skip("Battery API not available in this browser")
+	}
+
+	// Check charging is true
+	if !obj["charging"].Bool() {
+		t.Error("Battery charging should be true")
+	}
+
+	// Check level is in expected range (0.87-0.97)
+	level := obj["level"].Num()
+	if level < 0.87 || level > 0.97 {
+		t.Errorf("Battery level should be between 0.87 and 0.97, got %f", level)
+	}
+
+	// Check chargingTime is 0 (fully charged)
+	if obj["chargingTime"].Num() != 0 {
+		t.Errorf("chargingTime should be 0, got %f", obj["chargingTime"].Num())
+	}
+
+	// Verify consistency - call again and check level is the same
+	result2, err := page.Eval(`() => {
+		return navigator.getBattery().then(battery => battery.level);
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	level2 := result2.Value.Num()
+	if level != level2 {
+		t.Errorf("Battery level should be consistent across calls, got %f and %f", level, level2)
+	}
+}
+
+// TestApplyStealthToPage_SpeechSynthesisVoices tests that Speech Synthesis returns consistent voices.
+func TestApplyStealthToPage_SpeechSynthesisVoices(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Navigate to a real page
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Wait a bit for voices to load
+	time.Sleep(100 * time.Millisecond)
+
+	// Check Speech Synthesis voices
+	result, err := page.Eval(`() => {
+		if (typeof speechSynthesis === 'undefined' || typeof speechSynthesis.getVoices !== 'function') {
+			return { available: false };
+		}
+		const voices = speechSynthesis.getVoices();
+		return {
+			available: true,
+			count: voices.length,
+			hasGoogleUSEnglish: voices.some(v => v.name === 'Google US English'),
+			firstVoiceName: voices.length > 0 ? voices[0].name : null,
+			firstVoiceDefault: voices.length > 0 ? voices[0].default : false
+		};
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+	if !obj["available"].Bool() {
+		t.Skip("Speech Synthesis not available in this browser")
+	}
+
+	// Check we have 10 voices
+	count := obj["count"].Int()
+	if count != 10 {
+		t.Errorf("Should have 10 voices, got %d", count)
+	}
+
+	// Check Google US English is present
+	if !obj["hasGoogleUSEnglish"].Bool() {
+		t.Error("Should have 'Google US English' voice")
+	}
+
+	// Check first voice is Google US English and is default
+	firstName := obj["firstVoiceName"].Str()
+	if firstName != "Google US English" {
+		t.Errorf("First voice should be 'Google US English', got %q", firstName)
+	}
+
+	if !obj["firstVoiceDefault"].Bool() {
+		t.Error("First voice should be marked as default")
+	}
+}
+
+// TestApplyStealthToPage_FontEnumerationLimited tests that font enumeration is limited.
+func TestApplyStealthToPage_FontEnumerationLimited(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Navigate to a real page
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Check font enumeration is limited
+	result, err := page.Eval(`() => {
+		if (typeof document.fonts === 'undefined') {
+			return { available: false };
+		}
+
+		// Count fonts via forEach
+		let forEachCount = 0;
+		document.fonts.forEach(() => {
+			forEachCount++;
+		});
+
+		return {
+			available: true,
+			forEachCount: forEachCount,
+			sizeProperty: document.fonts.size
+		};
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+	if !obj["available"].Bool() {
+		t.Skip("document.fonts not available in this browser")
+	}
+
+	// Check forEach is limited to 10 iterations
+	forEachCount := obj["forEachCount"].Int()
+	if forEachCount > 10 {
+		t.Errorf("forEach should iterate at most 10 fonts, got %d", forEachCount)
+	}
+
+	// Check size is capped at 50
+	size := obj["sizeProperty"].Int()
+	if size > 50 {
+		t.Errorf("document.fonts.size should be at most 50, got %d", size)
+	}
+}
+
+// TestApplyStealthToPage_TimezoneConsistent tests that timezone APIs return consistent values.
+func TestApplyStealthToPage_TimezoneConsistent(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Navigate to a real page
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Re-apply stealth after navigation
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage after navigation failed: %v", err)
+	}
+
+	// Check timezone offset
+	result, err := page.Eval(`() => {
+		const offset = new Date().getTimezoneOffset();
+
+		// Check Intl.DateTimeFormat
+		let intlTimezone = null;
+		try {
+			const formatter = new Intl.DateTimeFormat();
+			const resolved = formatter.resolvedOptions();
+			intlTimezone = resolved.timeZone;
+		} catch (e) {
+			// Intl not available
+		}
+
+		return {
+			offset: offset,
+			intlTimezone: intlTimezone
+		};
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+
+	// Check offset is 300 (America/New_York = UTC-5 = 300 minutes)
+	offset := obj["offset"].Int()
+	if offset != 300 {
+		t.Errorf("getTimezoneOffset() should return 300 (EST), got %d", offset)
+	}
+
+	// Check Intl timezone if available
+	intlTimezone := obj["intlTimezone"].Str()
+	if intlTimezone != "" && intlTimezone != "America/New_York" {
+		t.Errorf("Intl.DateTimeFormat timezone should be 'America/New_York', got %q", intlTimezone)
+	}
+
+	// Verify consistency across multiple calls
+	result2, err := page.Eval(`() => new Date().getTimezoneOffset()`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	offset2 := result2.Value.Int()
+	if offset != offset2 {
+		t.Errorf("Timezone offset should be consistent, got %d and %d", offset, offset2)
+	}
+}

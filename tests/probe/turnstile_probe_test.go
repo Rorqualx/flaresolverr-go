@@ -11,6 +11,7 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 	"github.com/Rorqualx/flaresolverr-go/internal/solver"
+	"github.com/Rorqualx/flaresolverr-go/internal/stats"
 )
 
 // TestTurnstile_NowSecure tests against nowsecure.nl which has Cloudflare protection.
@@ -33,12 +34,18 @@ func TestTurnstile_NowSecure(t *testing.T) {
 	}
 	defer pool.Close()
 
+	// Create stats manager for method learning
+	statsManager := stats.NewManager()
+	defer statsManager.Close()
+
+	// Create solver with stats manager for per-domain method tracking
 	s := solver.New(pool, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	s.SetStatsManager(statsManager)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	t.Log("Starting Turnstile test against nowsecure.nl...")
+	t.Log("Starting Turnstile test against nowsecure.nl (with method learning)...")
 
 	result, err := s.Solve(ctx, &solver.SolveOptions{
 		URL:        "https://nowsecure.nl/",
@@ -78,6 +85,16 @@ func TestTurnstile_NowSecure(t *testing.T) {
 		} else if strings.Contains(result.HTML, "nowsecure") {
 			t.Log("SUCCESS: Got past challenge page")
 		}
+	}
+
+	// Log the learned method order for nowsecure.nl
+	methodOrder := statsManager.GetTurnstileMethodOrder("nowsecure.nl")
+	t.Logf("Learned method order for nowsecure.nl: %v", methodOrder)
+
+	// Log the best method based on stats
+	bestMethod := statsManager.GetBestTurnstileMethod("nowsecure.nl")
+	if bestMethod != "" {
+		t.Logf("Best method for nowsecure.nl: %s", bestMethod)
 	}
 }
 
