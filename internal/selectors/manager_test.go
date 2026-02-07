@@ -1,8 +1,13 @@
 package selectors
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -405,5 +410,285 @@ func TestManager_Close(t *testing.T) {
 	if err := m.Close(); err != nil {
 		// May get an error for closing already-closed watcher, that's OK
 		t.Logf("Double Close() returned: %v (expected)", err)
+	}
+}
+
+// ============================================================
+// Remote selector fetch tests
+// ============================================================
+
+func TestManager_LoadRemote(t *testing.T) {
+	// Create a mock HTTP server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write([]byte(`
+access_denied:
+  - "remote denied"
+turnstile:
+  - "remote turnstile"
+javascript:
+  - "remote challenge"
+`))
+	}))
+	defer server.Close()
+
+	m, err := NewManagerWithRemote("", false, server.URL, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewManagerWithRemote() error = %v", err)
+	}
+	defer m.Close()
+
+	sel := m.Get()
+	if sel == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	// Should have remote selectors
+	if len(sel.AccessDenied) != 1 || sel.AccessDenied[0] != "remote denied" {
+		t.Errorf("Expected 'remote denied', got %v", sel.AccessDenied)
+	}
+	if len(sel.Turnstile) != 1 || sel.Turnstile[0] != "remote turnstile" {
+		t.Errorf("Expected 'remote turnstile', got %v", sel.Turnstile)
+	}
+
+	// Stats should show success
+	stats := m.Stats()
+	if stats.RemoteSuccesses < 1 {
+		t.Errorf("Expected at least 1 remote success, got %d", stats.RemoteSuccesses)
+	}
+}
+
+func TestManager_RemoteTimeout(t *testing.T) {
+	// Create a slow mock server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Sleep longer than the timeout
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Use a very short timeout by creating manager with custom http client
+	m := &Manager{
+		embedded:        Get(),
+		stopCh:          make(chan struct{}),
+		remoteURL:       server.URL,
+		refreshInterval: 1 * time.Hour,
+		httpClient: &http.Client{
+			Timeout: 100 * time.Millisecond, // Very short timeout
+		},
+	}
+	m.current.Store(m.embedded)
+	defer m.Close()
+
+	// Try to load remote - should timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := m.loadRemote(ctx)
+	if err == nil {
+		t.Error("Expected timeout error, got nil")
+	}
+}
+
+func TestManager_RemoteMalformed(t *testing.T) {
+	// Create a mock server returning invalid YAML
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write([]byte(`
+this is not valid yaml {{{
+  - incomplete:
+`))
+	}))
+	defer server.Close()
+
+	// Create manager - should fall back to embedded
+	m, err := NewManagerWithRemote("", false, server.URL, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewManagerWithRemote() error = %v", err)
+	}
+	defer m.Close()
+
+	// Should still have embedded selectors
+	sel := m.Get()
+	if sel == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	// Should have embedded selectors (not empty)
+	if len(sel.AccessDenied) == 0 {
+		t.Error("Expected embedded access denied patterns")
+	}
+}
+
+func TestManager_RemoteRefresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping refresh test in short mode")
+	}
+
+	// Track how many times the server was called
+	callCount := 0
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callCount++
+		currentCount := callCount
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/yaml")
+		// Return different data each time
+		_, _ = w.Write([]byte(fmt.Sprintf(`
+access_denied:
+  - "refresh %d"
+`, currentCount)))
+	}))
+	defer server.Close()
+
+	// Create manager with very short refresh interval
+	m, err := NewManagerWithRemote("", false, server.URL, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewManagerWithRemote() error = %v", err)
+	}
+	defer m.Close()
+
+	// Wait for a couple of refreshes
+	time.Sleep(350 * time.Millisecond)
+
+	mu.Lock()
+	finalCount := callCount
+	mu.Unlock()
+
+	// Should have been called at least twice (initial + refreshes)
+	if finalCount < 2 {
+		t.Errorf("Expected at least 2 calls, got %d", finalCount)
+	}
+
+	// Stats should show successful refreshes
+	stats := m.Stats()
+	if stats.RemoteSuccesses < 2 {
+		t.Errorf("Expected at least 2 remote successes, got %d", stats.RemoteSuccesses)
+	}
+}
+
+func TestManager_RemoteFallback(t *testing.T) {
+	// Create a server that returns 500 error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Internal Server Error"))
+	}))
+	defer server.Close()
+
+	// Create manager - should fall back to embedded
+	m, err := NewManagerWithRemote("", false, server.URL, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewManagerWithRemote() error = %v", err)
+	}
+	defer m.Close()
+
+	// Should still have embedded selectors (graceful degradation)
+	sel := m.Get()
+	if sel == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	// Should have embedded selectors
+	if len(sel.AccessDenied) == 0 {
+		t.Error("Expected embedded access denied patterns from graceful degradation")
+	}
+}
+
+func TestManager_RemoteWithFileOverride(t *testing.T) {
+	// Create a local file
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "selectors.yaml")
+
+	content := `
+access_denied:
+  - "file pattern"
+`
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+
+	// Create a mock server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write([]byte(`
+access_denied:
+  - "remote pattern"
+`))
+	}))
+	defer server.Close()
+
+	// Create manager with both file and remote
+	m, err := NewManagerWithRemote(tmpFile, false, server.URL, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewManagerWithRemote() error = %v", err)
+	}
+	defer m.Close()
+
+	sel := m.Get()
+
+	// File should take priority
+	if len(sel.AccessDenied) != 1 || sel.AccessDenied[0] != "file pattern" {
+		t.Errorf("Expected 'file pattern' (file takes priority), got %v", sel.AccessDenied)
+	}
+}
+
+func TestManager_RemoteNoURL(t *testing.T) {
+	m := &Manager{
+		embedded:   Get(),
+		stopCh:     make(chan struct{}),
+		remoteURL:  "",
+		httpClient: nil,
+	}
+	m.current.Store(m.embedded)
+
+	ctx := context.Background()
+	_, err := m.loadRemote(ctx)
+	if err == nil {
+		t.Error("Expected error when no remote URL configured")
+	}
+}
+
+func TestManager_RemoteStats(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// First call: return valid data
+			w.Header().Set("Content-Type", "application/yaml")
+			_, _ = w.Write([]byte(`access_denied: ["test"]`))
+		} else {
+			// Subsequent calls: return error
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	m, err := NewManagerWithRemote("", false, server.URL, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewManagerWithRemote() error = %v", err)
+	}
+	defer m.Close()
+
+	// Wait for some refreshes
+	time.Sleep(150 * time.Millisecond)
+
+	stats := m.Stats()
+
+	// Should have at least 1 success (initial fetch)
+	if stats.RemoteSuccesses < 1 {
+		t.Errorf("Expected at least 1 remote success, got %d", stats.RemoteSuccesses)
+	}
+
+	// Should have some failures from subsequent refreshes
+	if stats.RemoteFailures < 1 {
+		t.Errorf("Expected at least 1 remote failure, got %d", stats.RemoteFailures)
+	}
+
+	// Last remote fetch time should be set
+	if stats.LastRemoteFetch.IsZero() {
+		t.Error("Expected LastRemoteFetch to be set")
 	}
 }

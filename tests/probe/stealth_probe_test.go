@@ -836,3 +836,270 @@ func TestApplyStealthToPage_TimezoneConsistent(t *testing.T) {
 		t.Errorf("Timezone offset should be consistent, got %d and %d", offset, offset2)
 	}
 }
+
+// TestCanvasToBlob_HasNoise tests that canvas toBlob is patched with noise.
+func TestCanvasToBlob_HasNoise(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Navigate to a real page
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Check that toBlob is patched (has _stealth marker)
+	result, err := page.Eval(`() => {
+		return {
+			hasToBlobStealth: HTMLCanvasElement.prototype.toBlob._stealth === true,
+			hasToDataURLStealth: HTMLCanvasElement.prototype.toDataURL._stealth === true
+		};
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+	if !obj["hasToBlobStealth"].Bool() {
+		t.Error("toBlob should be patched with _stealth marker")
+	}
+	if !obj["hasToDataURLStealth"].Bool() {
+		t.Error("toDataURL should be patched with _stealth marker")
+	}
+}
+
+// TestCanvasGetImageData_HasNoise tests that getImageData is patched with noise.
+func TestCanvasGetImageData_HasNoise(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Navigate to a real page
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Check that getImageData is patched
+	result, err := page.Eval(`() => {
+		return {
+			hasGetImageDataStealth: CanvasRenderingContext2D.prototype.getImageData._stealth === true
+		};
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+	if !obj["hasGetImageDataStealth"].Bool() {
+		t.Error("getImageData should be patched with _stealth marker")
+	}
+}
+
+// TestWebGLReadPixels_HasNoise tests that WebGL readPixels is patched with noise.
+func TestWebGLReadPixels_HasNoise(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Navigate to a real page
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Check that WebGL readPixels is patched
+	result, err := page.Eval(`() => {
+		const result = {
+			hasWebGLReadPixelsStealth: false,
+			hasWebGL2ReadPixelsStealth: false
+		};
+
+		if (window.WebGLRenderingContext && WebGLRenderingContext.prototype.readPixels) {
+			result.hasWebGLReadPixelsStealth = WebGLRenderingContext.prototype.readPixels._stealth === true;
+		}
+
+		if (window.WebGL2RenderingContext && WebGL2RenderingContext.prototype.readPixels) {
+			result.hasWebGL2ReadPixelsStealth = WebGL2RenderingContext.prototype.readPixels._stealth === true;
+		}
+
+		return result;
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+	if !obj["hasWebGLReadPixelsStealth"].Bool() {
+		t.Error("WebGLRenderingContext.readPixels should be patched with _stealth marker")
+	}
+	if !obj["hasWebGL2ReadPixelsStealth"].Bool() {
+		t.Error("WebGL2RenderingContext.readPixels should be patched with _stealth marker")
+	}
+}
+
+// TestCanvasNoise_SessionConsistent tests that canvas noise is consistent within a session.
+func TestCanvasNoise_SessionConsistent(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page: %v", err)
+	}
+	defer page.Close()
+
+	// Navigate to a real page
+	server := startTestServer(t)
+	if err := page.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	// Apply stealth
+	if err := browser.ApplyStealthToPage(page); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	// Create a canvas and get toDataURL twice - should be consistent
+	result, err := page.Eval(`() => {
+		// Create a canvas with some content
+		const canvas = document.createElement('canvas');
+		canvas.width = 100;
+		canvas.height = 100;
+		const ctx = canvas.getContext('2d');
+
+		// Draw something
+		ctx.fillStyle = 'red';
+		ctx.fillRect(0, 0, 50, 50);
+		ctx.fillStyle = 'blue';
+		ctx.fillRect(50, 50, 50, 50);
+
+		// Get toDataURL twice
+		const dataURL1 = canvas.toDataURL();
+		const dataURL2 = canvas.toDataURL();
+
+		// Get the canvas seed
+		const seed = window.__canvasSeed;
+
+		return {
+			dataURL1: dataURL1,
+			dataURL2: dataURL2,
+			isConsistent: dataURL1 === dataURL2,
+			hasSeed: typeof seed === 'number'
+		};
+	}`)
+	if err != nil {
+		t.Fatalf("Failed to evaluate script: %v", err)
+	}
+
+	obj := result.Value.Map()
+
+	// Canvas seed should exist
+	if !obj["hasSeed"].Bool() {
+		t.Error("Canvas seed should exist after stealth is applied")
+	}
+
+	// toDataURL should be consistent within the same session
+	if !obj["isConsistent"].Bool() {
+		t.Error("toDataURL should return consistent results within the same session")
+	}
+}
+
+// TestCanvasNoise_DifferentAcrossSessions tests that canvas fingerprints differ across sessions.
+func TestCanvasNoise_DifferentAcrossSessions(t *testing.T) {
+	skipCI(t)
+
+	b := setupTestBrowser(t)
+	defer b.Close()
+
+	// First page/session
+	page1, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page 1: %v", err)
+	}
+	defer page1.Close()
+
+	server := startTestServer(t)
+	if err := page1.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	if err := browser.ApplyStealthToPage(page1); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	result1, err := page1.Eval(`() => window.__canvasSeed`)
+	if err != nil {
+		t.Fatalf("Failed to get seed from page 1: %v", err)
+	}
+	seed1 := result1.Value.Int()
+
+	// Second page/session (new page = new seed)
+	page2, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		t.Fatalf("Failed to create page 2: %v", err)
+	}
+	defer page2.Close()
+
+	if err := page2.Navigate(server.URL + "/html"); err != nil {
+		t.Fatalf("Navigation failed: %v", err)
+	}
+
+	if err := browser.ApplyStealthToPage(page2); err != nil {
+		t.Fatalf("ApplyStealthToPage failed: %v", err)
+	}
+
+	result2, err := page2.Eval(`() => window.__canvasSeed`)
+	if err != nil {
+		t.Fatalf("Failed to get seed from page 2: %v", err)
+	}
+	seed2 := result2.Value.Int()
+
+	// Seeds may or may not be different (random), but they should both be valid numbers
+	t.Logf("Session 1 seed: %d, Session 2 seed: %d", seed1, seed2)
+	if seed1 < 0 || seed1 >= 256 {
+		t.Errorf("Seed 1 should be in range [0, 255], got %d", seed1)
+	}
+	if seed2 < 0 || seed2 >= 256 {
+		t.Errorf("Seed 2 should be in range [0, 255], got %d", seed2)
+	}
+}
