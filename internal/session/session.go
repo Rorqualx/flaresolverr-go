@@ -355,21 +355,36 @@ func (m *Manager) cleanupExpired() {
 // Close shuts down the session manager and cleans up all sessions.
 // Returns all session browsers to the pool.
 // Uses errgroup for parallel session cleanup to speed up shutdown.
+//
+// Fix HIGH: Properly handles concurrent close calls and waits for references.
 func (m *Manager) Close() error {
-	close(m.stopCh)
-
-	// Wait for cleanup goroutine to finish
-	m.wg.Wait()
-
-	// Collect sessions under lock
+	// Fix HIGH: Use sync.Once pattern to prevent double-close panic
+	// We acquire the lock and check if already closing to provide idempotent close
 	m.mu.Lock()
+	select {
+	case <-m.stopCh:
+		// Already closed or closing
+		m.mu.Unlock()
+		return nil
+	default:
+		// Not yet closed, proceed with close
+		close(m.stopCh)
+	}
+
+	// Collect sessions and mark them as closing while holding lock
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, session := range m.sessions {
+		// Fix HIGH: Mark session as closing BEFORE removing from map
+		// This prevents new AcquirePage calls from succeeding
+		session.closing.Store(true)
 		sessions = append(sessions, session)
 	}
 	// Fix 3.8: Use empty map instead of nil to avoid nil pointer panics on concurrent access
 	m.sessions = make(map[string]*Session)
 	m.mu.Unlock()
+
+	// Wait for cleanup goroutine to finish
+	m.wg.Wait()
 
 	if len(sessions) == 0 {
 		log.Info().Msg("Session manager closed")
@@ -383,6 +398,15 @@ func (m *Manager) Close() error {
 	for _, session := range sessions {
 		sess := session // Capture for closure
 		eg.Go(func() error {
+			// Fix HIGH: Wait for references to drain before closing page
+			// Use a shorter timeout for shutdown since we want to complete quickly
+			if !sess.waitForReferences(2 * time.Second) {
+				log.Warn().
+					Str("session_id", sess.ID).
+					Int32("ref_count", sess.refCount.Load()).
+					Msg("Close: references still held, proceeding with cleanup anyway")
+			}
+
 			// Safely extract and clear page reference under lock to prevent races
 			sess.mu.Lock()
 			page := sess.Page
