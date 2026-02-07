@@ -59,6 +59,15 @@ const stealthScript = `
     }
     window.__stealthApplied = true;
 
+    // Check if we're on about:blank - skip non-essential patches
+    // about:blank pages don't have full API support for canvas, audio, etc.
+    let isAboutBlank = false;
+    try {
+        isAboutBlank = window.location && window.location.href === 'about:blank';
+    } catch (e) {
+        // location access failed, assume not about:blank
+    }
+
     // Wrap everything in try-catch to prevent any single failure from breaking the script
     try {
 
@@ -206,7 +215,8 @@ const stealthScript = `
     // ========================================
     // Mock common permissions to avoid detection
     // Real browsers have specific default states for various permissions
-    if (window.navigator && window.navigator.permissions && window.navigator.permissions.query) {
+    // Skip on about:blank as permissions API may not be available
+    if (!isAboutBlank && window.navigator && window.navigator.permissions && typeof window.navigator.permissions.query === 'function') {
         const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
         const permissionDefaults = {
             'notifications': 'default',
@@ -324,10 +334,8 @@ const stealthScript = `
     // ========================================
     // Spoof WebGL to avoid detection of VM/headless
     // Using simple function wrapper instead of Proxy for better compatibility
-    // TODO: Fix non-fatal error "Cannot read properties of undefined (reading 'apply')"
-    // This occurs on some pages where WebGL context is not fully initialized.
-    // The error is caught and doesn't break functionality, but should be investigated.
-    try {
+    // Skip on about:blank as WebGL may not be available
+    if (!isAboutBlank) try {
         const UNMASKED_VENDOR_WEBGL = 37445;
         const UNMASKED_RENDERER_WEBGL = 37446;
 
@@ -355,8 +363,13 @@ const stealthScript = `
                         if (param === UNMASKED_RENDERER_WEBGL) {
                             return 'Intel Iris OpenGL Engine';
                         }
-                        // Use Function.prototype.call directly to avoid issues
-                        return Function.prototype.call.call(origFn, this, param);
+                        // Verify origFn is still valid before calling
+                        // This prevents "Cannot read properties of undefined" errors
+                        // when the page modifies Function.prototype
+                        if (typeof origFn === 'function') {
+                            return origFn.call(this, param);
+                        }
+                        return null;
                     } catch (e) {
                         return null;
                     }
@@ -385,33 +398,138 @@ const stealthScript = `
     // ========================================
     // 12. Canvas fingerprinting protection
     // ========================================
-    // Add subtle noise to canvas toDataURL/toBlob to prevent fingerprinting
-    // while maintaining visual consistency for the same session
-    try {
-        // Skip if already patched
-        if (!HTMLCanvasElement.prototype.toDataURL._stealth) {
-            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    // Add subtle noise to canvas APIs to prevent fingerprinting
+    // while maintaining visual consistency for the same session.
+    // Patches: toDataURL, toBlob, getImageData, WebGL readPixels
+    // Skip on about:blank as canvas APIs may not be fully initialized
+    if (!isAboutBlank) try {
+        // Generate session-consistent seed if not already set
+        if (!window.__canvasSeed) {
+            window.__canvasSeed = Math.floor(Math.random() * 256);
+        }
+        const canvasSeed = window.__canvasSeed;
+
+        // Helper function to apply consistent noise to pixel data
+        // Uses seed to generate deterministic noise based on position
+        const applyNoiseToImageData = function(data, width, height, seed) {
+            // Apply noise to a subset of pixels (every 7th pixel to minimize visual impact)
+            const step = 7;
+            for (let i = 0; i < data.length; i += 4 * step) {
+                // Generate position-based noise using seed
+                const pixelIndex = i / 4;
+                const noise = ((pixelIndex * 31 + seed) % 5) - 2; // Range: -2 to +2
+
+                // Apply noise to RGB channels (not alpha)
+                data[i] = Math.max(0, Math.min(255, data[i] + noise));         // R
+                data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + noise)); // G
+                data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + noise)); // B
+            }
+        };
+
+        // 12a. Patch toDataURL
+        const canvasToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        if (typeof canvasToDataURL === 'function' && !canvasToDataURL._stealth) {
+            const originalToDataURL = canvasToDataURL;
             HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
-                // Apply subtle, consistent modification to canvas before export
                 try {
                     const ctx = this.getContext('2d');
-                    if (ctx) {
-                        // Add a nearly invisible pixel modification
-                        const imageData = ctx.getImageData(0, 0, 1, 1);
-                        // Modify based on session-consistent seed
-                        if (!window.__canvasSeed) {
-                            window.__canvasSeed = Math.floor(Math.random() * 256);
-                        }
-                        imageData.data[0] = (imageData.data[0] + window.__canvasSeed) % 256;
+                    if (ctx && this.width > 0 && this.height > 0) {
+                        // Apply noise to multiple pixels
+                        const width = Math.min(this.width, 16);
+                        const height = Math.min(this.height, 16);
+                        const imageData = ctx.getImageData(0, 0, width, height);
+                        applyNoiseToImageData(imageData.data, width, height, canvasSeed);
                         ctx.putImageData(imageData, 0, 0);
                     }
                 } catch (e) {
-                    // Ignore canvas access errors
+                    // Ignore canvas access errors (e.g., cross-origin tainted canvas)
                 }
                 return originalToDataURL.call(this, type, quality);
             };
             HTMLCanvasElement.prototype.toDataURL._stealth = true;
         }
+
+        // 12b. Patch toBlob
+        const canvasToBlob = HTMLCanvasElement.prototype.toBlob;
+        if (typeof canvasToBlob === 'function' && !canvasToBlob._stealth) {
+            const originalToBlob = canvasToBlob;
+            HTMLCanvasElement.prototype.toBlob = function(callback, type, quality) {
+                try {
+                    const ctx = this.getContext('2d');
+                    if (ctx && this.width > 0 && this.height > 0) {
+                        // Apply noise to multiple pixels
+                        const width = Math.min(this.width, 16);
+                        const height = Math.min(this.height, 16);
+                        const imageData = ctx.getImageData(0, 0, width, height);
+                        applyNoiseToImageData(imageData.data, width, height, canvasSeed);
+                        ctx.putImageData(imageData, 0, 0);
+                    }
+                } catch (e) {
+                    // Ignore canvas access errors
+                }
+                return originalToBlob.call(this, callback, type, quality);
+            };
+            HTMLCanvasElement.prototype.toBlob._stealth = true;
+        }
+
+        // 12c. Patch getImageData on CanvasRenderingContext2D
+        const ctxGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+        if (typeof ctxGetImageData === 'function' && !ctxGetImageData._stealth) {
+            const originalGetImageData = ctxGetImageData;
+            CanvasRenderingContext2D.prototype.getImageData = function(sx, sy, sw, sh, settings) {
+                const imageData = originalGetImageData.call(this, sx, sy, sw, sh, settings);
+                try {
+                    // Apply noise to returned data
+                    applyNoiseToImageData(imageData.data, sw, sh, canvasSeed);
+                } catch (e) {
+                    // Ignore errors
+                }
+                return imageData;
+            };
+            CanvasRenderingContext2D.prototype.getImageData._stealth = true;
+        }
+
+        // 12d. Patch WebGL readPixels for both WebGL1 and WebGL2
+        const webglContexts = ['WebGLRenderingContext', 'WebGL2RenderingContext'];
+        webglContexts.forEach(function(ctxName) {
+            try {
+                const ctx = window[ctxName];
+                if (!ctx || !ctx.prototype || !ctx.prototype.readPixels) return;
+                if (ctx.prototype.readPixels._stealth) return;
+
+                const originalReadPixels = ctx.prototype.readPixels;
+                ctx.prototype.readPixels = function(x, y, width, height, format, type, pixels, dstOffset) {
+                    // Call original first
+                    if (arguments.length === 8) {
+                        originalReadPixels.call(this, x, y, width, height, format, type, pixels, dstOffset);
+                    } else {
+                        originalReadPixels.call(this, x, y, width, height, format, type, pixels);
+                    }
+
+                    // Apply noise to the pixels array if it's a typed array
+                    try {
+                        if (pixels && pixels.length && typeof pixels[0] === 'number') {
+                            const step = 7;
+                            for (let i = 0; i < pixels.length; i += 4 * step) {
+                                const pixelIndex = i / 4;
+                                const noise = ((pixelIndex * 31 + canvasSeed) % 5) - 2;
+
+                                // Apply noise to RGB (not alpha)
+                                pixels[i] = Math.max(0, Math.min(255, pixels[i] + noise));
+                                if (i + 1 < pixels.length) pixels[i + 1] = Math.max(0, Math.min(255, pixels[i + 1] + noise));
+                                if (i + 2 < pixels.length) pixels[i + 2] = Math.max(0, Math.min(255, pixels[i + 2] + noise));
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore errors
+                    }
+                };
+                ctx.prototype.readPixels._stealth = true;
+            } catch (e) {
+                // Skip this context
+            }
+        });
+
     } catch (e) {
         // Canvas patching failed, continue
     }
@@ -420,25 +538,32 @@ const stealthScript = `
     // 13. AudioContext fingerprinting protection
     // ========================================
     // Override AudioContext to add noise to audio fingerprinting
-    try {
+    // Skip on about:blank as AudioContext may not be fully initialized
+    if (!isAboutBlank) try {
         if (window.AudioContext && !window.AudioContext._stealth) {
             const OriginalAudioContext = window.AudioContext;
             window.AudioContext = function(...args) {
                 const ctx = new OriginalAudioContext(...args);
                 // Override createAnalyser to add subtle timing variations
-                const originalCreateAnalyser = ctx.createAnalyser.bind(ctx);
-                ctx.createAnalyser = function() {
-                    const analyser = originalCreateAnalyser();
-                    const originalGetFloatFrequencyData = analyser.getFloatFrequencyData.bind(analyser);
-                    analyser.getFloatFrequencyData = function(array) {
-                        originalGetFloatFrequencyData(array);
-                        // Add tiny random noise
-                        for (let i = 0; i < array.length; i++) {
-                            array[i] += (Math.random() - 0.5) * 0.0001;
+                // Only patch if createAnalyser exists (may not on about:blank)
+                if (ctx && typeof ctx.createAnalyser === 'function') {
+                    const originalCreateAnalyser = ctx.createAnalyser.bind(ctx);
+                    ctx.createAnalyser = function() {
+                        const analyser = originalCreateAnalyser();
+                        // Only patch if analyser has getFloatFrequencyData
+                        if (analyser && typeof analyser.getFloatFrequencyData === 'function') {
+                            const originalGetFloatFrequencyData = analyser.getFloatFrequencyData.bind(analyser);
+                            analyser.getFloatFrequencyData = function(array) {
+                                originalGetFloatFrequencyData(array);
+                                // Add tiny random noise
+                                for (let i = 0; i < array.length; i++) {
+                                    array[i] += (Math.random() - 0.5) * 0.0001;
+                                }
+                            };
                         }
+                        return analyser;
                     };
-                    return analyser;
-                };
+                }
                 return ctx;
             };
             window.AudioContext._stealth = true;
@@ -454,7 +579,8 @@ const stealthScript = `
     // ========================================
     // Mock navigator.getBattery() to return consistent values
     // Some fingerprinting scripts use battery level to track users
-    try {
+    // Skip on about:blank as Battery API may not be available
+    if (!isAboutBlank) try {
         if (navigator.getBattery && !navigator.getBattery._stealth) {
             // Generate session-consistent battery level (0.87-0.97)
             if (!window.__batteryLevel) {
@@ -497,8 +623,10 @@ const stealthScript = `
     // ========================================
     // Override speechSynthesis.getVoices() to return consistent Google voices
     // Fingerprinting can use voice list as an entropy source
-    try {
-        if (window.speechSynthesis && !window.speechSynthesis.getVoices._stealth) {
+    // Skip on about:blank as Speech Synthesis may not be available
+    if (!isAboutBlank) try {
+        // Check that speechSynthesis and getVoices exist before accessing _stealth
+        if (window.speechSynthesis && typeof window.speechSynthesis.getVoices === 'function' && !window.speechSynthesis.getVoices._stealth) {
             const mockVoices = [
                 { voiceURI: 'Google US English', name: 'Google US English', lang: 'en-US', localService: false, default: true },
                 { voiceURI: 'Google UK English Female', name: 'Google UK English Female', lang: 'en-GB', localService: false, default: false },
@@ -541,8 +669,10 @@ const stealthScript = `
     // ========================================
     // Limit document.fonts API to prevent font-based fingerprinting
     // Real browsers have many fonts; headless often has few - we normalize
-    try {
-        if (document.fonts && !document.fonts._stealthPatched) {
+    // Skip on about:blank as document.fonts may not be available
+    if (!isAboutBlank) try {
+        // Check that document.fonts exists and has forEach method
+        if (document.fonts && typeof document.fonts.forEach === 'function' && !document.fonts._stealthPatched) {
             const maxFonts = 50;
             const maxIterationFonts = 10;
 
@@ -584,7 +714,8 @@ const stealthScript = `
     // ========================================
     // Override timezone APIs for consistent fingerprinting defense
     // Uses America/New_York as default, can be overridden via window.__stealthTimezone
-    try {
+    // Skip on about:blank as Intl may not be fully initialized
+    if (!isAboutBlank) try {
         // Session timezone - default to America/New_York (offset 300 minutes = 5 hours)
         // Can be set via window.__stealthTimezone before stealth script runs
         const defaultTimezone = 'America/New_York';
@@ -594,8 +725,7 @@ const stealthScript = `
         const stealthOffset = window.__stealthTimezoneOffset !== undefined ? window.__stealthTimezoneOffset : defaultOffset;
 
         // Override getTimezoneOffset
-        if (!Date.prototype.getTimezoneOffset._stealth) {
-            const originalGetTimezoneOffset = Date.prototype.getTimezoneOffset;
+        if (typeof Date.prototype.getTimezoneOffset === 'function' && !Date.prototype.getTimezoneOffset._stealth) {
             Date.prototype.getTimezoneOffset = function() {
                 return stealthOffset;
             };
@@ -621,14 +751,17 @@ const stealthScript = `
 
             // Override resolvedOptions to return our timezone
             const originalResolvedOptions = OriginalDateTimeFormat.prototype.resolvedOptions;
-            OriginalDateTimeFormat.prototype.resolvedOptions = function() {
-                const resolved = originalResolvedOptions.call(this);
-                // If no explicit timezone was set, return our default
-                if (resolved.timeZone === undefined || resolved.timeZone === 'UTC') {
-                    resolved.timeZone = stealthTimezone;
-                }
-                return resolved;
-            };
+            // Only patch if resolvedOptions exists and is a function
+            if (typeof originalResolvedOptions === 'function') {
+                OriginalDateTimeFormat.prototype.resolvedOptions = function() {
+                    const resolved = originalResolvedOptions.call(this);
+                    // If no explicit timezone was set, return our default
+                    if (resolved && (resolved.timeZone === undefined || resolved.timeZone === 'UTC')) {
+                        resolved.timeZone = stealthTimezone;
+                    }
+                    return resolved;
+                };
+            }
 
             window.Intl.DateTimeFormat._stealth = true;
         }
