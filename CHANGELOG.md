@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Human-like behavior patterns** - New `internal/humanize` package with randomized timing, natural mouse movements using Bezier curves, and realistic scroll behavior. Makes automated actions appear more human-like to avoid detection.
 - **External CAPTCHA solver fallback** - Integration with 2Captcha and CapSolver APIs for Turnstile challenges that native solving cannot handle. Configurable via `CAPTCHA_FALLBACK_ENABLED`, `TWOCAPTCHA_API_KEY`, and `CAPSOLVER_API_KEY` environment variables.
 - **Hot-reload selectors** - New `internal/selectors` manager supports loading selectors from external YAML files with file watching for automatic reload. Configure via `SELECTORS_PATH` and `SELECTORS_HOT_RELOAD` environment variables.
+- **Remote selector fetch** - Selectors can now be fetched from a remote HTTP(S) URL with periodic refresh for centralized management. Configure via `SELECTORS_REMOTE_URL` and `SELECTORS_REMOTE_REFRESH` environment variables.
 - **Advanced anti-fingerprinting** - Extended stealth script with Battery API mock, Speech Synthesis voice list spoofing, Font enumeration limiting, and Timezone/Intl API consistency.
+- **Enhanced canvas fingerprinting protection** - Canvas toBlob, getImageData, and WebGL readPixels now include session-consistent noise injection to prevent fingerprinting while maintaining visual consistency.
 - **Turnstile method tracking** - Per-domain statistics track which solving methods (wait, shadow, keyboard, widget, iframe, positional) work best. The solver adapts by prioritizing historically successful methods.
 - **Invisible Turnstile detection** - Solver now checks for `cf_clearance` cookie presence to detect solved invisible Turnstile challenges even when widget remains visible.
 - **Randomized poll intervals** - Solver uses 0.8-1.5s random intervals instead of fixed 1s for more human-like timing patterns.
@@ -19,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Solver architecture** - New `SolverConfig` struct for full configuration injection. `StatsManager` interface enables per-domain learning.
 - **Handler initialization** - `NewWithSelectors` constructor supports custom SelectorsManager injection.
+- **Stealth script optimization** - Script now detects about:blank pages and skips non-essential patches (canvas, audio, WebGL) that may fail on blank pages.
+- **WebGL getParameter safety** - Added function validity check before calling original getParameter to prevent "Cannot read properties of undefined" errors.
 
 ### New Environment Variables
 
@@ -32,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `CAPTCHA_SOLVER_TIMEOUT` | `120s` | Timeout for external solver API |
 | `SELECTORS_PATH` | (none) | Path to external selectors.yaml override |
 | `SELECTORS_HOT_RELOAD` | `false` | Enable file watching for selector hot-reload |
+| `SELECTORS_REMOTE_URL` | (none) | HTTP(S) URL to fetch selectors from |
+| `SELECTORS_REMOTE_REFRESH` | `1h` | Refresh interval for remote selectors (5m-24h) |
+
+### Documentation
+- **Python strategies comparison** - Updated PYTHON_STRATEGIES.md to reflect complete implementation status for stealth (17 patches), proxy support, and new Go advantages.
+- **Contributing guide** - Added new packages (humanize, captcha, selectors, stats, security) to CONTRIBUTING.md.
 
 ## [0.5.0] - 2025-02-06
 

@@ -380,14 +380,18 @@ environment:
 
 ### Selectors Settings
 
-Hot-reload capable selectors for adapting to Cloudflare changes without restarts.
+Hot-reload capable selectors for adapting to Cloudflare changes without restarts. Supports local files and remote URLs.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SELECTORS_PATH` | (none) | Path to external selectors.yaml override file |
 | `SELECTORS_HOT_RELOAD` | `false` | Enable file watching for automatic reload |
+| `SELECTORS_REMOTE_URL` | (none) | HTTP(S) URL to fetch selectors from |
+| `SELECTORS_REMOTE_REFRESH` | `1h` | Refresh interval for remote selectors (5m-24h) |
 
 When `SELECTORS_HOT_RELOAD` is enabled, changes to the selectors file are automatically detected and applied without restarting the service.
+
+When `SELECTORS_REMOTE_URL` is configured, selectors are fetched periodically from the remote URL. File selectors take priority over remote selectors if both are configured.
 
 ### Logging & Monitoring
 
