@@ -4,39 +4,41 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // timeoutWriter wraps http.ResponseWriter to prevent writes after timeout.
 // Once timedOut is set, all writes are discarded to prevent panics and races.
+//
+// Fix HIGH: Uses atomic.Bool for timedOut to enable lock-free fast path checks
+// while maintaining proper synchronization for all write operations.
 type timeoutWriter struct {
 	http.ResponseWriter
 	mu          sync.Mutex
-	timedOut    bool
+	timedOut    atomic.Bool // Fix HIGH: Use atomic for lock-free reads
 	wroteHeader bool
 }
 
 // Write implements http.ResponseWriter. Discards writes after timeout.
-// Fix #8: Uses atomic check before lock for fast path to reduce lock contention during I/O.
+// Fix HIGH: Properly synchronized - holds lock during actual write to prevent
+// race with timeout goroutine writing to the same ResponseWriter.
 func (tw *timeoutWriter) Write(b []byte) (int, error) {
-	// Fix #8: Fast path check without lock - if already timed out, skip locking entirely
-	if tw.timedOut {
+	// Fast path: atomic check without lock
+	if tw.timedOut.Load() {
 		return len(b), nil
 	}
 
 	tw.mu.Lock()
+	defer tw.mu.Unlock()
+
 	// Double-check under lock (timedOut may have changed)
-	if tw.timedOut {
-		tw.mu.Unlock()
+	if tw.timedOut.Load() {
 		return len(b), nil
 	}
-	tw.mu.Unlock()
 
-	// Perform I/O outside lock to prevent holding lock during slow operations
-	// This is safe because:
-	// 1. timedOut is checked atomically before and after
-	// 2. Only one goroutine (the handler) calls Write
-	// 3. The timeout goroutine only sets timedOut=true, never writes
+	// Perform I/O while holding lock to prevent race with timeout response
+	// This ensures only one goroutine writes to ResponseWriter at a time
 	return tw.ResponseWriter.Write(b)
 }
 
@@ -45,7 +47,7 @@ func (tw *timeoutWriter) WriteHeader(code int) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	if tw.timedOut || tw.wroteHeader {
+	if tw.timedOut.Load() || tw.wroteHeader {
 		return
 	}
 	tw.wroteHeader = true
@@ -62,7 +64,7 @@ func (tw *timeoutWriter) Header() http.Header {
 	defer tw.mu.Unlock()
 
 	// If timed out, return empty headers (writes will be discarded anyway)
-	if tw.timedOut {
+	if tw.timedOut.Load() {
 		return make(http.Header)
 	}
 
@@ -72,10 +74,11 @@ func (tw *timeoutWriter) Header() http.Header {
 }
 
 // markTimedOut marks the writer as timed out, preventing further writes.
+// Fix HIGH: Uses atomic store for lock-free reads in fast path.
 func (tw *timeoutWriter) markTimedOut() {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
-	tw.timedOut = true
+	tw.timedOut.Store(true)
 }
 
 // Flush implements http.Flusher interface for streaming responses.
@@ -84,7 +87,7 @@ func (tw *timeoutWriter) Flush() {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	if tw.timedOut {
+	if tw.timedOut.Load() {
 		return
 	}
 
@@ -140,14 +143,26 @@ func Timeout(timeout time.Duration) func(http.Handler) http.Handler {
 
 			select {
 			case <-done:
-				// Request completed normally - nothing more to do
-			case <-ctx.Done():
-				// Timeout occurred - mark writer to discard future writes
-				tw.markTimedOut()
-
-				// Only write timeout response if handler hasn't started writing
+				// Request completed - check if it was due to timeout
+				// If handler exited without writing a response and context timed out,
+				// we should still send a 504 response
 				if ctx.Err() == context.DeadlineExceeded && !tw.hasWrittenHeader() {
-					writeErrorResponse(w, http.StatusGatewayTimeout, "Request timeout", startTime)
+					// Write response first, then mark timed out to discard future writes
+					writeErrorResponse(tw, http.StatusGatewayTimeout, "Request timeout", startTime)
+					tw.markTimedOut()
+				}
+			case <-ctx.Done():
+				// Timeout occurred - only write timeout response if handler hasn't started writing
+				// Fix HIGH: Use tw (wrapped writer) instead of w (raw writer) to
+				// ensure writes go through the synchronized wrapper and prevent
+				// race with any late handler writes
+				if ctx.Err() == context.DeadlineExceeded && !tw.hasWrittenHeader() {
+					// Write response first, then mark timed out to discard future writes
+					writeErrorResponse(tw, http.StatusGatewayTimeout, "Request timeout", startTime)
+					tw.markTimedOut()
+				} else {
+					// Just mark timed out to discard any future handler writes
+					tw.markTimedOut()
 				}
 			}
 		})
