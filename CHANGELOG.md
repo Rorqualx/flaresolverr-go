@@ -5,6 +5,34 @@ All notable changes to FlareSolverr Go Edition will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Human-like behavior patterns** - New `internal/humanize` package with randomized timing, natural mouse movements using Bezier curves, and realistic scroll behavior. Makes automated actions appear more human-like to avoid detection.
+- **External CAPTCHA solver fallback** - Integration with 2Captcha and CapSolver APIs for Turnstile challenges that native solving cannot handle. Configurable via `CAPTCHA_FALLBACK_ENABLED`, `TWOCAPTCHA_API_KEY`, and `CAPSOLVER_API_KEY` environment variables.
+- **Hot-reload selectors** - New `internal/selectors` manager supports loading selectors from external YAML files with file watching for automatic reload. Configure via `SELECTORS_PATH` and `SELECTORS_HOT_RELOAD` environment variables.
+- **Advanced anti-fingerprinting** - Extended stealth script with Battery API mock, Speech Synthesis voice list spoofing, Font enumeration limiting, and Timezone/Intl API consistency.
+- **Turnstile method tracking** - Per-domain statistics track which solving methods (wait, shadow, keyboard, widget, iframe, positional) work best. The solver adapts by prioritizing historically successful methods.
+- **Invisible Turnstile detection** - Solver now checks for `cf_clearance` cookie presence to detect solved invisible Turnstile challenges even when widget remains visible.
+- **Randomized poll intervals** - Solver uses 0.8-1.5s random intervals instead of fixed 1s for more human-like timing patterns.
+
+### Changed
+- **Solver architecture** - New `SolverConfig` struct for full configuration injection. `StatsManager` interface enables per-domain learning.
+- **Handler initialization** - `NewWithSelectors` constructor supports custom SelectorsManager injection.
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CAPTCHA_NATIVE_ATTEMPTS` | `3` | Native solve attempts before external fallback |
+| `CAPTCHA_FALLBACK_ENABLED` | `false` | Enable external CAPTCHA solver fallback |
+| `TWOCAPTCHA_API_KEY` | (none) | 2Captcha API key |
+| `CAPSOLVER_API_KEY` | (none) | CapSolver API key |
+| `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha` or `capsolver` |
+| `CAPTCHA_SOLVER_TIMEOUT` | `120s` | Timeout for external solver API |
+| `SELECTORS_PATH` | (none) | Path to external selectors.yaml override |
+| `SELECTORS_HOT_RELOAD` | `false` | Enable file watching for selector hot-reload |
+
 ## [0.5.0] - 2025-02-06
 
 ### Added

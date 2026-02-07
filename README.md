@@ -352,6 +352,43 @@ environment:
   - API_KEY=your-secret-key-at-least-16-chars
 ```
 
+### CAPTCHA Solver Settings
+
+External CAPTCHA solver fallback for challenging Turnstile CAPTCHAs that native solving cannot handle.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CAPTCHA_NATIVE_ATTEMPTS` | `3` | Native solve attempts before external fallback (1-10) |
+| `CAPTCHA_FALLBACK_ENABLED` | `false` | Enable external CAPTCHA solver fallback |
+| `TWOCAPTCHA_API_KEY` | (none) | 2Captcha API key for Turnstile solving |
+| `CAPSOLVER_API_KEY` | (none) | CapSolver API key for Turnstile solving |
+| `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha` or `capsolver` |
+| `CAPTCHA_SOLVER_TIMEOUT` | `120s` | Timeout for external solver API (30s-300s) |
+
+**How it works:**
+1. FlareSolverr attempts native Turnstile solving first (click methods, keyboard, etc.)
+2. If native solving fails after `CAPTCHA_NATIVE_ATTEMPTS`, it falls back to the external solver
+3. External solver extracts the sitekey, submits to 2Captcha/CapSolver, and injects the token
+
+**Example configuration:**
+```yaml
+environment:
+  - CAPTCHA_FALLBACK_ENABLED=true
+  - TWOCAPTCHA_API_KEY=your-2captcha-api-key
+  - CAPTCHA_NATIVE_ATTEMPTS=2
+```
+
+### Selectors Settings
+
+Hot-reload capable selectors for adapting to Cloudflare changes without restarts.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SELECTORS_PATH` | (none) | Path to external selectors.yaml override file |
+| `SELECTORS_HOT_RELOAD` | `false` | Enable file watching for automatic reload |
+
+When `SELECTORS_HOT_RELOAD` is enabled, changes to the selectors file are automatically detected and applied without restarting the service.
+
 ### Logging & Monitoring
 
 | Variable | Default | Description |
