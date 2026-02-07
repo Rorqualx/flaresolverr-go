@@ -36,6 +36,14 @@ var (
 
 	// Context errors
 	ErrContextCanceled = errors.New("operation canceled")
+
+	// CAPTCHA solver errors
+	ErrCaptchaSolverTimeout   = errors.New("captcha solver timed out")
+	ErrCaptchaSolverRejected  = errors.New("captcha task was rejected")
+	ErrCaptchaSolverBalance   = errors.New("insufficient solver balance")
+	ErrCaptchaSitekeyNotFound = errors.New("turnstile sitekey not found")
+	ErrCaptchaTokenInjection  = errors.New("failed to inject captcha token")
+	ErrCaptchaNoProviders     = errors.New("no captcha solver providers configured")
 )
 
 // ChallengeError provides detailed information about challenge failures.
@@ -110,5 +118,56 @@ func NewPoolAcquireError(reason string, err error) *PoolError {
 		Operation: "acquire",
 		Message:   "Failed to acquire browser from pool: " + reason,
 		Err:       err,
+	}
+}
+
+// CaptchaError provides detailed information about CAPTCHA solving failures.
+// It implements the error interface and supports error unwrapping.
+type CaptchaError struct {
+	Provider string // Provider name: "2captcha", "capsolver"
+	TaskID   string // Task ID from the provider (for debugging)
+	Code     string // Error code from the provider
+	Message  string // Human-readable error message
+	Err      error  // Underlying error (for unwrapping)
+}
+
+// Error implements the error interface.
+func (e *CaptchaError) Error() string {
+	return e.Message
+}
+
+// Unwrap returns the underlying error for errors.Is/As support.
+func (e *CaptchaError) Unwrap() error {
+	return e.Err
+}
+
+// NewCaptchaTimeoutError creates an error for CAPTCHA solve timeout.
+func NewCaptchaTimeoutError(provider, taskID string) *CaptchaError {
+	return &CaptchaError{
+		Provider: provider,
+		TaskID:   taskID,
+		Code:     "timeout",
+		Message:  "CAPTCHA solving timed out waiting for solution from " + provider,
+		Err:      ErrCaptchaSolverTimeout,
+	}
+}
+
+// NewCaptchaRejectedError creates an error when CAPTCHA task is rejected.
+func NewCaptchaRejectedError(provider, code, reason string) *CaptchaError {
+	return &CaptchaError{
+		Provider: provider,
+		Code:     code,
+		Message:  "CAPTCHA task rejected by " + provider + ": " + reason,
+		Err:      ErrCaptchaSolverRejected,
+	}
+}
+
+// NewCaptchaBalanceError creates an error for insufficient balance.
+func NewCaptchaBalanceError(provider string) *CaptchaError {
+	return &CaptchaError{
+		Provider: provider,
+		Code:     "insufficient_balance",
+		Message:  "Insufficient balance in " + provider + " account",
+		Err:      ErrCaptchaSolverBalance,
 	}
 }
