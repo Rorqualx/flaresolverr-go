@@ -190,7 +190,7 @@ func TestUnknownCommand(t *testing.T) {
 	}
 
 	// Command is quoted with %q format for security (prevents log injection)
-	if resp.Message != `Unknown command: "unknown.command"` {
+	if resp.Message != `unknown command: "unknown.command"` {
 		t.Errorf("Unexpected error message: %q", resp.Message)
 	}
 }
