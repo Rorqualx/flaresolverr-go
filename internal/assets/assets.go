@@ -4,9 +4,12 @@
 package assets
 
 import (
+	"bytes"
 	"embed"
+	"html"
 	"html/template"
 	"io/fs"
+	"regexp"
 )
 
 // Templates embeds all HTML templates.
@@ -24,8 +27,57 @@ func ReadTemplate(name string) ([]byte, error) {
 	return fs.ReadFile(Templates, "templates/"+name)
 }
 
-// HealthPage is a pre-compiled health check HTML page.
-var HealthPage = `<!DOCTYPE html>
+// sanitizeVersion removes any potentially dangerous characters from the version string.
+// This prevents XSS via build-time ldflags injection.
+// Only allows alphanumeric characters, dots, dashes, underscores, and plus signs.
+var versionSanitizer = regexp.MustCompile(`[^a-zA-Z0-9.\-_+]`)
+
+// SanitizeVersion sanitizes a version string to prevent XSS attacks.
+// Returns "unknown" if the result is empty after sanitization.
+func SanitizeVersion(version string) string {
+	// First HTML escape, then remove any remaining suspicious characters
+	escaped := html.EscapeString(version)
+	sanitized := versionSanitizer.ReplaceAllString(escaped, "")
+	if sanitized == "" {
+		return "unknown"
+	}
+	// Limit length to prevent DoS via extremely long version strings
+	if len(sanitized) > 100 {
+		sanitized = sanitized[:100]
+	}
+	return sanitized
+}
+
+// HealthPageData contains the data for rendering the health page.
+type HealthPageData struct {
+	Version   string
+	GoVersion string
+	Uptime    string
+	PoolSize  int
+	Sessions  int
+}
+
+// healthPageTemplate is the pre-compiled health page template using html/template
+// for automatic XSS protection.
+var healthPageTemplate = template.Must(template.New("health").Parse(healthPageHTML))
+
+// RenderHealthPage renders the health page with the given data.
+// Uses html/template for automatic XSS escaping of all values.
+func RenderHealthPage(data HealthPageData) (string, error) {
+	// Pre-sanitize version as defense in depth
+	data.Version = SanitizeVersion(data.Version)
+
+	var buf bytes.Buffer
+	if err := healthPageTemplate.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// healthPageHTML is the template source for the health page.
+// SECURITY: This template uses html/template which auto-escapes all values.
+// Additionally, the Version field is pre-sanitized before rendering.
+const healthPageHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -127,6 +179,10 @@ var HealthPage = `<!DOCTYPE html>
     </div>
 </body>
 </html>`
+
+// HealthPage is the raw HTML template for backward compatibility.
+// Deprecated: Use RenderHealthPage() instead for XSS-safe rendering.
+var HealthPage = healthPageHTML
 
 // APIDocumentation provides embedded API documentation.
 var APIDocumentation = `# FlareSolverr API Documentation
