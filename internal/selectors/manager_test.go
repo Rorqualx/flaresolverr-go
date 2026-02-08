@@ -50,7 +50,7 @@ turnstile:
 javascript:
   - "custom challenge"
 `
-	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestManager_Reload(t *testing.T) {
 access_denied:
   - "initial pattern"
 `
-	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 
@@ -144,7 +144,7 @@ access_denied:
   - "updated pattern"
   - "another pattern"
 `
-	if err := os.WriteFile(tmpFile, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(newContent), 0600); err != nil {
 		t.Fatalf("Failed to update temp file: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestManager_Reload_InvalidYAML(t *testing.T) {
 access_denied:
   - "valid pattern"
 `
-	if err := os.WriteFile(tmpFile, []byte(validContent), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(validContent), 0600); err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 
@@ -197,7 +197,7 @@ access_denied:
   - not valid yaml {{{
     incomplete:
 `
-	if err := os.WriteFile(tmpFile, []byte(invalidContent), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(invalidContent), 0600); err != nil {
 		t.Fatalf("Failed to update temp file: %v", err)
 	}
 
@@ -246,7 +246,7 @@ func TestManager_HotReload(t *testing.T) {
 access_denied:
   - "hot reload test"
 `
-	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 
@@ -267,7 +267,7 @@ access_denied:
 access_denied:
   - "auto reloaded"
 `
-	if err := os.WriteFile(tmpFile, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(newContent), 0600); err != nil {
 		t.Fatalf("Failed to update temp file: %v", err)
 	}
 
@@ -392,7 +392,7 @@ func TestManager_Close(t *testing.T) {
 	tmpFile := filepath.Join(tmpDir, "selectors.yaml")
 
 	content := `access_denied: ["test"]`
-	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 
@@ -606,7 +606,7 @@ func TestManager_RemoteWithFileOverride(t *testing.T) {
 access_denied:
   - "file pattern"
 `
-	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 

@@ -93,6 +93,7 @@ linters-settings:
       - G115  # Integer overflow - safe in our controlled context
       - G302  # Directory permissions - need 0700 for directories
       - G304  # File path from variable - needed for config
+      - G404  # Weak random - math/rand is fine for humanize package (mouse/scroll simulation)
 
   gocritic:
     enabled-tags:
