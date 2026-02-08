@@ -55,8 +55,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Browser state extraction** - API response now includes `localStorage`, `sessionStorage`, and `responseHeaders` fields for debugging sites that use browser storage instead of cookies.
 - **Improved Turnstile solving** - Added `.cf-turnstile` selector detection, widget click with coordinates, and tries all methods (widget, iframe, keyboard) regardless of individual success.
-- **browserVersion in API response** - Exposes Chrome major version to help users select matching tls-client profiles for JA3 fingerprint compatibility.
-- **Per-request proxy support** - Requests can specify a proxy that spawns a dedicated browser instance with WebRTC leak prevention flags.
 - **Security hardening** - Bind to localhost by default, header validation with size limits and security-sensitive header blocking, DNS pinning to detect rebinding attacks.
 - **Shadow DOM traversal** - CDP-native access to closed shadow roots for Turnstile checkbox detection in nested shadow DOM.
 - **Network capture** - Thread-safe HTTP response capture with status codes and headers from main document.
@@ -91,8 +89,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **XSS prevention** - Version string sanitization with `html.EscapeString` and `html/template` for health page to prevent injection via malicious ldflags.
 - **SSRF protection expanded** - Added cloud metadata endpoints for AWS, GCP, Azure, Alibaba, Oracle, IBM, DigitalOcean, Hetzner, Vultr, Linode, Tencent, and Kubernetes API.
 
-### Documentation
+## [0.4.0] - 2025-02-06
+
+### Added
+- **browserVersion in API response** - Exposes Chrome major version to help users select matching tls-client profiles for JA3 fingerprint compatibility.
+- **Per-request proxy support** - Requests can specify a proxy that spawns a dedicated browser instance with WebRTC leak prevention flags.
+
+### Fixed
 - **Docker Hub registry** - Fixed image reference from ghcr.io to rorqualx/flaresolverr-go.
+- **Golangci-lint errors** - Fixed errcheck and gofmt issues.
 
 ## [0.3.0] - 2025-01-17
 
