@@ -1,7 +1,7 @@
 # FlareSolverr-Go Makefile
 # Run 'make help' for available commands
 
-.PHONY: all build run test lint clean docker help
+.PHONY: all build run test test-all test-probe lint clean docker help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -48,23 +48,31 @@ run: build ## Build and run
 # Testing
 #------------------------------------------------------------------------------
 
-test: ## Run all tests
-	@echo "$(GREEN)Running tests...$(NC)"
-	go test -v -race ./...
+test: ## Run unit tests (excludes slow probe tests)
+	@echo "$(GREEN)Running unit tests...$(NC)"
+	go test -v -race $$(go list ./... | grep -v '/tests/probe')
 
-test-short: ## Run tests (skip integration)
+test-short: ## Run tests in short mode (skip browser tests)
 	@echo "$(GREEN)Running short tests...$(NC)"
 	go test -v -short ./...
 
-test-coverage: ## Run tests with coverage
+test-all: ## Run all tests including probe tests (extended timeout)
+	@echo "$(GREEN)Running all tests (this may take 15+ minutes)...$(NC)"
+	go test -v -race -timeout 20m ./...
+
+test-probe: ## Run probe/integration tests only (extended timeout)
+	@echo "$(GREEN)Running probe tests...$(NC)"
+	go test -v -timeout 15m ./tests/probe
+
+test-coverage: ## Run tests with coverage (excludes probe tests)
 	@echo "$(GREEN)Running tests with coverage...$(NC)"
-	go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+	go test -v -race -coverprofile=coverage.out -covermode=atomic $$(go list ./... | grep -v '/tests/probe')
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "$(GREEN)Coverage report: coverage.html$(NC)"
 
 test-integration: ## Run integration tests
 	@echo "$(GREEN)Running integration tests...$(NC)"
-	go test -v -tags=integration ./...
+	go test -v -tags=integration -timeout 15m ./...
 
 bench: ## Run benchmarks
 	@echo "$(GREEN)Running benchmarks...$(NC)"
