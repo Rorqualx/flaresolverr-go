@@ -395,7 +395,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		// Fix #13: Use helper for proxy setup to reduce duplication
 		proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("proxy authentication setup failed: %w", err)
 		}
 		defer proxyCleanup()
 
@@ -416,13 +416,13 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		// Dispatch POST based on content type
 		if opts.ContentType == types.ContentTypeJSON {
 			// JSON POST via Fetch API
-			if err := s.navigatePostJSON(page.Context(solveCtx), opts.URL, opts.PostData, opts.Headers); err != nil {
-				return nil, err
+			if err := s.navigatePostJSON(solveCtx, page.Context(solveCtx), opts.URL, opts.PostData, opts.Headers); err != nil {
+				return nil, fmt.Errorf("JSON POST navigation to %s failed: %w", opts.URL, err)
 			}
 		} else {
 			// Form POST (default, backward compatible)
-			if err := s.navigatePost(page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
-				return nil, err
+			if err := s.navigatePost(solveCtx, page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
+				return nil, fmt.Errorf("form POST navigation to %s failed: %w", opts.URL, err)
 			}
 		}
 
@@ -465,7 +465,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// Fix #13: Use helper for proxy setup to reduce duplication
 	proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("proxy authentication setup failed: %w", err)
 	}
 	defer proxyCleanup()
 
@@ -512,7 +512,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// Main solve loop with DNS pinning
 	result, err = s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
 	}
 
 	// Wait additional time if requested (waitInSeconds)
@@ -570,7 +570,8 @@ func (s *Solver) setCookies(page *rod.Page, cookies []types.RequestCookie, targe
 
 // navigatePost performs a POST request by injecting and submitting a form.
 // This function is called with a regular (non-stealth) page to avoid JS conflicts.
-func (s *Solver) navigatePost(page *rod.Page, targetURL string, postData string) error {
+// Fix: Accept explicit context parameter for proper timeout/cancellation propagation.
+func (s *Solver) navigatePost(ctx context.Context, page *rod.Page, targetURL string, postData string) error {
 	log.Debug().
 		Str("url", targetURL).
 		Int("post_data_len", len(postData)).
@@ -595,8 +596,8 @@ func (s *Solver) navigatePost(page *rod.Page, targetURL string, postData string)
 	}
 
 	// Give the page time to fully initialize, but respect context cancellation
-	if !sleepWithContext(page.GetContext(), 500*time.Millisecond) {
-		return fmt.Errorf("context canceled during POST navigation: %w", page.GetContext().Err())
+	if !sleepWithContext(ctx, 500*time.Millisecond) {
+		return fmt.Errorf("context canceled during POST navigation: %w", ctx.Err())
 	}
 
 	// Build form fields JavaScript
@@ -696,7 +697,8 @@ func (s *Solver) buildFormFieldsJS(postData string) (string, error) {
 
 // navigatePostJSON performs a POST request with JSON body using the Fetch API.
 // This is used when contentType is "application/json".
-func (s *Solver) navigatePostJSON(page *rod.Page, targetURL string, jsonData string, headers map[string]string) error {
+// Fix: Accept explicit context parameter for proper timeout/cancellation propagation.
+func (s *Solver) navigatePostJSON(ctx context.Context, page *rod.Page, targetURL string, jsonData string, headers map[string]string) error {
 	log.Debug().
 		Str("url", targetURL).
 		Int("json_data_len", len(jsonData)).
@@ -721,8 +723,8 @@ func (s *Solver) navigatePostJSON(page *rod.Page, targetURL string, jsonData str
 	}
 
 	// Give the page time to fully initialize
-	if !sleepWithContext(page.GetContext(), 500*time.Millisecond) {
-		return fmt.Errorf("context canceled during JSON POST navigation: %w", page.GetContext().Err())
+	if !sleepWithContext(ctx, 500*time.Millisecond) {
+		return fmt.Errorf("context canceled during JSON POST navigation: %w", ctx.Err())
 	}
 
 	// Build headers object JavaScript
@@ -1819,7 +1821,7 @@ func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool,
 
 	html, err := page.HTML()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to extract page HTML: %w", err)
 	}
 	return s.buildResultWithHTML(page, url, html, captureScreenshot, networkCapture)
 }
@@ -2314,13 +2316,13 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		// Dispatch POST based on content type
 		if opts.ContentType == types.ContentTypeJSON {
 			// JSON POST via Fetch API
-			if err := s.navigatePostJSON(page.Context(solveCtx), opts.URL, opts.PostData, opts.Headers); err != nil {
-				return nil, err
+			if err := s.navigatePostJSON(solveCtx, page.Context(solveCtx), opts.URL, opts.PostData, opts.Headers); err != nil {
+				return nil, fmt.Errorf("JSON POST navigation to %s failed: %w", opts.URL, err)
 			}
 		} else {
 			// Form POST (default, backward compatible)
-			if err := s.navigatePost(page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
-				return nil, err
+			if err := s.navigatePost(solveCtx, page.Context(solveCtx), opts.URL, opts.PostData); err != nil {
+				return nil, fmt.Errorf("form POST navigation to %s failed: %w", opts.URL, err)
 			}
 		}
 	} else {
@@ -2331,7 +2333,7 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 			}
 		}
 		if err := page.Context(solveCtx).Navigate(opts.URL); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to navigate to %s: %w", opts.URL, err)
 		}
 	}
 
@@ -2343,7 +2345,7 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	// Solve with DNS pinning
 	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
 	}
 
 	// Wait additional time if requested (waitInSeconds)

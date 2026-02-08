@@ -115,6 +115,7 @@ func NewManagerWithRemote(externalPath string, hotReload bool, remoteURL string,
 	if remoteURL != "" && refreshInterval > 0 {
 		// Try initial remote fetch (non-blocking, just log on failure)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel() // Fix: Always defer cancel to ensure cleanup on all exit paths
 		if sel, err := m.loadRemote(ctx); err != nil {
 			m.mu.Lock()
 			m.stats.RemoteFailures++
@@ -144,7 +145,6 @@ func NewManagerWithRemote(externalPath string, hotReload bool, remoteURL string,
 					Msg("Remote selectors fetched but file selectors take priority")
 			}
 		}
-		cancel()
 
 		// Start refresh loop
 		m.startRemoteRefresh()
