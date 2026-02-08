@@ -822,7 +822,7 @@ func ExtractAndValidateHostIPWithContext(ctx context.Context, rawURL string) (ne
 	if ip != nil {
 		ip = normalizeIPv4Mapped(ip)
 		if err := validateIP(ip); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("direct IP validation failed for %s: %w", hostname, err)
 		}
 		return ip, nil
 	}
@@ -836,7 +836,7 @@ func ExtractAndValidateHostIPWithContext(ctx context.Context, rawURL string) (ne
 	// Validate and return first IP
 	firstIP := normalizeIPv4Mapped(ips[0])
 	if err := validateIP(firstIP); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolved IP validation failed for %s: %w", hostname, err)
 	}
 
 	return firstIP, nil
