@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -173,18 +174,25 @@ func (c *Config) Validate() {
 	}
 
 	// BrowserPath validation - prevent path traversal attacks
+	// Uses proper path normalization instead of simple string matching
 	if c.BrowserPath != "" {
-		// Check for path traversal sequences
-		if strings.Contains(c.BrowserPath, "..") {
+		cleanPath := filepath.Clean(c.BrowserPath)
+		absPath, err := filepath.Abs(cleanPath)
+		if err != nil {
 			log.Error().
+				Err(err).
 				Str("path", c.BrowserPath).
-				Msg("BrowserPath contains path traversal sequence (..), ignoring")
+				Msg("BrowserPath could not be resolved, ignoring")
 			c.BrowserPath = ""
-		} else if !strings.HasPrefix(c.BrowserPath, "/") && !strings.HasPrefix(c.BrowserPath, "C:") && !strings.HasPrefix(c.BrowserPath, "c:") {
-			// Not an absolute path (Unix or Windows)
-			log.Warn().
-				Str("path", c.BrowserPath).
-				Msg("BrowserPath should be an absolute path")
+		} else {
+			// Warn if path was normalized (contained relative elements like ..)
+			if cleanPath != c.BrowserPath {
+				log.Warn().
+					Str("original", c.BrowserPath).
+					Str("cleaned", absPath).
+					Msg("BrowserPath normalized (contained relative elements)")
+			}
+			c.BrowserPath = absPath
 		}
 	}
 
@@ -423,18 +431,26 @@ func (c *Config) Validate() {
 	// CAPTCHA solver validation
 	c.validateCaptchaConfig()
 
-	// Selectors path validation
+	// Selectors path validation - prevent path traversal attacks
+	// Uses proper path normalization instead of simple string matching
 	if c.SelectorsPath != "" {
-		// Check for path traversal sequences
-		if strings.Contains(c.SelectorsPath, "..") {
+		cleanPath := filepath.Clean(c.SelectorsPath)
+		absPath, err := filepath.Abs(cleanPath)
+		if err != nil {
 			log.Error().
+				Err(err).
 				Str("path", c.SelectorsPath).
-				Msg("SelectorsPath contains path traversal sequence (..), ignoring")
+				Msg("SelectorsPath could not be resolved, ignoring")
 			c.SelectorsPath = ""
-		} else if !strings.HasPrefix(c.SelectorsPath, "/") && !strings.HasPrefix(c.SelectorsPath, "C:") && !strings.HasPrefix(c.SelectorsPath, "c:") {
-			log.Warn().
-				Str("path", c.SelectorsPath).
-				Msg("SelectorsPath should be an absolute path")
+		} else {
+			// Warn if path was normalized (contained relative elements like ..)
+			if cleanPath != c.SelectorsPath {
+				log.Warn().
+					Str("original", c.SelectorsPath).
+					Str("cleaned", absPath).
+					Msg("SelectorsPath normalized (contained relative elements)")
+			}
+			c.SelectorsPath = absPath
 		}
 		// Warn if hot-reload is enabled but path doesn't exist
 		if c.SelectorsHotReload && c.SelectorsPath != "" {
