@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Path traversal detection** - Replaced simple `strings.Contains("..")` checks with proper `filepath.Clean()` and `filepath.Abs()` normalization in config validation. Handles edge cases like `....//`, symlinks, and other obfuscation techniques.
+- **Context cancellation leak** - Fixed non-deferred `cancel()` call in selectors manager that could leak context on early returns.
+- **Context propagation in POST** - `navigatePost()` and `navigatePostJSON()` now accept explicit context parameter instead of using `page.GetContext()` for proper timeout/cancellation propagation.
+- **Error wrapping** - Added `fmt.Errorf` wrapping with context to errors in solver and URL validator for better debugging and error chain support with `errors.Is()`.
+- **Response body cleanup** - Added `defer resp.Body.Close()` to all integration test functions following Go best practices.
+
 ### Added
 - **Human-like behavior patterns** - New `internal/humanize` package with randomized timing, natural mouse movements using Bezier curves, and realistic scroll behavior. Makes automated actions appear more human-like to avoid detection.
 - **External CAPTCHA solver fallback** - Integration with 2Captcha and CapSolver APIs for Turnstile challenges that native solving cannot handle. Configurable via `CAPTCHA_FALLBACK_ENABLED`, `TWOCAPTCHA_API_KEY`, and `CAPSOLVER_API_KEY` environment variables.
