@@ -222,10 +222,3 @@ func (c *SolverChain) GetMetrics() map[string]interface{} {
 	return c.metrics.ToJSON()
 }
 
-// min returns the smaller of two integers.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

@@ -1565,12 +1565,12 @@ func (s *Solver) solveTurnstileWidget(ctx context.Context, page *rod.Page) error
 		// Phase 2: Use humanized click on element
 		if err := mouse.ClickElement(ctx, element); err != nil {
 			log.Debug().Err(err).Str("selector", selector).Msg("Humanized widget click failed")
-			element.Release()
+			_ = element.Release()
 			continue
 		}
 
 		log.Info().Str("selector", selector).Msg("Performed humanized click on Turnstile widget")
-		element.Release()
+		_ = element.Release()
 
 		// Check for success after click
 		if s.isTurnstileSolved(page) {

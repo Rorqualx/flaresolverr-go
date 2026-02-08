@@ -448,7 +448,7 @@ func (m *Manager) startWatcher() error {
 	}
 
 	if err := watcher.Add(m.externalPath); err != nil {
-		watcher.Close()
+		_ = watcher.Close()
 		return fmt.Errorf("failed to watch file: %w", err)
 	}
 

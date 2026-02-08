@@ -158,7 +158,7 @@ func (s *TwoCaptchaSolver) SolveTurnstile(ctx context.Context, req *TurnstileReq
 	// Parse cost (2Captcha returns cost as string)
 	var cost float64
 	if result.Cost != "" {
-		fmt.Sscanf(result.Cost, "%f", &cost)
+		_, _ = fmt.Sscanf(result.Cost, "%f", &cost)
 	}
 
 	return &TurnstileResult{

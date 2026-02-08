@@ -1,7 +1,6 @@
 package captcha
 
 import (
-	"context"
 	"testing"
 	"time"
 )
@@ -148,34 +147,6 @@ func TestSolverChain_HasProviders(t *testing.T) {
 			t.Error("HasProviders() = false with configured provider, want true")
 		}
 	})
-}
-
-// mockSolver implements CaptchaSolver for testing
-type mockSolver struct {
-	name       string
-	configured bool
-	solveFunc  func(ctx context.Context, req *TurnstileRequest) (*TurnstileResult, error)
-	balanceVal float64
-}
-
-func (m *mockSolver) Name() string { return m.name }
-
-func (m *mockSolver) IsConfigured() bool { return m.configured }
-
-func (m *mockSolver) SolveTurnstile(ctx context.Context, req *TurnstileRequest) (*TurnstileResult, error) {
-	if m.solveFunc != nil {
-		return m.solveFunc(ctx, req)
-	}
-	return &TurnstileResult{
-		Token:     "mock-token",
-		SolveTime: 5 * time.Second,
-		Cost:      0.001,
-		Provider:  m.name,
-	}, nil
-}
-
-func (m *mockSolver) Balance(ctx context.Context) (float64, error) {
-	return m.balanceVal, nil
 }
 
 func TestTurnstileRequest_Fields(t *testing.T) {
