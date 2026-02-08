@@ -89,7 +89,7 @@ func TestSleepWithContext_Completes(t *testing.T) {
 	}
 }
 
-func TestSleepWithContext_Cancelled(t *testing.T) {
+func TestSleepWithContext_Canceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Cancel after 20ms
@@ -103,14 +103,14 @@ func TestSleepWithContext_Cancelled(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if completed {
-		t.Error("SleepWithContext should return false when context is cancelled")
+		t.Error("SleepWithContext should return false when context is canceled")
 	}
 	if elapsed > 100*time.Millisecond {
 		t.Errorf("SleepWithContext didn't cancel quickly enough: %v", elapsed)
 	}
 }
 
-func TestSleepWithContext_AlreadyCancelled(t *testing.T) {
+func TestSleepWithContext_AlreadyCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
@@ -119,10 +119,10 @@ func TestSleepWithContext_AlreadyCancelled(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if completed {
-		t.Error("SleepWithContext should return false when context is already cancelled")
+		t.Error("SleepWithContext should return false when context is already canceled")
 	}
 	if elapsed > 10*time.Millisecond {
-		t.Errorf("SleepWithContext should return immediately for cancelled context: %v", elapsed)
+		t.Errorf("SleepWithContext should return immediately for canceled context: %v", elapsed)
 	}
 }
 

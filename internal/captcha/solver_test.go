@@ -167,6 +167,12 @@ func TestTurnstileRequest_Fields(t *testing.T) {
 	if req.UserAgent != "Mozilla/5.0" {
 		t.Errorf("UserAgent = %q, want %q", req.UserAgent, "Mozilla/5.0")
 	}
+	if req.Action != "login" {
+		t.Errorf("Action = %q, want %q", req.Action, "login")
+	}
+	if req.CData != "test-data" {
+		t.Errorf("CData = %q, want %q", req.CData, "test-data")
+	}
 }
 
 func TestTurnstileResult_Fields(t *testing.T) {
