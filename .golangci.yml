@@ -186,6 +186,11 @@ issues:
         - revive
       text: "empty-block"
 
+    # Allow intentional type name stuttering for clarity (e.g., solver.SolverConfig)
+    - linters:
+        - revive
+      text: "stutters"
+
     # Allow unused parameters in interface implementations
     - linters:
         - unparam
