@@ -82,9 +82,9 @@ type SolveOptions struct {
 type Solver struct {
 	pool             *browser.Pool
 	userAgent        string
-	solverChain      *captcha.SolverChain    // External CAPTCHA solver fallback
-	selectorsManager *selectors.Manager      // Hot-reload capable selectors manager
-	statsManager     StatsManager            // Domain stats for method tracking (optional)
+	solverChain      *captcha.SolverChain // External CAPTCHA solver fallback
+	selectorsManager *selectors.Manager   // Hot-reload capable selectors manager
+	statsManager     StatsManager         // Domain stats for method tracking (optional)
 }
 
 // StatsManager interface for domain statistics tracking.

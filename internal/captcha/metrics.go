@@ -14,15 +14,15 @@ type Metrics struct {
 
 // ProviderStats contains statistics for a single provider.
 type ProviderStats struct {
-	Attempts    int64         // Total solve attempts
-	Successes   int64         // Successful solves
-	Failures    int64         // Failed solves
-	TotalCost   float64       // Total cost in USD
-	TotalTimeMs int64         // Total time spent solving in milliseconds
-	LastUsed    time.Time     // Last time this provider was used
-	LastBalance float64       // Last known balance (from Balance() call)
-	LastError   string        // Last error message
-	LastErrorAt time.Time     // When the last error occurred
+	Attempts    int64     // Total solve attempts
+	Successes   int64     // Successful solves
+	Failures    int64     // Failed solves
+	TotalCost   float64   // Total cost in USD
+	TotalTimeMs int64     // Total time spent solving in milliseconds
+	LastUsed    time.Time // Last time this provider was used
+	LastBalance float64   // Last known balance (from Balance() call)
+	LastError   string    // Last error message
+	LastErrorAt time.Time // When the last error occurred
 }
 
 // NewMetrics creates a new Metrics instance.

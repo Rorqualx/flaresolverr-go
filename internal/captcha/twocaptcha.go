@@ -78,7 +78,7 @@ func (s *TwoCaptchaSolver) IsConfigured() bool {
 
 // twoCaptchaCreateTaskRequest is the request body for createTask.
 type twoCaptchaCreateTaskRequest struct {
-	ClientKey string                 `json:"clientKey"`
+	ClientKey string                  `json:"clientKey"`
 	Task      twoCaptchaTurnstileTask `json:"task"`
 }
 
@@ -107,12 +107,12 @@ type twoCaptchaGetResultRequest struct {
 
 // twoCaptchaGetResultResponse is the response from getTaskResult.
 type twoCaptchaGetResultResponse struct {
-	ErrorID          int                        `json:"errorId"`
-	ErrorCode        string                     `json:"errorCode,omitempty"`
-	ErrorDescription string                     `json:"errorDescription,omitempty"`
-	Status           string                     `json:"status"` // "processing" or "ready"
+	ErrorID          int                          `json:"errorId"`
+	ErrorCode        string                       `json:"errorCode,omitempty"`
+	ErrorDescription string                       `json:"errorDescription,omitempty"`
+	Status           string                       `json:"status"` // "processing" or "ready"
 	Solution         *twoCaptchaTurnstileSolution `json:"solution,omitempty"`
-	Cost             string                     `json:"cost,omitempty"`
+	Cost             string                       `json:"cost,omitempty"`
 }
 
 // twoCaptchaTurnstileSolution contains the Turnstile solution.

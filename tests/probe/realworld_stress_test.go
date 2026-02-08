@@ -222,7 +222,7 @@ func TestRealWorld_CloudflareProtected(t *testing.T) {
 
 	// Sites known to use Cloudflare protection
 	sites := []string{
-		"https://nowsecure.nl/",           // Explicit Turnstile test page
+		"https://nowsecure.nl/",               // Explicit Turnstile test page
 		"https://demo.turnstile.workers.dev/", // Cloudflare demo
 	}
 

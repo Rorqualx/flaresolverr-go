@@ -537,10 +537,10 @@ func TestManager_RemoteRefresh(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/yaml")
 		// Return different data each time
-		_, _ = w.Write([]byte(fmt.Sprintf(`
+		_, _ = fmt.Fprintf(w, `
 access_denied:
   - "refresh %d"
-`, currentCount)))
+`, currentCount)
 	}))
 	defer server.Close()
 

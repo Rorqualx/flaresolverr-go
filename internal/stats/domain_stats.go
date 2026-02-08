@@ -916,17 +916,18 @@ func (m *Manager) GetTurnstileMethodOrder(domain string) []string {
 		successes := tm.MethodSuccesses[method]
 
 		var score float64
-		if attempts == 0 {
+		switch {
+		case attempts == 0:
 			// Untried method - give it a neutral positive score
 			score = 0.5
-		} else if successes > 0 {
+		case successes > 0:
 			// Has some successes - use success rate
 			score = float64(successes) / float64(attempts)
 			// Boost recent success
 			if tm.LastSuccess == method && time.Since(tm.LastSuccessTime) < time.Hour {
 				score += 0.5
 			}
-		} else {
+		default:
 			// Only failures - negative score based on failure count
 			// More failures = lower priority (but cap the penalty)
 			failures := attempts

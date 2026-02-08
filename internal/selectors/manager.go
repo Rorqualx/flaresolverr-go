@@ -36,15 +36,15 @@ type ReloadStats struct {
 // It maintains embedded default selectors and optionally watches an external
 // file for runtime updates. Reads are lock-free using atomic.Value.
 type Manager struct {
-	embedded        *Selectors   // Compiled-in defaults (immutable)
-	current         atomic.Value // *Selectors - atomic swap for lock-free reads
-	externalPath    string       // Path to external override file
-	watcher         *fsnotify.Watcher
-	stopCh          chan struct{}
-	wg              sync.WaitGroup
-	mu              sync.Mutex  // Protects reload operations
-	stats           ReloadStats
-	closed          bool        // Tracks if Close has been called
+	embedded     *Selectors   // Compiled-in defaults (immutable)
+	current      atomic.Value // *Selectors - atomic swap for lock-free reads
+	externalPath string       // Path to external override file
+	watcher      *fsnotify.Watcher
+	stopCh       chan struct{}
+	wg           sync.WaitGroup
+	mu           sync.Mutex // Protects reload operations
+	stats        ReloadStats
+	closed       bool // Tracks if Close has been called
 
 	// Remote fetch fields
 	remoteURL       string
@@ -156,7 +156,12 @@ func NewManagerWithRemote(externalPath string, hotReload bool, remoteURL string,
 // Get returns the current Selectors instance.
 // This is a lock-free O(1) operation safe for concurrent use.
 func (m *Manager) Get() *Selectors {
-	return m.current.Load().(*Selectors)
+	sel, ok := m.current.Load().(*Selectors)
+	if !ok {
+		// This should never happen as we always store *Selectors
+		return m.embedded
+	}
+	return sel
 }
 
 // Reload manually reloads selectors from the external file.

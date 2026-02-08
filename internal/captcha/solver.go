@@ -221,4 +221,3 @@ func (c *SolverChain) GetMetrics() map[string]interface{} {
 	}
 	return c.metrics.ToJSON()
 }
-

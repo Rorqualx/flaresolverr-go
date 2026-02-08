@@ -78,15 +78,15 @@ func (s *CapSolverSolver) IsConfigured() bool {
 
 // capSolverCreateTaskRequest is the request body for createTask.
 type capSolverCreateTaskRequest struct {
-	ClientKey string                `json:"clientKey"`
+	ClientKey string                 `json:"clientKey"`
 	Task      capSolverTurnstileTask `json:"task"`
 }
 
 // capSolverTurnstileTask is the task specification for Turnstile.
 type capSolverTurnstileTask struct {
-	Type       string `json:"type"`
-	WebsiteURL string `json:"websiteURL"`
-	WebsiteKey string `json:"websiteKey"`
+	Type       string             `json:"type"`
+	WebsiteURL string             `json:"websiteURL"`
+	WebsiteKey string             `json:"websiteKey"`
 	Metadata   *capSolverMetadata `json:"metadata,omitempty"`
 }
 
@@ -112,10 +112,10 @@ type capSolverGetResultRequest struct {
 
 // capSolverGetResultResponse is the response from getTaskResult.
 type capSolverGetResultResponse struct {
-	ErrorID          int                       `json:"errorId"`
-	ErrorCode        string                    `json:"errorCode,omitempty"`
-	ErrorDescription string                    `json:"errorDescription,omitempty"`
-	Status           string                    `json:"status"` // "processing", "ready", or "failed"
+	ErrorID          int                         `json:"errorId"`
+	ErrorCode        string                      `json:"errorCode,omitempty"`
+	ErrorDescription string                      `json:"errorDescription,omitempty"`
+	Status           string                      `json:"status"` // "processing", "ready", or "failed"
 	Solution         *capSolverTurnstileSolution `json:"solution,omitempty"`
 }
 

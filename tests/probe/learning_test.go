@@ -108,7 +108,6 @@ func TestTurnstile_MethodLearning(t *testing.T) {
 	}
 }
 
-
 // slicesEqual checks if two string slices are equal.
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
