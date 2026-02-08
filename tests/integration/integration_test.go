@@ -65,6 +65,7 @@ func TestMain(m *testing.M) {
 func TestHealthEndpoint(t *testing.T) {
 	req, _ := http.NewRequest("GET", "/health", nil)
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
@@ -93,6 +94,7 @@ func TestRequestGetSimplePage(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
@@ -135,6 +137,7 @@ func TestRequestGetWithCookies(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	var body types.Response
 	json.NewDecoder(resp.Body).Decode(&body)
@@ -157,6 +160,7 @@ func TestSessionLifecycle(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/api", bytes.NewReader(createBytes))
 	req.Header.Set("Content-Type", "application/json")
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	var createResp types.Response
 	json.NewDecoder(resp.Body).Decode(&createResp)
@@ -171,17 +175,18 @@ func TestSessionLifecycle(t *testing.T) {
 
 	req, _ = http.NewRequest("POST", "/api", bytes.NewReader(listBytes))
 	req.Header.Set("Content-Type", "application/json")
-	resp = executeRequest(req)
+	listResp := executeRequest(req)
+	defer listResp.Body.Close()
 
-	var listResp types.Response
-	json.NewDecoder(resp.Body).Decode(&listResp)
+	var listRespBody types.Response
+	json.NewDecoder(listResp.Body).Decode(&listRespBody)
 
-	if listResp.Status != types.StatusOK {
-		t.Fatalf("Failed to list sessions: %s", listResp.Message)
+	if listRespBody.Status != types.StatusOK {
+		t.Fatalf("Failed to list sessions: %s", listRespBody.Message)
 	}
 
 	found := false
-	for _, s := range listResp.Sessions {
+	for _, s := range listRespBody.Sessions {
 		if s == sessionID {
 			found = true
 			break
@@ -201,13 +206,14 @@ func TestSessionLifecycle(t *testing.T) {
 
 	req, _ = http.NewRequest("POST", "/api", bytes.NewReader(useBytes))
 	req.Header.Set("Content-Type", "application/json")
-	resp = executeRequest(req)
+	useResp := executeRequest(req)
+	defer useResp.Body.Close()
 
-	var useResp types.Response
-	json.NewDecoder(resp.Body).Decode(&useResp)
+	var useRespBody types.Response
+	json.NewDecoder(useResp.Body).Decode(&useRespBody)
 
-	if useResp.Status != types.StatusOK {
-		t.Errorf("Failed to use session: %s", useResp.Message)
+	if useRespBody.Status != types.StatusOK {
+		t.Errorf("Failed to use session: %s", useRespBody.Message)
 	}
 
 	// Destroy session
@@ -219,13 +225,14 @@ func TestSessionLifecycle(t *testing.T) {
 
 	req, _ = http.NewRequest("POST", "/api", bytes.NewReader(destroyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	resp = executeRequest(req)
+	destroyResp := executeRequest(req)
+	defer destroyResp.Body.Close()
 
-	var destroyResp types.Response
-	json.NewDecoder(resp.Body).Decode(&destroyResp)
+	var destroyRespBody types.Response
+	json.NewDecoder(destroyResp.Body).Decode(&destroyRespBody)
 
-	if destroyResp.Status != types.StatusOK {
-		t.Errorf("Failed to destroy session: %s", destroyResp.Message)
+	if destroyRespBody.Status != types.StatusOK {
+		t.Errorf("Failed to destroy session: %s", destroyRespBody.Message)
 	}
 }
 
@@ -241,6 +248,7 @@ func TestRequestPost(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	var body types.Response
 	json.NewDecoder(resp.Body).Decode(&body)
@@ -272,6 +280,7 @@ func TestRequestTimeout(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	var body types.Response
 	json.NewDecoder(resp.Body).Decode(&body)
@@ -292,6 +301,7 @@ func TestInvalidCommand(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	var body types.Response
 	json.NewDecoder(resp.Body).Decode(&body)
@@ -312,6 +322,7 @@ func TestInvalidURL(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp := executeRequest(req)
+	defer resp.Body.Close()
 
 	var body types.Response
 	json.NewDecoder(resp.Body).Decode(&body)
