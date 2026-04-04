@@ -257,6 +257,35 @@ func TestRequestDeserialization(t *testing.T) {
 	}
 }
 
+// TestRequestValidateSessionTTL verifies session_ttl_minutes validation bounds
+func TestRequestValidateSessionTTL(t *testing.T) {
+	tests := []struct {
+		name       string
+		sessionTTL int
+		wantErr    bool
+	}{
+		{name: "zero uses default", sessionTTL: 0, wantErr: false},
+		{name: "valid 30 minutes", sessionTTL: 30, wantErr: false},
+		{name: "valid max 1440", sessionTTL: 1440, wantErr: false},
+		{name: "negative", sessionTTL: -1, wantErr: true},
+		{name: "exceeds max", sessionTTL: 1441, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := Request{
+				Cmd:        "sessions.create",
+				Session:    "test-session",
+				SessionTTL: tt.sessionTTL,
+			}
+			err := req.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestCookieJSONFieldNames verifies cookie JSON field names match original FlareSolverr API
 func TestCookieJSONFieldNames(t *testing.T) {
 	cookie := Cookie{

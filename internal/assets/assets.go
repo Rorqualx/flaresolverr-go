@@ -199,9 +199,6 @@ Main API endpoint for all commands.
 ### GET /health
 Health check endpoint.
 
-### GET /metrics (if enabled)
-Prometheus metrics endpoint.
-
 ## Commands
 
 ### request.get

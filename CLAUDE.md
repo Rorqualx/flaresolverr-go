@@ -181,6 +181,7 @@ Compare to Python: 5 sessions = 2000-3500MB
 | **BrowserPool** | Browser lifecycle | Browser instances, health | Pages, sessions |
 | **SessionManager** | Session lifecycle | Session map, TTL | Browsers |
 | **Config** | Configuration loading | Env vars, YAML | Runtime state |
+| **Dashboard** | TUI monitoring display | Event buffer, rendering | Business logic |
 
 ---
 
@@ -240,11 +241,13 @@ flaresolverr-go/
 │   │   ├── chain.go              # Middleware chaining
 │   │   ├── logging.go
 │   │   ├── recovery.go
-│   │   ├── metrics.go
 │   │   └── timeout.go
 │   │
-│   └── metrics/                  # Prometheus metrics
-│       └── prometheus.go
+│   └── dashboard/               # CLI dashboard (TUI)
+│       ├── dashboard.go          # Public API + middleware
+│       ├── event.go              # Request event ring buffer
+│       ├── collector.go          # Data aggregator
+│       └── model.go              # bubbletea Model/View
 │
 ├── pkg/                          # Public libraries (if any)
 │   └── version/
@@ -284,7 +287,7 @@ flaresolverr-go/
 | New browser flag | `internal/browser/pool.go` | solver |
 | New detection logic | `internal/solver/detector.go` | resolver, extractor |
 | New extraction logic | `internal/solver/extractor.go` | detector, resolver |
-| New metric | `internal/metrics/prometheus.go` | scattered files |
+| New dashboard widget | `internal/dashboard/model.go` | handlers, main.go |
 
 ---
 

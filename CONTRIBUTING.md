@@ -110,6 +110,7 @@ Before requesting review, verify:
 | `selectors/` | Selector loading, hot-reload | Challenge detection |
 | `stats/` | Domain statistics, method tracking | Business logic |
 | `security/` | URL validation, SSRF protection | HTTP handling |
+| `dashboard/` | TUI dashboard, event buffer, collector | Business logic |
 
 ## Getting Help
 

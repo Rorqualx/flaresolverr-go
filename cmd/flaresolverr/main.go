@@ -17,6 +17,7 @@ import (
 
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/dashboard"
 	"github.com/Rorqualx/flaresolverr-go/internal/handlers"
 	"github.com/Rorqualx/flaresolverr-go/internal/middleware"
 	"github.com/Rorqualx/flaresolverr-go/internal/selectors"
@@ -86,6 +87,16 @@ func main() {
 	// Create handler
 	handler := handlers.NewWithSelectors(pool, sessionMgr, cfg, selectorsManager)
 
+	// Create dashboard (enabled by default, auto-disables without TTY)
+	var dash *dashboard.Dashboard
+	if cfg.DashboardEnabled {
+		if dashboard.IsTTY() {
+			dash = dashboard.New(pool, sessionMgr, handler.DomainStats(), time.Now())
+		} else {
+			log.Info().Msg("Dashboard disabled: stdout is not a terminal")
+		}
+	}
+
 	// Build middleware chain
 	var finalHandler http.Handler = handler
 
@@ -123,6 +134,9 @@ func main() {
 	}
 
 	finalHandler = middleware.Logging(finalHandler)
+	if dash != nil {
+		finalHandler = dashboard.RecordRequests(dash.Events())(finalHandler)
+	}
 	finalHandler = middleware.Recovery(finalHandler)
 
 	// Create HTTP server
@@ -173,6 +187,11 @@ func main() {
 		}
 	}()
 
+	// Start dashboard if enabled
+	if dash != nil {
+		dash.Start()
+	}
+
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -202,6 +221,11 @@ func main() {
 	// Close rate limiter to stop cleanup goroutine
 	if rateLimiter != nil {
 		rateLimiter.Close()
+	}
+
+	// Stop dashboard
+	if dash != nil {
+		dash.Stop()
 	}
 
 	// Close selectors manager to stop file watcher

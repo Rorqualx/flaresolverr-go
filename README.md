@@ -19,8 +19,14 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 - **Direct CDP Protocol** - Uses Chrome DevTools Protocol directly, bypassing Selenium overhead
 - **Go Concurrency** - Native goroutines for better concurrency than Python's GIL
 - **Memory Management** - Active memory monitoring with automatic browser recycling
-- **Session Support** - TTL-based session management with automatic cleanup
+- **Session Support** - TTL-based session management with per-request TTL override and automatic cleanup
 - **Cloudflare Bypass** - Solves JavaScript challenges and Turnstile CAPTCHAs
+- **Anti-Fingerprinting** - Comprehensive stealth patches including canvas noise, Battery API, WebRTC blocking, and font enumeration limiting
+- **Human-Like Behavior** - Bezier curve mouse movements, randomized timing, and natural scroll patterns
+- **External CAPTCHA Fallback** - Optional 2Captcha and CapSolver integration for difficult Turnstile challenges
+- **Hot-Reload Selectors** - Update challenge selectors via file watching or remote URL without restarts
+- **Adaptive Solving** - Per-domain tracking of which solving methods work best
+- **CLI Dashboard** - Optional split-screen TUI showing live requests and server stats (`DASHBOARD_ENABLED=true`)
 - **Docker Support** - Production-ready Docker image with Xvfb
 
 ## Quick Start
@@ -96,9 +102,12 @@ curl -X POST http://localhost:8191/v1 \
   -H "Content-Type: application/json" \
   -d '{
     "cmd": "sessions.create",
-    "session": "my-session-id"
+    "session": "my-session-id",
+    "session_ttl_minutes": 60
   }'
 ```
+
+The optional `session_ttl_minutes` parameter overrides the global `SESSION_TTL` for this session (1-1440 minutes). If omitted, the server default is used.
 
 #### `sessions.list` - List active sessions
 
@@ -128,6 +137,7 @@ curl -X POST http://localhost:8191/v1 \
 | `cmd` | string | Yes | Command to execute |
 | `url` | string | For request.* | Target URL to navigate to |
 | `session` | string | No | Session ID for persistent sessions |
+| `session_ttl_minutes` | int | No | Per-session TTL override in minutes (1-1440, default: server `SESSION_TTL`) |
 | `maxTimeout` | int | No | Maximum timeout in milliseconds (default: 60000) |
 | `cookies` | array | No | Cookies to set before navigation |
 | `proxy` | object | No | Proxy configuration for this request |
@@ -330,7 +340,7 @@ All configuration is done via environment variables.
 
 ### API Key Authentication
 
-When enabled, all requests (except `/health` and `/metrics`) require authentication:
+When enabled, all requests (except `/health`) require authentication:
 
 ```bash
 # Via header (recommended)
@@ -399,11 +409,37 @@ When `SELECTORS_REMOTE_URL` is configured, selectors are fetched periodically fr
 |----------|---------|-------------|
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `LOG_HTML` | `false` | Log HTML responses (verbose) |
-| `PROMETHEUS_ENABLED` | `false` | Enable Prometheus metrics |
-| `PROMETHEUS_PORT` | `8192` | Prometheus metrics port |
+| `DASHBOARD_ENABLED` | `true` | TUI dashboard (auto-disables without TTY) |
 | `PPROF_ENABLED` | `false` | Enable pprof profiling |
 | `PPROF_PORT` | `6060` | pprof server port |
 | `PPROF_BIND_ADDR` | `127.0.0.1` | pprof bind address |
+
+### CLI Dashboard
+
+FlareSolverr launches a split-screen terminal dashboard by default when running in an interactive terminal:
+
+```
+┌──────── Incoming Requests ────────┬──────────── Server Stats ──────────┐
+│ 16:03:22 POST /v1 example.com 200 │ Server                             │
+│ 16:03:21 POST /v1 site.org   200  │  Uptime: 2h 14m  Req/s: 2.1       │
+│ 16:03:19 POST /v1 example.com 200 │  Total: 1,247    Goroutines: 42   │
+│ 16:03:15 POST /v1 blocked.io 403  │  Memory: 312 MB                   │
+│                                    │ Pool                               │
+│                                    │  2/3 available                     │
+│                                    │ Sessions                           │
+│                                    │  4 active                          │
+│                                    │ Domains (3)                        │
+│                                    │  example.com  842 req  96% ok     │
+│                                    │  site.org     231 req  89% ok     │
+└────────────────────────────────────┴────────────────────────────────────┘
+```
+
+**Left pane:** Live request log with method, path, status code, and latency.
+**Right pane:** Server stats including uptime, request rate, memory, browser pool state, active sessions, and top domains by request count.
+
+Press `q` or `ctrl+c` to exit. Logging is suppressed while the dashboard is active.
+
+The dashboard auto-disables when stdout is not a terminal (e.g., Docker logs, piped output). To explicitly disable it: `DASHBOARD_ENABLED=false`.
 
 ## Docker Compose Example
 

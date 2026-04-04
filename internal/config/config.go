@@ -88,6 +88,9 @@ type Config struct {
 	SelectorsHotReload     bool          // Enable file watching for hot-reload of selectors
 	SelectorsRemoteURL     string        // HTTP(S) URL to fetch selectors from
 	SelectorsRemoteRefresh time.Duration // Refresh interval for remote selectors (default: 1h)
+
+	// Dashboard
+	DashboardEnabled bool // TUI dashboard enabled by default; disable with DASHBOARD_ENABLED=false
 }
 
 // Load loads configuration from environment variables.
@@ -156,6 +159,9 @@ func Load() *Config {
 		SelectorsHotReload:     getEnvBool("SELECTORS_HOT_RELOAD", false),
 		SelectorsRemoteURL:     getEnvString("SELECTORS_REMOTE_URL", ""),
 		SelectorsRemoteRefresh: getEnvDuration("SELECTORS_REMOTE_REFRESH", 1*time.Hour),
+
+		// Dashboard
+		DashboardEnabled: getEnvBool("DASHBOARD_ENABLED", true),
 	}
 }
 

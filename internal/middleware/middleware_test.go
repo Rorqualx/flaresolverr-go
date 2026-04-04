@@ -521,34 +521,6 @@ func TestAPIKeyMiddlewareHealthEndpointBypass(t *testing.T) {
 	}
 }
 
-func TestAPIKeyMiddlewareMetricsEndpointBypass(t *testing.T) {
-	cfg := &config.Config{
-		APIKeyEnabled: true,
-		APIKey:        "secret-key",
-	}
-
-	called := false
-	innerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-
-	handler := APIKey(cfg)(innerHandler)
-
-	// Metrics endpoint should bypass API key check
-	req := httptest.NewRequest("GET", "/metrics", nil)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-
-	if !called {
-		t.Error("/metrics should bypass API key authentication")
-	}
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-}
-
 func TestAPIKeyMiddlewareHeaderPrefersOverQuery(t *testing.T) {
 	cfg := &config.Config{
 		APIKeyEnabled: true,

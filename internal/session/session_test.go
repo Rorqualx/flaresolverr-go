@@ -42,6 +42,30 @@ func TestManagerList(t *testing.T) {
 	}
 }
 
+func TestSessionEffectiveTTL(t *testing.T) {
+	tests := []struct {
+		name       string
+		sessionTTL time.Duration
+		defaultTTL time.Duration
+		want       time.Duration
+	}{
+		{name: "zero uses default", sessionTTL: 0, defaultTTL: 30 * time.Minute, want: 30 * time.Minute},
+		{name: "custom overrides default", sessionTTL: 10 * time.Minute, defaultTTL: 30 * time.Minute, want: 10 * time.Minute},
+		{name: "custom shorter than default", sessionTTL: 5 * time.Minute, defaultTTL: 30 * time.Minute, want: 5 * time.Minute},
+		{name: "custom longer than default", sessionTTL: 60 * time.Minute, defaultTTL: 30 * time.Minute, want: 60 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Session{TTL: tt.sessionTTL}
+			got := s.EffectiveTTL(tt.defaultTTL)
+			if got != tt.want {
+				t.Errorf("EffectiveTTL() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestManagerClose(t *testing.T) {
 	cfg := testConfig()
 	m := NewManager(cfg, nil)

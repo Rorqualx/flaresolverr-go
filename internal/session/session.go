@@ -34,7 +34,8 @@ type Session struct {
 	Browser   *rod.Browser
 	Page      *rod.Page
 	CreatedAt time.Time
-	lastUsed  atomic.Int64 // Unix nano timestamp for lock-free access
+	TTL       time.Duration // Per-session TTL override; 0 means use global config TTL
+	lastUsed  atomic.Int64  // Unix nano timestamp for lock-free access
 	mu        sync.Mutex   // Only used for page operations (GetCookies/SetCookies)
 
 	// Reference counting for safe page access during concurrent destroy
@@ -89,7 +90,7 @@ func NewManager(cfg *config.Config, pool *browser.Pool) *Manager {
 // Create creates a new session with the given ID.
 // Returns an error if the session already exists or max sessions is reached.
 // The browser is returned to the pool on any error.
-func (m *Manager) Create(id string, brow *rod.Browser) (*Session, error) {
+func (m *Manager) Create(id string, brow *rod.Browser, ttl time.Duration) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -127,6 +128,7 @@ func (m *Manager) Create(id string, brow *rod.Browser) (*Session, error) {
 		Browser:   brow,
 		Page:      page,
 		CreatedAt: now,
+		TTL:       ttl,
 	}
 	session.lastUsed.Store(now.UnixNano())
 
@@ -285,7 +287,7 @@ func (m *Manager) cleanupExpired() {
 		// Use atomic LastUsedTime - no nested lock needed
 		lastUsed := session.LastUsedTime()
 
-		if now.Sub(lastUsed) > m.config.SessionTTL {
+		if now.Sub(lastUsed) > session.EffectiveTTL(m.config.SessionTTL) {
 			// Mark session as closing BEFORE removing from map
 			// This prevents new AcquirePage calls from succeeding
 			session.closing.Store(true)
@@ -445,6 +447,14 @@ func (s *Session) Touch() {
 // LastUsedTime returns the last used time as a time.Time.
 func (s *Session) LastUsedTime() time.Time {
 	return time.Unix(0, s.lastUsed.Load())
+}
+
+// EffectiveTTL returns the session's TTL, falling back to the given default if no per-session TTL is set.
+func (s *Session) EffectiveTTL(defaultTTL time.Duration) time.Duration {
+	if s.TTL > 0 {
+		return s.TTL
+	}
+	return defaultTTL
 }
 
 // SafeGetPage returns the session's page reference while holding the lock.

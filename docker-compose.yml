@@ -10,8 +10,6 @@ services:
     container_name: flaresolverr
     ports:
       - "8191:8191"
-      # Uncomment to expose Prometheus metrics
-      # - "8192:8192"
     environment:
       # Server
       - HOST=0.0.0.0
@@ -35,10 +33,6 @@ services:
       # Logging
       - LOG_LEVEL=info
       - LOG_HTML=false
-
-      # Metrics (Prometheus)
-      - PROMETHEUS_ENABLED=false
-      - PROMETHEUS_PORT=8192
 
       # Security
       - RATE_LIMIT_ENABLED=true
@@ -75,23 +69,3 @@ services:
       retries: 3
       start_period: 60s
 
-  # Optional: Prometheus for metrics collection
-  # Uncomment to enable monitoring
-  #
-  # prometheus:
-  #   image: prom/prometheus:latest
-  #   container_name: prometheus
-  #   ports:
-  #     - "9090:9090"
-  #   volumes:
-  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-  #     - prometheus_data:/prometheus
-  #   command:
-  #     - '--config.file=/etc/prometheus/prometheus.yml'
-  #     - '--storage.tsdb.path=/prometheus'
-  #   depends_on:
-  #     - flaresolverr
-  #   restart: unless-stopped
-
-# volumes:
-#   prometheus_data:

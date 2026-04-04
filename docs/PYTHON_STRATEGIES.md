@@ -315,7 +315,7 @@ def get_turnstile_token(driver):
 - Keyboard navigation (Tab + Space) matching Python approach
 - Fallback to direct iframe click
 - "Verify you are human" button click
-- Token extraction not implemented (future improvement)
+- Token extraction with multiple fallbacks (JS API, input element, textarea, reCAPTCHA response)
 
 ---
 

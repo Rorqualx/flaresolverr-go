@@ -34,9 +34,8 @@ func APIKey(cfg *config.Config) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Skip health and metrics endpoints - they should always be accessible
-			// for monitoring and load balancer health checks
-			if r.URL.Path == "/health" || r.URL.Path == "/metrics" {
+			// Skip health endpoint - always accessible for load balancer health checks
+			if r.URL.Path == "/health" {
 				next.ServeHTTP(w, r)
 				return
 			}

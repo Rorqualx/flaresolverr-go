@@ -754,13 +754,6 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 
 // handleSessionCreate creates a new session.
 func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context, req *types.Request, startTime time.Time) {
-	// Warn if unsupported field is provided
-	if req.SessionTTL != 0 {
-		log.Warn().
-			Int("session_ttl", req.SessionTTL).
-			Msg("session_ttl_minutes field is not currently supported, using server default")
-	}
-
 	sessionID := req.Session
 
 	// Validate session ID
@@ -776,9 +769,15 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		return
 	}
 
+	// Convert per-request TTL from minutes to duration (0 = use server default)
+	var sessionTTL time.Duration
+	if req.SessionTTL > 0 {
+		sessionTTL = time.Duration(req.SessionTTL) * time.Minute
+	}
+
 	// Create session (note: this transfers browser ownership to session)
 	// On error, Create() already releases the browser back to pool, so don't release here
-	sess, err := h.sessions.Create(sessionID, browserInstance)
+	sess, err := h.sessions.Create(sessionID, browserInstance, sessionTTL)
 	if err != nil {
 		// Note: Do NOT release browser here - session.Create() handles it on all error paths
 		h.writeError(w, fmt.Sprintf("Failed to create session: %v", err), startTime)

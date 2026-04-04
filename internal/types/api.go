@@ -25,6 +25,7 @@ const (
 	MaxProxyPasswordLength = 256
 	MaxWaitSeconds         = 60
 	MaxTabsTillVerify      = 50
+	MaxSessionTTLMinutes   = 1440 // 24 hours
 )
 
 // Request represents an incoming API request.
@@ -33,7 +34,7 @@ type Request struct {
 	Cmd               string            `json:"cmd"`
 	URL               string            `json:"url,omitempty"`
 	Session           string            `json:"session,omitempty"`
-	SessionTTL        int               `json:"session_ttl_minutes,omitempty"` // Reserved for future use - currently ignored
+	SessionTTL        int               `json:"session_ttl_minutes,omitempty"` // Per-session TTL override in minutes (0 = use server default)
 	MaxTimeout        int               `json:"maxTimeout,omitempty"`
 	Cookies           []RequestCookie   `json:"cookies,omitempty"`
 	ReturnOnlyCookies bool              `json:"returnOnlyCookies,omitempty"`
@@ -170,6 +171,14 @@ func (r *Request) Validate() error {
 	}
 	if r.TabsTillVerify > MaxTabsTillVerify {
 		return fmt.Errorf("tabsTillVerify exceeds maximum of %d", MaxTabsTillVerify)
+	}
+
+	// Validate session_ttl_minutes bounds
+	if r.SessionTTL < 0 {
+		return fmt.Errorf("session_ttl_minutes cannot be negative")
+	}
+	if r.SessionTTL > MaxSessionTTLMinutes {
+		return fmt.Errorf("session_ttl_minutes exceeds maximum of %d", MaxSessionTTLMinutes)
 	}
 
 	return nil

@@ -101,10 +101,6 @@ ENV DEFAULT_TIMEOUT=60s \
 ENV LOG_LEVEL=info \
     LOG_HTML=false
 
-# Metrics (Prometheus)
-ENV PROMETHEUS_ENABLED=false \
-    PROMETHEUS_PORT=8192
-
 # Security (Rate limiting)
 ENV RATE_LIMIT_ENABLED=true \
     RATE_LIMIT_RPM=60

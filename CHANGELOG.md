@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Response body cleanup** - Added `defer resp.Body.Close()` to all integration test functions following Go best practices.
 
 ### Added
+- **Per-request session TTL** - `session_ttl_minutes` field in `sessions.create` requests now overrides the global `SESSION_TTL` for individual sessions (1-1440 minutes). Sessions without a custom TTL continue using the server default.
+- **CLI dashboard** - New `internal/dashboard` package provides a split-screen TUI showing live incoming requests and server stats (pool, sessions, domains, memory, request rate). Enable via `DASHBOARD_ENABLED=true`. Built with bubbletea/lipgloss.
 - **Human-like behavior patterns** - New `internal/humanize` package with randomized timing, natural mouse movements using Bezier curves, and realistic scroll behavior. Makes automated actions appear more human-like to avoid detection.
 - **External CAPTCHA solver fallback** - Integration with 2Captcha and CapSolver APIs for Turnstile challenges that native solving cannot handle. Configurable via `CAPTCHA_FALLBACK_ENABLED`, `TWOCAPTCHA_API_KEY`, and `CAPSOLVER_API_KEY` environment variables.
 - **Hot-reload selectors** - New `internal/selectors` manager supports loading selectors from external YAML files with file watching for automatic reload. Configure via `SELECTORS_PATH` and `SELECTORS_HOT_RELOAD` environment variables.
@@ -45,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `SELECTORS_HOT_RELOAD` | `false` | Enable file watching for selector hot-reload |
 | `SELECTORS_REMOTE_URL` | (none) | HTTP(S) URL to fetch selectors from |
 | `SELECTORS_REMOTE_REFRESH` | `1h` | Refresh interval for remote selectors (5m-24h) |
+| `DASHBOARD_ENABLED` | `true` | TUI dashboard (auto-disables without TTY) |
+
+### Removed
+- **All Prometheus references** - Removed unused `PROMETHEUS_ENABLED` and `PROMETHEUS_PORT` environment variables from Dockerfile and docker-compose.yml. Removed `/metrics` endpoint bypass from API key middleware. Prometheus was never implemented; use the new CLI dashboard for monitoring instead.
 
 ### Documentation
 - **Python strategies comparison** - Updated PYTHON_STRATEGIES.md to reflect complete implementation status for stealth (17 patches), proxy support, and new Go advantages.
