@@ -19,14 +19,14 @@ services:
 
       # Browser pool
       - HEADLESS=true
-      - BROWSER_POOL_SIZE=3
+      - BROWSER_POOL_SIZE=1
       - BROWSER_POOL_TIMEOUT=30s
-      - MAX_MEMORY_MB=2048
+      - MAX_MEMORY_MB=1024
 
       # Sessions
-      - SESSION_TTL=30m
+      - SESSION_TTL=10m
       - SESSION_CLEANUP_INTERVAL=1m
-      - MAX_SESSIONS=100
+      - MAX_SESSIONS=20
 
       # Timeouts
       - DEFAULT_TIMEOUT=60s
@@ -55,9 +55,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 1G
         reservations:
-          memory: 512M
+          memory: 256M
 
     # Security options
     security_opt:
