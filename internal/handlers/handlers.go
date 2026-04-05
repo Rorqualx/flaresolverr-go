@@ -176,6 +176,11 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 
 	log.Info().Str("user_agent", userAgent).Msg("Using browser's actual user agent")
 
+	// Startup browser test — verify browser can navigate to TEST_URL
+	if cfg.TestURL != "" {
+		testBrowserStartup(pool, cfg.TestURL)
+	}
+
 	// Create default selectors manager if not provided
 	if selectorsManager == nil {
 		selectorsManager = selectors.GetManager()
@@ -200,6 +205,40 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 		domainStats:      domainStats,
 		selectorsManager: selectorsManager,
 	}
+}
+
+// testBrowserStartup navigates to the TEST_URL to verify the browser works.
+// This is a non-blocking verification — failure is logged as a warning.
+func testBrowserStartup(pool *browser.Pool, testURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	b, err := pool.Acquire(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("Startup test: could not acquire browser")
+		return
+	}
+	defer pool.Release(b)
+
+	page, err := b.Page(proto.TargetCreateTarget{URL: testURL})
+	if err != nil {
+		log.Warn().Err(err).Str("url", testURL).Msg("Startup test: could not create page")
+		return
+	}
+	defer page.Close()
+
+	if err := page.Context(ctx).WaitLoad(); err != nil {
+		log.Warn().Err(err).Str("url", testURL).Msg("Startup test: page load failed")
+		return
+	}
+
+	info, err := page.Info()
+	if err != nil {
+		log.Warn().Err(err).Msg("Startup test: could not get page info")
+		return
+	}
+
+	log.Info().Str("url", testURL).Str("title", info.Title).Msg("Startup browser test passed")
 }
 
 // getActualUserAgent retrieves the real user agent from the browser via CDP.

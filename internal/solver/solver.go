@@ -517,6 +517,67 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 	}
 
+	// Handle followRedirects=false — capture first response via JS fetch with redirect:manual
+	if opts.FollowRedirects != nil && !*opts.FollowRedirects {
+		log.Debug().Str("url", opts.URL).Msg("followRedirects=false: using fetch with redirect:manual")
+
+		escapedURL := strings.ReplaceAll(opts.URL, "'", "\\'")
+		noRedirectJS := `async function() {
+			try {
+				const resp = await fetch('` + escapedURL + `', { redirect: 'manual', credentials: 'include' });
+				const headers = {};
+				resp.headers.forEach((v, k) => { headers[k] = v; });
+				const body = await resp.text();
+				return JSON.stringify({
+					status: resp.status,
+					statusText: resp.statusText,
+					url: resp.url,
+					redirected: resp.redirected,
+					type: resp.type,
+					headers: headers,
+					body: body
+				});
+			} catch(e) {
+				return JSON.stringify({error: e.message});
+			}
+		}`
+
+		// Navigate to about:blank first, then use fetch
+		page.Context(solveCtx).Navigate("about:blank")
+		sleepWithContext(solveCtx, 500*time.Millisecond)
+
+		fetchResult, evalErr := page.Timeout(30 * time.Second).Evaluate(rod.Eval(noRedirectJS).ByPromise())
+		if evalErr != nil {
+			return nil, fmt.Errorf("followRedirects fetch failed: %w", evalErr)
+		}
+
+		var fetchData struct {
+			Status     int               `json:"status"`
+			StatusText string            `json:"statusText"`
+			URL        string            `json:"url"`
+			Redirected bool              `json:"redirected"`
+			Type       string            `json:"type"`
+			Headers    map[string]string `json:"headers"`
+			Body       string            `json:"body"`
+			Error      string            `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(fetchResult.Value.Str()), &fetchData); err != nil {
+			return nil, fmt.Errorf("failed to parse fetch result: %w", err)
+		}
+		if fetchData.Error != "" {
+			return nil, fmt.Errorf("fetch error: %s", fetchData.Error)
+		}
+
+		return &Result{
+			Success:         true,
+			StatusCode:      fetchData.Status,
+			HTML:            fetchData.Body,
+			URL:             opts.URL,
+			UserAgent:       ua,
+			ResponseHeaders: fetchData.Headers,
+		}, nil
+	}
+
 	// Regular GET request
 	// Fix #7: Wrap navigation error with context for better debugging
 	// Fix 2.6: Check context before navigation to fail fast
@@ -564,6 +625,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 			log.Info().Msg("Normal solve timed out, attempting CDP disconnect/reconnect bypass")
 			reconnResult, reconnErr := s.solveWithReconnect(ctx, browserInstance, opts)
 			if reconnErr == nil {
+				// Force-recycle the pool browser since it was held for a long
+				// time during the bypass and may be stale
+				s.pool.RecycleBrowser(browserInstance)
 				return reconnResult, nil
 			}
 			log.Warn().Err(reconnErr).Msg("Reconnect bypass also failed")

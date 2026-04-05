@@ -92,6 +92,13 @@ func (p *Pool) GetBrowserPath() string {
 	return p.config.BrowserPath
 }
 
+// RecycleBrowser forces a browser to be recycled (replaced with a new one)
+// instead of being returned to the pool. Call this when a browser is known
+// to be in a bad state after a long operation.
+func (p *Pool) RecycleBrowser(browser *rod.Browser) {
+	go p.recycleBrowser(browser)
+}
+
 // PoolStats provides statistics about pool usage.
 type PoolStats struct {
 	Acquired atomic.Int64
