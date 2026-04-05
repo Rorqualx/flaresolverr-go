@@ -125,8 +125,11 @@ func TestChallengeTypeString(t *testing.T) {
 	if ChallengeTurnstile != 2 {
 		t.Errorf("ChallengeTurnstile should be 2, got %d", ChallengeTurnstile)
 	}
-	if ChallengeAccessDenied != 3 {
-		t.Errorf("ChallengeAccessDenied should be 3, got %d", ChallengeAccessDenied)
+	if ChallengeHCaptcha != 3 {
+		t.Errorf("ChallengeHCaptcha should be 3, got %d", ChallengeHCaptcha)
+	}
+	if ChallengeAccessDenied != 4 {
+		t.Errorf("ChallengeAccessDenied should be 4, got %d", ChallengeAccessDenied)
 	}
 }
 

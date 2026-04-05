@@ -110,6 +110,11 @@ func (c *SolverChain) NativeAttempts() int {
 	return c.nativeAttempts
 }
 
+// GetProviders returns the list of configured CAPTCHA solver providers.
+func (c *SolverChain) GetProviders() []CaptchaSolver {
+	return c.providers
+}
+
 // HasProviders returns true if at least one provider is configured.
 func (c *SolverChain) HasProviders() bool {
 	for _, p := range c.providers {

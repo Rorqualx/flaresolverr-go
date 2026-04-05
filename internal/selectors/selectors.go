@@ -17,6 +17,7 @@ type Selectors struct {
 	AccessDenied          []string `yaml:"access_denied"`
 	Turnstile             []string `yaml:"turnstile"`
 	JavaScript            []string `yaml:"javascript"`
+	Captcha               []string `yaml:"captcha"` // hCaptcha/reCAPTCHA detection patterns
 	TurnstileSelectors    []string `yaml:"turnstile_selectors"`
 	TurnstileFramePattern string   `yaml:"turnstile_frame_pattern"`
 	ShadowHosts           []string `yaml:"shadow_hosts"`

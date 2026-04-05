@@ -40,6 +40,7 @@ const (
 	ChallengeNone ChallengeType = iota
 	ChallengeJavaScript
 	ChallengeTurnstile
+	ChallengeHCaptcha
 	ChallengeAccessDenied
 )
 
@@ -692,6 +693,74 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	return result, nil
+}
+
+// solveHCaptchaExternal uses external CAPTCHA solvers to solve an hCaptcha challenge.
+func (s *Solver) solveHCaptchaExternal(ctx context.Context, page *rod.Page, pageURL string) error {
+	if s.solverChain == nil {
+		return fmt.Errorf("no solver chain configured")
+	}
+
+	// Extract hCaptcha sitekey from the page
+	sitekey, err := page.Timeout(5 * time.Second).Eval(`() => {
+		// Try data-sitekey attribute
+		const el = document.querySelector('[data-sitekey]');
+		if (el) return el.getAttribute('data-sitekey');
+		// Try hcaptcha iframe src
+		const iframe = document.querySelector('iframe[src*="hcaptcha.com"]');
+		if (iframe) {
+			const url = new URL(iframe.src);
+			return url.searchParams.get('sitekey') || '';
+		}
+		return '';
+	}`)
+	if err != nil || sitekey.Value.Str() == "" {
+		return fmt.Errorf("could not extract hCaptcha sitekey")
+	}
+
+	log.Info().Str("sitekey", sitekey.Value.Str()[:10]+"...").Msg("Extracted hCaptcha sitekey")
+
+	// Use the first configured provider that supports hCaptcha
+	// All 3 providers (2captcha, capsolver, anticaptcha) support HCaptchaTaskProxyless
+	for _, provider := range s.solverChain.GetProviders() {
+		// Type-assert to check if provider has SolveHCaptcha
+		type hcaptchaSolver interface {
+			SolveHCaptcha(ctx context.Context, req *captcha.HCaptchaRequest) (*captcha.CaptchaResult, error)
+		}
+		if hs, ok := provider.(hcaptchaSolver); ok {
+			result, err := hs.SolveHCaptcha(ctx, &captcha.HCaptchaRequest{
+				SiteKey:   sitekey.Value.Str(),
+				PageURL:   pageURL,
+				UserAgent: s.userAgent,
+			})
+			if err != nil {
+				log.Warn().Err(err).Str("provider", provider.Name()).Msg("hCaptcha solve failed")
+				continue
+			}
+
+			// Inject the token
+			_, injectErr := page.Eval(fmt.Sprintf(`() => {
+				// Set h-captcha-response textarea
+				const textarea = document.querySelector('[name="h-captcha-response"], [id="h-captcha-response"]');
+				if (textarea) { textarea.value = '%s'; textarea.dispatchEvent(new Event('input')); }
+				// Set g-recaptcha-response (hCaptcha uses this too)
+				const grecaptcha = document.querySelector('[name="g-recaptcha-response"]');
+				if (grecaptcha) { grecaptcha.value = '%s'; }
+				// Try to invoke callback
+				if (window.hcaptcha && window.hcaptcha.execute) {
+					try { window.hcaptcha.execute(); } catch(e) {}
+				}
+			}`, result.Token, result.Token))
+			if injectErr != nil {
+				log.Warn().Err(injectErr).Msg("Failed to inject hCaptcha token")
+			} else {
+				log.Info().Str("provider", result.Provider).Dur("solve_time", result.SolveTime).Msg("hCaptcha solved via external provider")
+				return nil
+			}
+		}
+	}
+
+	return fmt.Errorf("no provider could solve hCaptcha")
 }
 
 // findBrowserBinary resolves the actual browser ELF/Mach-O binary, following
@@ -1503,6 +1572,14 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 			}
 		}
 
+		// If hCaptcha is detected, try external solving
+		if html != "" && s.detectChallenge(html) == ChallengeHCaptcha && s.solverChain != nil {
+			log.Info().Msg("hCaptcha detected, attempting external solver")
+			if err := s.solveHCaptchaExternal(ctx, page, url); err != nil {
+				log.Warn().Err(err).Msg("hCaptcha external solve failed")
+			}
+		}
+
 		// Wait and retry with context-aware sleep (Bug 2)
 		// Phase 2: Random interval 0.8-1.5s for human-like behavior
 		if !sleepWithContext(ctx, humanize.RandomPollInterval()) {
@@ -1574,6 +1651,16 @@ func (s *Solver) detectChallenge(html string) ChallengeType {
 	for _, pattern := range sel.Turnstile {
 		if strings.Contains(htmlLower, pattern) {
 			return ChallengeTurnstile
+		}
+	}
+
+	// Check for hCaptcha
+	for _, pattern := range sel.Captcha {
+		if strings.Contains(htmlLower, strings.ToLower(pattern)) {
+			// Distinguish hCaptcha from reCAPTCHA
+			if strings.Contains(htmlLower, "hcaptcha") || strings.Contains(htmlLower, "h-captcha") {
+				return ChallengeHCaptcha
+			}
 		}
 	}
 
