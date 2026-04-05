@@ -358,10 +358,13 @@ const stealthScript = `
                 ctx.prototype.getParameter = function(param) {
                     try {
                         if (param === UNMASKED_VENDOR_WEBGL) {
-                            return 'Intel Inc.';
+                            // Must match ANGLE format: "Vendor (GPU Vendor)"
+                            return 'Google Inc. (Intel)';
                         }
                         if (param === UNMASKED_RENDERER_WEBGL) {
-                            return 'Intel Iris OpenGL Engine';
+                            // Must match ANGLE format with realistic GPU model
+                            // Real Chrome reports: "ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 655, OpenGL 4.1)"
+                            return 'ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 655, OpenGL 4.1)';
                         }
                         // Verify origFn is still valid before calling
                         // This prevents "Cannot read properties of undefined" errors
@@ -769,6 +772,108 @@ const stealthScript = `
         // Timezone patching failed, continue
     }
 
+    // ========================================
+    // 18. Fix CDP screenX/screenY detection
+    // ========================================
+    // CRITICAL: Chrome's CDP Input.dispatchMouseEvent sets event.screenX === event.clientX,
+    // while real user clicks have different values because screen coordinates include
+    // the browser window position and chrome (toolbar/tabs) offset. Cloudflare Turnstile
+    // exploits this since Feb 2025 to detect CDP-dispatched clicks.
+    //
+    // Fix: Patch MouseEvent property getters to add realistic offsets.
+    // Also set window.screenX/screenY to plausible non-zero values (headless defaults to 0,0).
+    try {
+        // Session-consistent window position (plausible desktop values)
+        // Real browsers have non-zero screenX/screenY based on window placement
+        if (!window.__screenOffsetApplied) {
+            window.__screenOffsetApplied = true;
+
+            // Plausible window position on a 1920x1080 display
+            const windowX = 50 + Math.floor(Math.random() * 200);   // 50-250
+            const windowY = 30 + Math.floor(Math.random() * 80);    // 30-110
+
+            // Browser chrome height (toolbar + tabs + address bar)
+            const chromeHeight = 79 + Math.floor(Math.random() * 12); // 79-90px
+
+            // Store for consistent use
+            window.__windowOffsetX = windowX;
+            window.__windowOffsetY = windowY;
+            window.__chromeHeight = chromeHeight;
+
+            // Set window.screenX/screenY for headless mode (normally 0,0)
+            try {
+                Object.defineProperty(window, 'screenX', {
+                    get: () => windowX,
+                    configurable: true
+                });
+                Object.defineProperty(window, 'screenY', {
+                    get: () => windowY,
+                    configurable: true
+                });
+                Object.defineProperty(window, 'screenLeft', {
+                    get: () => windowX,
+                    configurable: true
+                });
+                Object.defineProperty(window, 'screenTop', {
+                    get: () => windowY,
+                    configurable: true
+                });
+            } catch (e) {
+                // window property override failed
+            }
+
+            // Patch MouseEvent.prototype.screenX and screenY
+            // CDP sets screenX === clientX; real clicks add window position + chrome offset
+            const screenXDesc = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'screenX');
+            const screenYDesc = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'screenY');
+
+            if (screenXDesc && screenXDesc.get) {
+                const originalScreenXGet = screenXDesc.get;
+                Object.defineProperty(MouseEvent.prototype, 'screenX', {
+                    get: function() {
+                        const clientX = originalScreenXGet.call(this);
+                        // If this is a trusted event (real user), don't modify
+                        // CDP events are not trusted, so we add the offset
+                        if (this.isTrusted) return clientX;
+                        return clientX + windowX;
+                    },
+                    configurable: true
+                });
+            }
+
+            if (screenYDesc && screenYDesc.get) {
+                const originalScreenYGet = screenYDesc.get;
+                Object.defineProperty(MouseEvent.prototype, 'screenY', {
+                    get: function() {
+                        const clientY = originalScreenYGet.call(this);
+                        if (this.isTrusted) return clientY;
+                        return clientY + windowY + chromeHeight;
+                    },
+                    configurable: true
+                });
+            }
+        }
+    } catch (e) {
+        // screenX/screenY patching failed, continue
+    }
+
+    // ========================================
+    // 19. Fix devicePixelRatio for virtual displays
+    // ========================================
+    // Xvfb sets devicePixelRatio to 1.0. Most real displays are 1.25-2.0.
+    // A value of exactly 1.0 is a weak but contributing detection signal.
+    // Use 1.25 (125% scaling) which is the most common non-1.0 value on Windows.
+    try {
+        if (window.devicePixelRatio === 1) {
+            Object.defineProperty(window, 'devicePixelRatio', {
+                get: () => 1.25,
+                configurable: true
+            });
+        }
+    } catch (e) {
+        // devicePixelRatio patching failed, continue
+    }
+
     } catch (e) {
         // Silently ignore patching failures - don't log to avoid detection
     }
@@ -1020,92 +1125,3 @@ func GetBrowserUserAgent(page *rod.Page) (string, error) {
 	return result.Value.Str(), nil
 }
 
-// shadowInterceptScript intercepts Element.prototype.attachShadow to force
-// all shadow roots to open mode. This allows JavaScript-based access to
-// shadow DOM content that would otherwise be inaccessible in closed mode.
-//
-// DETECTION RISK: MEDIUM-HIGH
-// This modifies a browser prototype, which can be detected by anti-bot systems
-// that check for prototype tampering.
-//
-// Use this only as a fallback when CDP-native shadow root access fails.
-const shadowInterceptScript = `
-(() => {
-    'use strict';
-
-    // Skip if already applied
-    if (window.__shadowInterceptApplied) {
-        return;
-    }
-    window.__shadowInterceptApplied = true;
-
-    try {
-        // Store original attachShadow and Object.assign
-        const originalAttachShadow = Element.prototype.attachShadow;
-        // Cache Object.assign to prevent prototype pollution attacks
-        const safeAssign = Object.assign.bind(Object);
-
-        // Override attachShadow to force mode: 'open'
-        Element.prototype.attachShadow = function(init) {
-            // Force open mode using cached Object.assign
-            // Create a plain object first to avoid prototype pollution
-            const modifiedInit = safeAssign(Object.create(null), init, { mode: 'open' });
-            return originalAttachShadow.call(this, modifiedInit);
-        };
-
-        // Make it look native
-        Element.prototype.attachShadow.toString = function() {
-            return 'function attachShadow() { [native code] }';
-        };
-
-    } catch (e) {
-        // Silently ignore failures - don't log to avoid detection
-    }
-})();
-`
-
-// InjectShadowInterceptor injects the shadow root interception script into a page.
-// This forces all future attachShadow calls to use mode: 'open', making shadow
-// DOM content accessible via JavaScript.
-//
-// IMPORTANT: This should be called via Page.addScriptToEvaluateOnNewDocument
-// to intercept before any page scripts run. Call this only when CDP-native
-// shadow root access (via ShadowRoot()) has failed.
-//
-// Detection risk: MEDIUM-HIGH - modifies browser prototype
-//
-// Usage:
-//
-//	err := browser.InjectShadowInterceptor(page)
-//	if err != nil {
-//	    log.Warn().Err(err).Msg("Failed to inject shadow interceptor")
-//	}
-func InjectShadowInterceptor(page *rod.Page) error {
-	// Use addScriptToEvaluateOnNewDocument so it runs before page scripts
-	_, err := proto.PageAddScriptToEvaluateOnNewDocument{
-		Source: shadowInterceptScript,
-	}.Call(page)
-
-	if err != nil {
-		return fmt.Errorf("failed to inject shadow interceptor: %w", err)
-	}
-
-	log.Debug().Msg("Shadow root interceptor injected (forces mode: 'open')")
-	return nil
-}
-
-// ApplyShadowInterceptorNow applies the shadow interception script immediately
-// to the current page context. This is useful when the page has already loaded
-// but you need to intercept future shadow roots.
-//
-// Note: This won't affect shadow roots that were already created before this call.
-// For full coverage, use InjectShadowInterceptor before navigation.
-func ApplyShadowInterceptorNow(page *rod.Page) error {
-	_, err := page.Evaluate(rod.Eval(shadowInterceptScript))
-	if err != nil {
-		return fmt.Errorf("failed to apply shadow interceptor: %w", err)
-	}
-
-	log.Debug().Msg("Shadow root interceptor applied to current context")
-	return nil
-}

@@ -9,11 +9,16 @@ import (
 	"fmt"
 	"net"
 	neturl "net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/input"
+	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
 	"github.com/rs/zerolog/log"
@@ -512,6 +517,18 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// Main solve loop with DNS pinning
 	result, err = s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
 	if err != nil {
+		// If the challenge timed out and we still have time in the parent context,
+		// try the disconnect/reconnect approach. This disconnects the CDP debugger
+		// so Cloudflare can't detect it, lets Chrome handle the challenge naturally,
+		// then reconnects to extract results.
+		if strings.Contains(err.Error(), "timed out") && ctx.Err() == nil {
+			log.Info().Msg("Normal solve timed out, attempting CDP disconnect/reconnect bypass")
+			reconnResult, reconnErr := s.solveWithReconnect(ctx, browserInstance, opts)
+			if reconnErr == nil {
+				return reconnResult, nil
+			}
+			log.Warn().Err(reconnErr).Msg("Reconnect bypass also failed")
+		}
 		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
 	}
 
@@ -525,6 +542,297 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	return result, nil
+}
+
+// findBrowserBinary resolves the actual browser ELF/Mach-O binary, following
+// symlinks and skipping wrapper scripts. Wrapper scripts (like Alpine's
+// chromium-launcher.sh) can have single-instance logic that merges new launches
+// into existing browser processes.
+func findBrowserBinary(configuredPath string) string {
+	// Candidates in priority order: configured path, then well-known locations
+	candidates := []string{
+		configuredPath,
+		"/usr/lib/chromium/chromium",                                          // Alpine actual binary
+		"/usr/bin/chromium",                                                   // Direct binary on some distros
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",        // macOS
+		"/usr/bin/google-chrome-stable",                                       // Debian/Ubuntu
+		"/usr/bin/google-chrome",                                              // Generic
+		"/usr/bin/chromium-browser",                                           // Fallback (may be wrapper)
+	}
+
+	for _, path := range candidates {
+		if path == "" {
+			continue
+		}
+		// Resolve symlinks
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		// Skip shell scripts (wrapper scripts) — read first 4 bytes
+		f, err := os.Open(resolved)
+		if err != nil {
+			continue
+		}
+		header := make([]byte, 4)
+		n, _ := f.Read(header)
+		f.Close()
+		if n >= 2 && string(header[:2]) == "#!" {
+			// This is a shell script wrapper, skip it
+			log.Debug().Str("path", resolved).Msg("Skipping shell script wrapper")
+			continue
+		}
+		return resolved
+	}
+	return ""
+}
+
+// getFreePort returns a random available TCP port by briefly listening and closing.
+func getFreePort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	return port, nil
+}
+
+// deadCDPClient is a no-op CDP client used to sever the debugger connection
+// without killing the browser process. When set on a Browser via Client(),
+// it effectively disconnects rod from Chrome.
+type deadCDPClient struct {
+	ch chan *cdp.Event
+}
+
+func newDeadCDPClient() *deadCDPClient {
+	return &deadCDPClient{ch: make(chan *cdp.Event)}
+}
+
+func (d *deadCDPClient) Event() <-chan *cdp.Event {
+	return d.ch
+}
+
+func (d *deadCDPClient) Call(_ context.Context, _, _ string, _ interface{}) ([]byte, error) {
+	return nil, fmt.Errorf("CDP disconnected")
+}
+
+// solveWithReconnect bypasses Cloudflare's CDP detection using a two-phase approach:
+//
+// Phase 1: Launch a CLEAN Chrome (zero automation flags, zero CDP) with the target URL.
+//
+//	Chrome handles the Cloudflare challenge as a real browser. Cookies are saved
+//	to a temporary user-data-dir.
+//
+// Phase 2: Kill Phase 1 Chrome. Relaunch from the SAME user-data-dir with
+//
+//	--remote-debugging-port in HEADED mode. The persisted cf_clearance cookie
+//	bypasses the challenge. Connect via CDP to extract results.
+//
+// This works because Cloudflare's cf_clearance cookie is bound to IP + UA + TLS
+// fingerprint, all of which match since we use the same Chrome binary.
+func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *SolveOptions) (*Result, error) {
+	const phase1Wait = 25 * time.Second
+
+	// Get a random available port for Phase 2's debugging endpoint
+	// to avoid conflicts if multiple bypass attempts run concurrently.
+	debugPort, err := getFreePort()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get free port for bypass: %w", err)
+	}
+
+	// Find the actual browser binary (not a wrapper script).
+	// On Alpine Linux, /usr/bin/chromium-browser is a shell wrapper that may
+	// have single-instance logic. We need the actual ELF binary to ensure
+	// Phase 1/2 launch as separate processes from the pool's browser.
+	browserPath := findBrowserBinary(s.pool.GetBrowserPath())
+	if browserPath == "" {
+		return nil, fmt.Errorf("two-phase bypass requires a Chrome/Chromium binary")
+	}
+
+	// Create a temporary user-data-dir for cookie persistence between phases
+	userDataDir := fmt.Sprintf("/tmp/flaresolverr-bypass-%d", time.Now().UnixNano())
+
+	// Create stealth extension to inject anti-detection patches without CDP.
+	// This applies the same stealth.go patches (webdriver, plugins, WebGL spoof,
+	// canvas noise, etc.) via a Chrome content script in MAIN world.
+	stealthExt, err := browser.NewStealthExtension()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stealth extension: %w", err)
+	}
+	defer stealthExt.Cleanup()
+
+	log.Info().
+		Str("url", opts.URL).
+		Str("user_data_dir", userDataDir).
+		Str("stealth_ext", stealthExt.Dir()).
+		Msg("Starting two-phase CDP bypass")
+
+	// ========================================
+	// Phase 1: Clean Chrome — no CDP, stealth via extension
+	// ========================================
+	log.Info().Dur("wait", phase1Wait).Msg("Phase 1: Launching Chrome with stealth extension...")
+
+	phase1Args := []string{
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--no-sandbox",
+		"--user-data-dir=" + userDataDir,
+		"--window-size=1920,1080",
+		"--force-device-scale-factor=1.25",         // Realistic DPI (Xvfb defaults to 1.0)
+		"--load-extension=" + stealthExt.Dir(),      // Stealth patches without CDP
+		opts.URL,
+	}
+	log.Debug().
+		Str("browser", browserPath).
+		Strs("args", phase1Args).
+		Msg("Phase 1 command")
+
+	cmd := exec.Command(browserPath, phase1Args...)
+
+	// Filter environment: remove software rendering signals that Cloudflare can detect.
+	// LIBGL_ALWAYS_SOFTWARE=1 and GALLIUM_DRIVER=llvmpipe cause WebGL to report
+	// "llvmpipe" or "Mesa" as the renderer instead of a real GPU.
+	filteredEnv := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "LIBGL_ALWAYS_SOFTWARE=") ||
+			strings.HasPrefix(e, "GALLIUM_DRIVER=") ||
+			strings.HasPrefix(e, "LP_NUM_THREADS=") {
+			continue
+		}
+		filteredEnv = append(filteredEnv, e)
+	}
+	cmd.Env = filteredEnv
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to launch clean Chrome: %w", err)
+	}
+
+	// Wait for challenge to resolve
+	phase1Done := make(chan struct{})
+	go func() {
+		sleepWithContext(ctx, phase1Wait)
+		close(phase1Done)
+	}()
+
+	select {
+	case <-phase1Done:
+		// Kill Phase 1 Chrome
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+		return nil, ctx.Err()
+	}
+
+	log.Info().Msg("Phase 1 complete, cookies should be saved")
+
+	// ========================================
+	// Phase 2: Relaunch with CDP to extract results
+	// ========================================
+	log.Info().Int("port", debugPort).Msg("Phase 2: Relaunching with CDP for extraction...")
+
+	cmd2 := exec.Command(browserPath,
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--no-sandbox",
+		"--user-data-dir="+userDataDir,
+		"--remote-debugging-port="+fmt.Sprintf("%d", debugPort),
+		"--window-size=1920,1080",
+		opts.URL,
+	)
+	cmd2.Stderr = nil
+	cmd2.Stdout = nil
+
+	if err := cmd2.Start(); err != nil {
+		os.RemoveAll(userDataDir)
+		return nil, fmt.Errorf("failed to launch Phase 2 Chrome: %w", err)
+	}
+	defer func() {
+		if cmd2.Process != nil {
+			cmd2.Process.Kill()
+			cmd2.Wait()
+		}
+		// Clean up temp dir
+		os.RemoveAll(userDataDir)
+	}()
+
+	// Wait for Chrome to start and the debugging port to be ready
+	var freshURL string
+	for i := 0; i < 30; i++ {
+		sleepWithContext(ctx, 500*time.Millisecond)
+		var resolveErr error
+		freshURL, resolveErr = launcher.ResolveURL(fmt.Sprintf("%d", debugPort))
+		if resolveErr == nil {
+			break
+		}
+	}
+	if freshURL == "" {
+		return nil, fmt.Errorf("Phase 2 Chrome did not start debugging endpoint")
+	}
+
+	// Connect via rod
+	reconnBrowser := rod.New().ControlURL(freshURL)
+	if err := reconnBrowser.Connect(); err != nil {
+		return nil, fmt.Errorf("failed to connect to Phase 2 browser: %w", err)
+	}
+
+	// Wait for the page to load with persisted cookies
+	sleepWithContext(ctx, 10*time.Second)
+
+	// Find the resolved page
+	pages, err := reconnBrowser.Pages()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pages: %w", err)
+	}
+
+	var targetPage *rod.Page
+	for _, p := range pages {
+		pInfo, infoErr := p.Info()
+		if infoErr != nil {
+			continue
+		}
+		titleLower := strings.ToLower(pInfo.Title)
+		if pInfo.Title != "" && pInfo.Title != "about:blank" &&
+			!strings.Contains(titleLower, "just a moment") &&
+			!strings.Contains(titleLower, "checking your browser") &&
+			!strings.Contains(titleLower, "please wait") &&
+			!strings.Contains(titleLower, "performing security") {
+			targetPage = p
+			log.Info().Str("title", pInfo.Title).Str("url", pInfo.URL).Msg("Challenge resolved via two-phase bypass!")
+			break
+		}
+	}
+
+	if targetPage == nil {
+		for _, p := range pages {
+			if pInfo, err := p.Info(); err == nil {
+				log.Debug().Str("title", pInfo.Title).Str("url", pInfo.URL).Msg("Page found after Phase 2")
+			}
+		}
+		return nil, fmt.Errorf("challenge not resolved after two-phase bypass (found %d pages)", len(pages))
+	}
+
+	// Extract results
+	solveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	networkCapture, networkCleanup, ncErr := setupNetworkCapture(solveCtx, targetPage)
+	if ncErr != nil {
+		log.Warn().Err(ncErr).Msg("Failed to setup network capture")
+	}
+	defer networkCleanup()
+
+	return s.buildResult(targetPage, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.SkipResponseValidation, networkCapture)
 }
 
 // setCookies sets cookies on the page before navigation.
@@ -889,6 +1197,18 @@ var challengeSelectors = []string{
 	"#challenge-stage",
 	"#cf-spinner-please-wait",
 	"#cf-spinner-redirecting",
+	"iframe[src*='challenges.cloudflare.com']", // Turnstile embedded in CF interstitial iframe
+}
+
+// turnstileTriggerSelectors are selectors that should trigger Turnstile solving.
+// This is broader than just .cf-turnstile — it includes CF interstitial page indicators
+// where Turnstile is embedded inside iframes.
+var turnstileTriggerSelectors = map[string]bool{
+	"#turnstile-wrapper":                        true,
+	".cf-turnstile":                              true,
+	"iframe[src*='challenges.cloudflare.com']":   true,
+	"#cf-challenge-running":                      true,
+	"#challenge-stage":                           true,
 }
 
 // solveLoop repeatedly checks for and attempts to solve challenges.
@@ -976,7 +1296,9 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture)
 		}
 
-		// Check for access denied
+		// Check for access denied — but only after giving the JS challenge
+		// a few attempts to resolve. The "Just a moment..." interstitial page
+		// can briefly contain access denied patterns before redirecting.
 		html, err := page.HTML()
 		if err != nil {
 			// Fix: Return error if HTML retrieval fails since we can't determine page state
@@ -984,12 +1306,28 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 			return nil, fmt.Errorf("failed to get page HTML: %w", err)
 		}
 		if html != "" && s.detectChallenge(html) == ChallengeAccessDenied {
-			return nil, types.NewAccessDeniedError(url)
+			if attempt >= 3 {
+				return nil, types.NewAccessDeniedError(url)
+			}
+			log.Debug().
+				Int("attempt", attempt+1).
+				Msg("Possible access denied, but waiting for JS challenge to resolve first")
 		}
 
-		// If Turnstile is present, try to solve it
-		// Check for both #turnstile-wrapper (ID) and .cf-turnstile (class)
-		if challengeSelector == "#turnstile-wrapper" || challengeSelector == ".cf-turnstile" {
+		// If Turnstile is present, try to solve it.
+		// Trigger on known Turnstile selectors OR when HTML analysis detects Turnstile
+		// (e.g., embedded in CF interstitial iframe where .cf-turnstile isn't on the main page).
+		shouldSolveTurnstile := turnstileTriggerSelectors[challengeSelector]
+		if !shouldSolveTurnstile && html != "" {
+			htmlChallenge := s.detectChallenge(html)
+			shouldSolveTurnstile = htmlChallenge == ChallengeTurnstile
+		}
+		// Also trigger Turnstile solving when stuck on JS challenge for multiple attempts
+		// — the interstitial may have an embedded Turnstile that needs interaction
+		if !shouldSolveTurnstile && challengeInTitle && attempt >= 5 {
+			shouldSolveTurnstile = true
+		}
+		if shouldSolveTurnstile {
 			turnstileAttempts++
 			log.Debug().
 				Str("selector", challengeSelector).
@@ -1278,7 +1616,7 @@ func (s *Solver) hasCfClearanceCookie(page *rod.Page) bool {
 func (s *Solver) getTurnstileMethodOrder(domain string) []string {
 	// Default order (if no stats or no history)
 	// "wait" is first because invisible Turnstile auto-solves without interaction
-	defaultOrder := []string{"wait", "shadow", "keyboard", "widget", "iframe", "positional"}
+	defaultOrder := []string{"wait", "keyboard", "shadow", "widget", "iframe", "positional"}
 
 	if s.statsManager == nil || domain == "" {
 		return defaultOrder

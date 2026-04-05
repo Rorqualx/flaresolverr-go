@@ -59,6 +59,10 @@ type Pool struct {
 	// Issue #11: Semaphore to limit concurrent recycles
 	recycleSem chan struct{}
 
+	// Control URLs for CDP reconnection support.
+	// Maps browser pointer to its WebSocket debugging URL.
+	controlURLs sync.Map // map[*rod.Browser]string
+
 	// Statistics for monitoring
 	stats PoolStats
 }
@@ -68,6 +72,23 @@ type browserEntry struct {
 	browser   *rod.Browser
 	createdAt time.Time
 	useCount  atomic.Int64
+}
+
+// GetControlURL returns the WebSocket debugging URL for a browser instance.
+// Used by the solver's disconnect/reconnect bypass to reconnect to a browser
+// after temporarily severing the CDP connection.
+func (p *Pool) GetControlURL(browser *rod.Browser) (string, bool) {
+	val, ok := p.controlURLs.Load(browser)
+	if !ok {
+		return "", false
+	}
+	return val.(string), true
+}
+
+// GetBrowserPath returns the configured browser path.
+// Used by the solver's two-phase bypass to launch a clean Chrome process.
+func (p *Pool) GetBrowserPath() string {
+	return p.config.BrowserPath
 }
 
 // PoolStats provides statistics about pool usage.
@@ -370,6 +391,10 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	}
 
 	log.Debug().Str("url", url).Msg("Browser spawned successfully")
+
+	// Store control URL for reconnection support
+	p.controlURLs.Store(browser, url)
+
 	return browser, nil
 }
 

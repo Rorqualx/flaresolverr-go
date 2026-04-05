@@ -9,7 +9,6 @@ access_denied:
   - "error 1012"
   - "error 1020"
   - "you have been blocked"
-  - "ray id:"
 
 # Turnstile challenge patterns
 turnstile:
@@ -55,6 +54,7 @@ turnstile_frame_pattern: "challenges.cloudflare.com"
 # These are elements that may contain a shadow root with the Turnstile checkbox
 # Modern selectors for Cloudflare Turnstile (2024+)
 shadow_hosts:
+  - "div:has(> input[name='cf-turnstile-response'])"
   - "div.cf-turnstile-wrapper"
   - ".cf-turnstile"
   - "#turnstile-wrapper"

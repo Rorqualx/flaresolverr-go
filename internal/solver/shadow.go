@@ -80,6 +80,19 @@ func (t *ShadowRootTraverser) FindTurnstileCheckbox(ctx context.Context) (*rod.E
 			Msg("Shadow host selector did not yield checkbox")
 	}
 
+	// Try the landmark approach: find input[name="cf-turnstile-response"] and navigate to parent
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	element, err := t.findCheckboxViaLandmark(ctx)
+	if err == nil && element != nil {
+		log.Debug().Msg("Found checkbox via cf-turnstile-response landmark")
+		return element, nil
+	}
+
 	// Check context before iframe search
 	select {
 	case <-ctx.Done():
@@ -88,9 +101,22 @@ func (t *ShadowRootTraverser) FindTurnstileCheckbox(ctx context.Context) (*rod.E
 	}
 
 	// Try finding Turnstile iframes and checking their shadow roots
-	element, err := t.findCheckboxInTurnstileIframes(ctx)
+	element, err = t.findCheckboxInTurnstileIframes(ctx)
 	if err == nil && element != nil {
 		log.Debug().Msg("Found checkbox in Turnstile iframe shadow root")
+		return element, nil
+	}
+
+	// Last resort: full DOM tree scan with pierce to find checkbox in any shadow root
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	element, err = t.findCheckboxViaFullTree(ctx)
+	if err == nil && element != nil {
+		log.Debug().Msg("Found checkbox via full DOM tree scan")
 		return element, nil
 	}
 
@@ -166,6 +192,105 @@ func (t *ShadowRootTraverser) findCheckboxViaHost(ctx context.Context, hostSelec
 			}
 
 			// Check for nested shadow root in iframe
+			nestedCheckbox, err := t.findCheckboxInNestedShadow(ctx, frame)
+			if err == nil && nestedCheckbox != nil {
+				return nestedCheckbox, nil
+			}
+		}
+	}
+
+	return nil, ErrCheckboxNotFound
+}
+
+// findCheckboxViaLandmark locates the Turnstile checkbox by finding the hidden
+// input[name="cf-turnstile-response"] element and navigating to its parent container.
+// This input is structurally required by Cloudflare for form submission, making it
+// one of the most stable anchors for locating the Turnstile widget.
+func (t *ShadowRootTraverser) findCheckboxViaLandmark(ctx context.Context) (*rod.Element, error) {
+	const landmarkSelector = "input[name='cf-turnstile-response']"
+
+	has, _, _ := t.page.Has(landmarkSelector)
+	if !has {
+		return nil, fmt.Errorf("landmark input not found")
+	}
+
+	// Find the landmark input
+	input, err := t.page.Timeout(t.timeout).Element(landmarkSelector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get landmark input: %w", err)
+	}
+	defer func() {
+		if err := input.Release(); err != nil {
+			log.Debug().Err(err).Msg("Failed to release landmark input element")
+		}
+	}()
+
+	// Navigate to parent element via JS eval — the parent container typically
+	// holds the shadow root containing the Turnstile iframe and checkbox
+	parent, err := input.Parent()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get landmark parent: %w", err)
+	}
+	defer func() {
+		if err := parent.Release(); err != nil {
+			log.Debug().Err(err).Msg("Failed to release landmark parent element")
+		}
+	}()
+
+	// Check if the parent has a shadow root
+	shadowRoot, err := parent.ShadowRoot()
+	if err != nil || shadowRoot == nil {
+		// Try grandparent — some layouts nest the input deeper
+		grandparent, gpErr := parent.Parent()
+		if gpErr != nil {
+			return nil, ErrShadowRootNotAccessible
+		}
+		defer func() {
+			if err := grandparent.Release(); err != nil {
+				log.Debug().Err(err).Msg("Failed to release landmark grandparent element")
+			}
+		}()
+
+		shadowRoot, err = grandparent.ShadowRoot()
+		if err != nil || shadowRoot == nil {
+			return nil, ErrShadowRootNotAccessible
+		}
+	}
+
+	// Search for checkbox within the shadow root
+	sel := selectors.Get()
+	for _, checkboxSelector := range sel.ShadowInnerSelectors {
+		checkbox, err := shadowRoot.Element(checkboxSelector)
+		if err == nil && checkbox != nil {
+			log.Debug().
+				Str("checkbox_selector", checkboxSelector).
+				Msg("Found checkbox via landmark parent shadow root")
+			return checkbox, nil
+		}
+	}
+
+	// Check for iframe within shadow root
+	iframe, err := shadowRoot.Element("iframe")
+	if err == nil && iframe != nil {
+		defer func() {
+			if err := iframe.Release(); err != nil {
+				log.Debug().Err(err).Msg("Failed to release landmark iframe element")
+			}
+		}()
+
+		frame, err := iframe.Frame()
+		if err == nil && frame != nil {
+			for _, checkboxSelector := range sel.ShadowInnerSelectors {
+				checkbox, err := frame.Timeout(t.timeout).Element(checkboxSelector)
+				if err == nil && checkbox != nil {
+					log.Debug().
+						Str("checkbox_selector", checkboxSelector).
+						Msg("Found checkbox in iframe via landmark")
+					return checkbox, nil
+				}
+			}
+
+			// Check nested shadow roots in the iframe
 			nestedCheckbox, err := t.findCheckboxInNestedShadow(ctx, frame)
 			if err == nil && nestedCheckbox != nil {
 				return nestedCheckbox, nil
@@ -326,6 +451,194 @@ func (t *ShadowRootTraverser) findCheckboxInTurnstileIframes(ctx context.Context
 	}
 
 	return nil, ErrCheckboxNotFound
+}
+
+// findCheckboxViaFullTree uses DOM.getDocument with depth:-1 and pierce:true to get
+// the entire DOM tree including closed shadow roots, then walks it looking for
+// checkbox elements within Turnstile-related subtrees. This is the last resort
+// when all selector-based approaches fail.
+func (t *ShadowRootTraverser) findCheckboxViaFullTree(ctx context.Context) (*rod.Element, error) {
+	const maxNodes = 50000
+
+	depth := -1
+	result, err := proto.DOMGetDocument{
+		Depth:  &depth,
+		Pierce: true,
+	}.Call(t.page)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get full DOM tree: %w", err)
+	}
+
+	if result == nil || result.Root == nil {
+		return nil, fmt.Errorf("DOM tree is empty")
+	}
+
+	// Walk the tree to find checkbox backend node IDs within Turnstile-related subtrees
+	var checkboxNodeID proto.DOMBackendNodeID
+	nodesVisited := 0
+	found := false
+
+	var walkNode func(node *proto.DOMNode, inTurnstileContext bool)
+	walkNode = func(node *proto.DOMNode, inTurnstileContext bool) {
+		if found || node == nil {
+			return
+		}
+
+		// Check context cancellation periodically
+		nodesVisited++
+		if nodesVisited > maxNodes {
+			return
+		}
+		if nodesVisited%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+
+		// Check if this node is Turnstile-related (activates context for children)
+		isTurnstile := inTurnstileContext
+		if !isTurnstile {
+			isTurnstile = isNodeTurnstileRelated(node)
+		}
+
+		// If we're in a Turnstile context, check if this node is a checkbox
+		if isTurnstile && isNodeCheckbox(node) {
+			checkboxNodeID = node.BackendNodeID
+			found = true
+			return
+		}
+
+		// Walk shadow roots (these are the closed roots we can see via pierce)
+		for _, shadow := range node.ShadowRoots {
+			walkNode(shadow, isTurnstile)
+			if found {
+				return
+			}
+		}
+
+		// Walk content document (for iframes)
+		if node.ContentDocument != nil {
+			walkNode(node.ContentDocument, isTurnstile)
+			if found {
+				return
+			}
+		}
+
+		// Walk template content
+		if node.TemplateContent != nil {
+			walkNode(node.TemplateContent, isTurnstile)
+			if found {
+				return
+			}
+		}
+
+		// Walk children
+		for _, child := range node.Children {
+			walkNode(child, isTurnstile)
+			if found {
+				return
+			}
+		}
+	}
+
+	walkNode(result.Root, false)
+
+	if !found {
+		return nil, ErrCheckboxNotFound
+	}
+
+	// Resolve the found node into an interactive element
+	resolveResult, err := proto.DOMResolveNode{
+		BackendNodeID: checkboxNodeID,
+	}.Call(t.page)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve checkbox node: %w", err)
+	}
+
+	element, err := t.page.ElementFromObject(resolveResult.Object)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create element from resolved node: %w", err)
+	}
+
+	log.Info().
+		Int("nodes_visited", nodesVisited).
+		Msg("Found Turnstile checkbox via full DOM tree scan")
+	return element, nil
+}
+
+// isNodeTurnstileRelated checks if a DOM node is related to Cloudflare Turnstile.
+func isNodeTurnstileRelated(node *proto.DOMNode) bool {
+	if node == nil {
+		return false
+	}
+
+	localName := node.LocalName
+
+	// Check for Turnstile custom element
+	if localName == "cf-turnstile" {
+		return true
+	}
+
+	// Check attributes (flat array: [name1, value1, name2, value2, ...])
+	for i := 0; i+1 < len(node.Attributes); i += 2 {
+		name := node.Attributes[i]
+		value := node.Attributes[i+1]
+
+		switch name {
+		case "class":
+			if contains(value, "cf-turnstile") || contains(value, "turnstile") {
+				return true
+			}
+		case "id":
+			if contains(value, "turnstile") || contains(value, "cf-challenge") {
+				return true
+			}
+		case "data-sitekey", "data-cf-turnstile":
+			return true
+		case "name":
+			if value == "cf-turnstile-response" {
+				return true
+			}
+		case "src":
+			if contains(value, "challenges.cloudflare.com") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isNodeCheckbox checks if a DOM node represents a checkbox element.
+func isNodeCheckbox(node *proto.DOMNode) bool {
+	if node == nil || node.NodeType != 1 { // 1 = ELEMENT_NODE
+		return false
+	}
+
+	localName := node.LocalName
+
+	// Check input[type="checkbox"]
+	if localName == "input" {
+		for i := 0; i+1 < len(node.Attributes); i += 2 {
+			if node.Attributes[i] == "type" && node.Attributes[i+1] == "checkbox" {
+				return true
+			}
+		}
+	}
+
+	// Check elements with role="checkbox"
+	for i := 0; i+1 < len(node.Attributes); i += 2 {
+		if node.Attributes[i] == "role" && node.Attributes[i+1] == "checkbox" {
+			return true
+		}
+		if node.Attributes[i] == "aria-checked" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // containsTurnstilePattern checks if a URL contains the Turnstile frame pattern.
