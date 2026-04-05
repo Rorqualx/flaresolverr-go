@@ -279,6 +279,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serve Prometheus metrics
+	if r.URL.Path == "/metrics" {
+		h.handleMetrics(w)
+		return
+	}
+
 	// Only POST is allowed for the main endpoint
 	if r.Method != http.MethodPost {
 		h.writeError(w, "Method not allowed", startTime)
