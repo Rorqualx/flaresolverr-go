@@ -50,9 +50,9 @@ type Request struct {
 	Download          bool              `json:"download,omitempty"`         // Download URL as binary and return base64 in response
 	FollowRedirects   *bool             `json:"followRedirects,omitempty"`  // Follow HTTP redirects (default: true)
 	CaptchaSolver     string            `json:"captchaSolver,omitempty"`    // Per-request captcha provider: "2captcha", "capsolver", or "none"
-	CaptchaApiKey     string            `json:"captchaApiKey,omitempty"`    // Per-request captcha API key
+	CaptchaApiKey     string            `json:"captchaApiKey,omitempty"`    //nolint:revive,stylecheck // JSON API compatibility
 	UserAgent         string            `json:"userAgent,omitempty"`        // Override User-Agent for this request
-	ReturnRawHtml      bool              `json:"returnRawHtml,omitempty"`      // Return raw HTML before JS rendering
+	ReturnRawHtml      bool              `json:"returnRawHtml,omitempty"`      //nolint:revive,stylecheck // JSON API compatibility
 	ExecuteJs          string            `json:"executeJs,omitempty"`          // Custom JavaScript to execute after solve
 	KeepaliveTTL       int               `json:"keepaliveTtl,omitempty"`       // New TTL in minutes for sessions.keepalive (0 = just touch)
 	CookieExtractDelay int               `json:"cookieExtractDelay,omitempty"` // Seconds to wait before extracting cookies (0-30)

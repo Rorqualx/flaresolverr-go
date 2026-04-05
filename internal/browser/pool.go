@@ -84,7 +84,8 @@ func (p *Pool) GetControlURL(browser *rod.Browser) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return val.(string), true
+	s, ok := val.(string)
+	return s, ok
 }
 
 // GetBrowserPath returns the configured browser path.

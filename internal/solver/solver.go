@@ -88,12 +88,10 @@ type SolveOptions struct {
 	FollowRedirects *bool
 	// CaptchaSolver overrides the global captcha provider for this request.
 	CaptchaSolver string
-	// CaptchaApiKey overrides the global captcha API key for this request.
-	CaptchaApiKey string
+	CaptchaApiKey string //nolint:revive,stylecheck // JSON API compatibility
 	// UserAgent overrides the browser's User-Agent for this request.
 	UserAgent string
-	// ReturnRawHtml returns raw HTML from the initial page source before JS rendering.
-	ReturnRawHtml bool
+	ReturnRawHtml bool //nolint:revive,stylecheck // JSON API compatibility
 	// ExecuteJs is custom JavaScript to execute on the page after solving.
 	ExecuteJs string
 	// CookieExtractDelay is the number of seconds to wait before extracting cookies.
@@ -550,7 +548,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}`
 
 		// Navigate to about:blank first, then use fetch
-		page.Context(solveCtx).Navigate("about:blank")
+		if err := page.Context(solveCtx).Navigate("about:blank"); err != nil {
+			return nil, fmt.Errorf("failed to navigate to about:blank for fetch: %w", err)
+		}
 		sleepWithContext(solveCtx, 500*time.Millisecond)
 
 		fetchResult, evalErr := page.Timeout(30 * time.Second).Evaluate(rod.Eval(noRedirectJS).ByPromise())
@@ -815,7 +815,9 @@ func findBrowserBinary(configuredPath string) string {
 		}
 		header := make([]byte, 4)
 		n, _ := f.Read(header)
-		f.Close()
+		if err := f.Close(); err != nil {
+			log.Debug().Err(err).Str("path", resolved).Msg("failed to close file during browser search")
+		}
 		if n >= 2 && string(header[:2]) == "#!" {
 			// This is a shell script wrapper, skip it
 			log.Debug().Str("path", resolved).Msg("Skipping shell script wrapper")
@@ -832,8 +834,15 @@ func getFreePort() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close() // Best-effort cleanup on unexpected address type
+		return 0, fmt.Errorf("listener address is not TCP")
+	}
+	port := tcpAddr.Port
+	if err := listener.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close listener: %w", err)
+	}
 	return port, nil
 }
 
@@ -959,13 +968,13 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	case <-phase1Done:
 		// Kill Phase 1 Chrome
 		if cmd.Process != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
+			_ = cmd.Process.Kill() // Best-effort cleanup during shutdown
+			_ = cmd.Wait()         // Best-effort cleanup during shutdown
 		}
 	case <-ctx.Done():
 		if cmd.Process != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
+			_ = cmd.Process.Kill() // Best-effort cleanup on context cancellation
+			_ = cmd.Wait()         // Best-effort cleanup on context cancellation
 		}
 		return nil, ctx.Err()
 	}
@@ -995,8 +1004,8 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	}
 	defer func() {
 		if cmd2.Process != nil {
-			cmd2.Process.Kill()
-			cmd2.Wait()
+			_ = cmd2.Process.Kill() // Best-effort cleanup during shutdown
+			_ = cmd2.Wait()         // Best-effort cleanup during shutdown
 		}
 		// Clean up temp dir
 		os.RemoveAll(userDataDir)
