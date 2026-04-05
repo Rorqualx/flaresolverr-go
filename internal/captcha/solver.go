@@ -38,6 +38,16 @@ type TurnstileRequest struct {
 	CData     string // Optional cData parameter
 }
 
+// HCaptchaRequest contains the parameters needed to solve an hCaptcha challenge.
+type HCaptchaRequest struct {
+	SiteKey   string // The hCaptcha sitekey (data-sitekey attribute)
+	PageURL   string // The URL of the page containing the hCaptcha
+	UserAgent string // The user agent to use for solving
+}
+
+// CaptchaResult contains the solution from a CAPTCHA solver (generic).
+type CaptchaResult = TurnstileResult
+
 // TurnstileResult contains the solution from a CAPTCHA solver.
 type TurnstileResult struct {
 	Token     string        // The solution token to inject

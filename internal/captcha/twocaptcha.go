@@ -339,6 +339,80 @@ func (s *TwoCaptchaSolver) Balance(ctx context.Context) (float64, error) {
 	return balanceResp.Balance, nil
 }
 
+// SolveHCaptcha solves an hCaptcha challenge using the 2Captcha-compatible API.
+// The task type is "HCaptchaTaskProxyless" which all 3 providers support.
+func (s *TwoCaptchaSolver) SolveHCaptcha(ctx context.Context, req *HCaptchaRequest) (*CaptchaResult, error) {
+	if !s.IsConfigured() {
+		return nil, fmt.Errorf("%s API key not configured", s.Name())
+	}
+
+	startTime := time.Now()
+
+	// Create hCaptcha task (same API structure, different task type)
+	taskReq := twoCaptchaCreateTaskRequest{
+		ClientKey: s.apiKey,
+		Task: twoCaptchaTurnstileTask{
+			Type:       "HCaptchaTaskProxyless",
+			WebsiteURL: req.PageURL,
+			WebsiteKey: req.SiteKey,
+		},
+	}
+
+	body, err := json.Marshal(taskReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+twoCaptchaCreateTask, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var taskResp twoCaptchaCreateTaskResponse
+	if err := json.Unmarshal(respBody, &taskResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if taskResp.ErrorID != 0 {
+		return nil, s.handleError(taskResp.ErrorCode, taskResp.ErrorDescription, "")
+	}
+
+	log.Debug().
+		Int64("task_id", taskResp.TaskID).
+		Msg("hCaptcha task created via " + s.Name())
+
+	// Poll for result (reuse existing poll method)
+	result, err := s.pollResult(ctx, taskResp.TaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	solveTime := time.Since(startTime)
+	var cost float64
+	if result.Cost != "" {
+		_, _ = fmt.Sscanf(result.Cost, "%f", &cost)
+	}
+
+	return &CaptchaResult{
+		Token:     result.Solution.Token,
+		SolveTime: solveTime,
+		Cost:      cost,
+		Provider:  s.Name(),
+	}, nil
+}
+
 // handleError converts 2Captcha error codes to appropriate error types.
 func (s *TwoCaptchaSolver) handleError(code, description, taskID string) error {
 	switch code {

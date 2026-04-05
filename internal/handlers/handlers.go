@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
+	"github.com/Rorqualx/flaresolverr-go/internal/captcha"
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 	"github.com/Rorqualx/flaresolverr-go/internal/ratelimit"
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
@@ -195,6 +196,53 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 	// Wire up stats manager to solver for Turnstile method tracking
 	// This enables per-domain learning of which solving methods work best
 	solverInstance.SetStatsManager(domainStats)
+
+	// Set up external CAPTCHA solver chain if configured
+	if cfg.HasCaptchaFallback() {
+		var providers []captcha.CaptchaSolver
+
+		// Build provider list in priority order
+		addProvider := func(name string, provider captcha.CaptchaSolver) {
+			if provider.IsConfigured() {
+				providers = append(providers, provider)
+				log.Debug().Str("provider", name).Msg("CAPTCHA provider registered")
+			}
+		}
+
+		twoCaptcha := captcha.NewTwoCaptchaSolver(captcha.TwoCaptchaConfig{
+			APIKey: cfg.Captcha2CaptchaAPIKey, Timeout: cfg.CaptchaSolverTimeout,
+		})
+		capSolver := captcha.NewCapSolverSolver(captcha.CapSolverConfig{
+			APIKey: cfg.CaptchaCapSolverAPIKey, Timeout: cfg.CaptchaSolverTimeout,
+		})
+		antiCaptcha := captcha.NewAntiCaptchaSolver(captcha.AntiCaptchaConfig{
+			APIKey: cfg.CaptchaAntiCaptchaAPIKey, Timeout: cfg.CaptchaSolverTimeout,
+		})
+
+		// Add primary provider first
+		switch cfg.CaptchaPrimaryProvider {
+		case "capsolver":
+			addProvider("capsolver", capSolver)
+			addProvider("2captcha", twoCaptcha)
+			addProvider("anticaptcha", antiCaptcha)
+		case "anticaptcha":
+			addProvider("anticaptcha", antiCaptcha)
+			addProvider("2captcha", twoCaptcha)
+			addProvider("capsolver", capSolver)
+		default: // "2captcha"
+			addProvider("2captcha", twoCaptcha)
+			addProvider("capsolver", capSolver)
+			addProvider("anticaptcha", antiCaptcha)
+		}
+
+		if len(providers) > 0 {
+			chain := captcha.NewSolverChain(captcha.SolverChainConfig{
+				NativeAttempts: cfg.CaptchaNativeAttempts,
+				Providers:      providers,
+			})
+			solverInstance.SetSolverChain(chain)
+		}
+	}
 
 	return &Handler{
 		pool:             pool,

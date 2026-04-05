@@ -183,10 +183,10 @@ func (r *Request) Validate() error {
 	// Validate captchaSolver if present
 	if r.CaptchaSolver != "" {
 		switch r.CaptchaSolver {
-		case "2captcha", "capsolver", "none":
+		case "2captcha", "capsolver", "anticaptcha", "none":
 			// Valid
 		default:
-			return fmt.Errorf("captchaSolver must be '2captcha', 'capsolver', or 'none'")
+			return fmt.Errorf("captchaSolver must be '2captcha', 'capsolver', 'anticaptcha', or 'none'")
 		}
 	}
 

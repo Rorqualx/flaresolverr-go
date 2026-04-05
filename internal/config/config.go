@@ -85,8 +85,9 @@ type Config struct {
 	CaptchaNativeAttempts  int           // Native solve attempts before external fallback (default: 3)
 	CaptchaFallbackEnabled bool          // Enable external CAPTCHA solver fallback
 	Captcha2CaptchaAPIKey  string        // 2Captcha API key (TWOCAPTCHA_API_KEY)
-	CaptchaCapSolverAPIKey string        // CapSolver API key (CAPSOLVER_API_KEY)
-	CaptchaPrimaryProvider string        // Primary provider: "2captcha" or "capsolver" (default: "2captcha")
+	CaptchaCapSolverAPIKey    string        // CapSolver API key (CAPSOLVER_API_KEY)
+	CaptchaAntiCaptchaAPIKey string        // anti-captcha.com API key (ANTICAPTCHA_API_KEY)
+	CaptchaPrimaryProvider   string        // Primary provider: "2captcha", "capsolver", or "anticaptcha" (default: "2captcha")
 	CaptchaSolverTimeout   time.Duration // Timeout for external solver API (default: 120s)
 
 	// Selectors settings
@@ -162,8 +163,9 @@ func Load() *Config {
 		CaptchaNativeAttempts:  getEnvInt("CAPTCHA_NATIVE_ATTEMPTS", 3),
 		CaptchaFallbackEnabled: getEnvBool("CAPTCHA_FALLBACK_ENABLED", false),
 		Captcha2CaptchaAPIKey:  getEnvString("TWOCAPTCHA_API_KEY", ""),
-		CaptchaCapSolverAPIKey: getEnvString("CAPSOLVER_API_KEY", ""),
-		CaptchaPrimaryProvider: getEnvString("CAPTCHA_PRIMARY_PROVIDER", "2captcha"),
+		CaptchaCapSolverAPIKey:    getEnvString("CAPSOLVER_API_KEY", ""),
+		CaptchaAntiCaptchaAPIKey: getEnvString("ANTICAPTCHA_API_KEY", ""),
+		CaptchaPrimaryProvider:   getEnvString("CAPTCHA_PRIMARY_PROVIDER", "2captcha"),
 		CaptchaSolverTimeout:   getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
 
 		// Selectors settings
@@ -686,7 +688,7 @@ func (c *Config) validateCaptchaConfig() {
 	}
 
 	// Validate primary provider
-	validProviders := map[string]bool{"2captcha": true, "capsolver": true}
+	validProviders := map[string]bool{"2captcha": true, "capsolver": true, "anticaptcha": true}
 	if c.CaptchaPrimaryProvider != "" && !validProviders[strings.ToLower(c.CaptchaPrimaryProvider)] {
 		log.Warn().
 			Str("provider", c.CaptchaPrimaryProvider).
@@ -697,8 +699,8 @@ func (c *Config) validateCaptchaConfig() {
 
 	// Warn if fallback enabled but no API keys configured
 	if c.CaptchaFallbackEnabled {
-		if c.Captcha2CaptchaAPIKey == "" && c.CaptchaCapSolverAPIKey == "" {
-			log.Warn().Msg("CAPTCHA_FALLBACK_ENABLED is true but no API keys configured (TWOCAPTCHA_API_KEY or CAPSOLVER_API_KEY)")
+		if c.Captcha2CaptchaAPIKey == "" && c.CaptchaCapSolverAPIKey == "" && c.CaptchaAntiCaptchaAPIKey == "" {
+			log.Warn().Msg("CAPTCHA_FALLBACK_ENABLED is true but no API keys configured (TWOCAPTCHA_API_KEY, CAPSOLVER_API_KEY, or ANTICAPTCHA_API_KEY)")
 		} else {
 			// Log which providers are configured
 			var configured []string
@@ -707,6 +709,9 @@ func (c *Config) validateCaptchaConfig() {
 			}
 			if c.CaptchaCapSolverAPIKey != "" {
 				configured = append(configured, "capsolver")
+			}
+			if c.CaptchaAntiCaptchaAPIKey != "" {
+				configured = append(configured, "anticaptcha")
 			}
 			log.Info().
 				Strs("providers", configured).
@@ -719,5 +724,5 @@ func (c *Config) validateCaptchaConfig() {
 
 // HasCaptchaFallback returns true if external CAPTCHA fallback is configured.
 func (c *Config) HasCaptchaFallback() bool {
-	return c.CaptchaFallbackEnabled && (c.Captcha2CaptchaAPIKey != "" || c.CaptchaCapSolverAPIKey != "")
+	return c.CaptchaFallbackEnabled && (c.Captcha2CaptchaAPIKey != "" || c.CaptchaCapSolverAPIKey != "" || c.CaptchaAntiCaptchaAPIKey != "")
 }
