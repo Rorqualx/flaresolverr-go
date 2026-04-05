@@ -8,7 +8,7 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 
 - Same API endpoints (`/` and `/v1`)
 - Same request/response format
-- Same command names (`request.get`, `request.post`, `sessions.create`, etc.)
+- Same command names (`request.get`, `request.post`, `sessions.create`, etc.) plus new `sessions.keepalive`
 - Same default port (8191)
 
 **Just swap the Docker image or binary and you're done.**
@@ -19,13 +19,14 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 - **Direct CDP Protocol** - Uses Chrome DevTools Protocol directly, bypassing Selenium overhead
 - **Go Concurrency** - Native goroutines for better concurrency than Python's GIL
 - **Memory Management** - Active memory monitoring with automatic browser recycling
-- **Session Support** - TTL-based session management with per-request TTL override and automatic cleanup
+- **Session Support** - TTL-based session management with per-request TTL override, keepalive command, and automatic cleanup
 - **Cloudflare Bypass** - Solves JavaScript challenges and Turnstile CAPTCHAs
-- **Anti-Fingerprinting** - Comprehensive stealth patches including canvas noise, Battery API, WebRTC blocking, and font enumeration limiting
+- **Anti-Fingerprinting** - 20 composable stealth patches with configurable fingerprint profiles (default, Windows, macOS, minimal)
+- **Per-Session Chrome Flags** - Custom window size, language, timezone, and Chrome flags per session with dedicated browser instances
 - **Human-Like Behavior** - Bezier curve mouse movements, randomized timing, and natural scroll patterns
 - **Two-Phase CDP Bypass** - Bypasses Cloudflare's managed challenge loop by launching a clean Chrome without CDP for challenge resolution
-- **External CAPTCHA Fallback** - Optional 2Captcha, CapSolver, and anti-captcha.com integration for Turnstile and hCaptcha
-- **hCaptcha Support** - Detects hCaptcha challenges and solves via external providers
+- **External CAPTCHA Fallback** - Pluggable provider registry with 2Captcha, CapSolver, and anti-captcha.com for Turnstile and hCaptcha
+- **hCaptcha Support** - Detects hCaptcha challenges, extracts sitekeys, and solves via external providers with token injection
 - **Hot-Reload Selectors** - Update challenge selectors via file watching or remote URL without restarts
 - **Adaptive Solving** - Per-domain tracking of which solving methods work best
 - **Custom JS Execution** - Run arbitrary JavaScript on pages after challenge solving
@@ -128,6 +129,22 @@ curl -X POST http://localhost:8191/v1 \
   }'
 ```
 
+#### `sessions.keepalive` - Refresh a session's TTL
+
+Touches the session to prevent expiration. Optionally extends the TTL.
+
+```bash
+curl -X POST http://localhost:8191/v1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cmd": "sessions.keepalive",
+    "session": "my-session-id",
+    "keepaliveTtl": 120
+  }'
+```
+
+If `keepaliveTtl` is provided (in minutes), the session's TTL is updated to that value. If omitted, the session is simply touched to reset its inactivity timer.
+
 #### `sessions.destroy` - Destroy a session
 
 ```bash
@@ -165,6 +182,10 @@ curl -X POST http://localhost:8191/v1 \
 | `executeJs` | string | No | Custom JavaScript to execute after solving |
 | `captchaSolver` | string | No | Per-request captcha provider: `2captcha`, `capsolver`, `anticaptcha`, or `none` |
 | `captchaApiKey` | string | No | Per-request captcha API key |
+| `keepaliveTtl` | int | No | New TTL in minutes for `sessions.keepalive` (0 = just touch, max 1440) |
+| `cookieExtractDelay` | int | No | Seconds to wait before extracting cookies (0-30). Captures late-set JS cookies |
+| `browserFlags` | object | No | Per-session Chrome flag overrides (`sessions.create` only). See below |
+| `fingerprint` | object | No | Per-request browser fingerprint customization. See below |
 
 #### Cookie Object
 
@@ -190,6 +211,97 @@ curl -X POST http://localhost:8191/v1 \
 ```
 
 Supported proxy schemes: `http`, `https`, `socks4`, `socks5`
+
+#### Browser Flags Object
+
+Per-session Chrome flag overrides. Sessions created with custom flags get a **dedicated browser** (not from the pool) that is closed when the session is destroyed.
+
+```json
+{
+  "windowSize": "1280,720",
+  "language": "fr-FR",
+  "timezone": "Europe/Paris",
+  "headless": true,
+  "disableGpu": false,
+  "extraArgs": ["--disable-extensions"]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `windowSize` | string | Window dimensions as `"width,height"` (e.g. `"1280,720"`) |
+| `language` | string | Accept-Language override (e.g. `"fr-FR"`, `"de-DE"`) |
+| `timezone` | string | Timezone for stealth patches (e.g. `"Europe/Paris"`) |
+| `headless` | bool | Override global headless setting |
+| `disableGpu` | bool | Force software rendering |
+| `extraArgs` | array | Additional Chrome flags (validated against security whitelist) |
+
+**Security**: `extraArgs` are validated against an allowed whitelist. Dangerous flags like `--disable-web-security` and `--remote-debugging-port` are blocked.
+
+**Example**: Create a French-language session with a smaller viewport:
+```bash
+curl -X POST http://localhost:8191/v1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cmd": "sessions.create",
+    "session": "my-french-session-01",
+    "browserFlags": {
+      "windowSize": "1280,720",
+      "language": "fr-FR",
+      "timezone": "Europe/Paris"
+    }
+  }'
+```
+
+#### Fingerprint Object
+
+Per-request browser fingerprint customization. Controls which stealth patches apply and what values they report.
+
+```json
+{
+  "profile": "desktop-chrome-windows",
+  "overrides": {
+    "timezone": "Asia/Tokyo",
+    "screenWidth": 1920,
+    "screenHeight": 1080
+  },
+  "disablePatches": ["canvas", "audio"]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `profile` | string | Builtin profile name (see below) |
+| `overrides` | object | Override individual fingerprint dimensions |
+| `disablePatches` | array | Stealth patches to skip by name |
+
+**Builtin Profiles:**
+
+| Profile | Description |
+|---------|-------------|
+| `default` | All patches enabled, standard 1920x1080, 8GB memory, 4 cores |
+| `desktop-chrome-windows` | Windows UA, NVIDIA WebGL, 16GB memory, 8 cores |
+| `desktop-chrome-mac` | macOS UA, Apple M1 WebGL, 2560x1440, 16GB, 10 cores |
+| `minimal` | Only essential patches (webdriver, plugins, chrome-runtime) |
+
+**Override Keys:** `timezone`, `locale`, `screenWidth`, `screenHeight`, `deviceMemory`, `hardwareConcurrency`, `webglVendor`, `webglRenderer`, `canvasNoiseSeed`
+
+**Available Patches:** `webrtc`, `webdriver`, `plugins`, `languages`, `chrome-runtime`, `permissions`, `connection`, `hardware-concurrency`, `device-memory`, `tostring`, `webgl`, `notifications`, `canvas`, `audio`, `battery`, `speech`, `fonts`, `timezone`, `screen-position`, `device-pixel-ratio`
+
+**Example**: Request with Windows fingerprint and Tokyo timezone:
+```bash
+curl -X POST http://localhost:8191/v1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cmd": "request.get",
+    "url": "https://example.com",
+    "maxTimeout": 60000,
+    "fingerprint": {
+      "profile": "desktop-chrome-windows",
+      "overrides": {"timezone": "Asia/Tokyo"}
+    }
+  }'
+```
 
 ### Response Format
 
@@ -659,6 +771,8 @@ Use `MAX_MEMORY_MB` to set a memory ceiling. When exceeded, browsers are automat
 
 #### Session requests failing
 - Sessions auto-expire after `SESSION_TTL` (default: 30 minutes)
+- Use `sessions.keepalive` to refresh a session's TTL without making a full request
+- Use `keepaliveTtl` parameter to extend the TTL (e.g., `"keepaliveTtl": 120` for 2 hours)
 - Always check if session exists with `sessions.list` before using
 - Destroy and recreate sessions if they become stale
 

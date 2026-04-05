@@ -320,6 +320,173 @@ func evalWithContext(ctx context.Context, page *rod.Page, js string) (bool, erro
 	}
 }
 
+// InjectHCaptchaToken injects a solved hCaptcha token into the page.
+func InjectHCaptchaToken(ctx context.Context, page *rod.Page, token string) error {
+	if token == "" {
+		return fmt.Errorf("empty token provided")
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	tokenJSON, err := json.Marshal(token)
+	if err != nil {
+		return fmt.Errorf("failed to encode token: %w", err)
+	}
+
+	log.Debug().
+		Str("token_prefix", token[:min(20, len(token))]+"...").
+		Msg("Injecting hCaptcha token")
+
+	// Try multiple injection methods for hCaptcha
+	methods := []struct {
+		name string
+		fn   func(context.Context, *rod.Page, string) error
+	}{
+		{"hcaptcha_textarea", injectHCaptchaViaTextarea},
+		{"hcaptcha_callback", injectHCaptchaViaCallback},
+		{"hcaptcha_api", injectHCaptchaViaAPI},
+	}
+
+	var lastErr error
+	for _, method := range methods {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		err := method.fn(ctx, page, string(tokenJSON))
+		if err == nil {
+			log.Info().Str("method", method.name).Msg("hCaptcha token injection succeeded")
+			return nil
+		}
+		lastErr = err
+		log.Debug().
+			Err(err).
+			Str("method", method.name).
+			Msg("hCaptcha injection method failed, trying next")
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("all hCaptcha injection methods failed, last error: %w", lastErr)
+	}
+
+	return types.ErrCaptchaTokenInjection
+}
+
+// injectHCaptchaViaTextarea sets the token on the hCaptcha response textarea.
+func injectHCaptchaViaTextarea(ctx context.Context, page *rod.Page, tokenJSON string) error {
+	js := fmt.Sprintf(`
+	(function(token) {
+		var selectors = [
+			'textarea[name="h-captcha-response"]',
+			'textarea[name="g-recaptcha-response"]',
+			'input[name="h-captcha-response"]'
+		];
+
+		for (var i = 0; i < selectors.length; i++) {
+			var input = document.querySelector(selectors[i]);
+			if (input) {
+				input.value = token;
+				input.dispatchEvent(new Event('input', { bubbles: true }));
+				input.dispatchEvent(new Event('change', { bubbles: true }));
+				return true;
+			}
+		}
+		return false;
+	})(%s)
+	`, tokenJSON)
+
+	result, err := evalWithContext(ctx, page, js)
+	if err != nil {
+		return err
+	}
+	if !result {
+		return fmt.Errorf("no hCaptcha textarea found")
+	}
+	return nil
+}
+
+// injectHCaptchaViaCallback invokes the hCaptcha data-callback function.
+func injectHCaptchaViaCallback(ctx context.Context, page *rod.Page, tokenJSON string) error {
+	js := fmt.Sprintf(`
+	(function(token) {
+		// Find .h-captcha elements with data-callback
+		var widgets = document.querySelectorAll('.h-captcha[data-callback]');
+		for (var i = 0; i < widgets.length; i++) {
+			var callbackName = widgets[i].getAttribute('data-callback');
+			if (callbackName && typeof window[callbackName] === 'function') {
+				try {
+					window[callbackName](token);
+					return true;
+				} catch(e) {}
+			}
+		}
+
+		// Try common hCaptcha callback names
+		var names = ['hcaptchaCallback', 'onHCaptchaSuccess', 'captchaCallback', 'onCaptchaSuccess'];
+		for (var i = 0; i < names.length; i++) {
+			if (typeof window[names[i]] === 'function') {
+				try {
+					window[names[i]](token);
+					return true;
+				} catch(e) {}
+			}
+		}
+
+		return false;
+	})(%s)
+	`, tokenJSON)
+
+	result, err := evalWithContext(ctx, page, js)
+	if err != nil {
+		return err
+	}
+	if !result {
+		return fmt.Errorf("no hCaptcha callback found")
+	}
+	return nil
+}
+
+// injectHCaptchaViaAPI uses the hCaptcha JS API if available.
+func injectHCaptchaViaAPI(ctx context.Context, page *rod.Page, tokenJSON string) error {
+	js := fmt.Sprintf(`
+	(function(token) {
+		if (typeof window.hcaptcha !== 'undefined') {
+			// Set the response directly if possible
+			var iframes = document.querySelectorAll('iframe[data-hcaptcha-widget-id]');
+			for (var i = 0; i < iframes.length; i++) {
+				var widgetId = iframes[i].getAttribute('data-hcaptcha-widget-id');
+				if (widgetId && window.hcaptcha.getRespKey) {
+					try {
+						// Trigger the success callback
+						var event = new CustomEvent('hcaptcha-success', { detail: { token: token } });
+						document.dispatchEvent(event);
+						return true;
+					} catch(e) {}
+				}
+			}
+
+			// Fallback: dispatch event
+			var event = new CustomEvent('hcaptcha-success', { detail: { token: token } });
+			document.dispatchEvent(event);
+			window.dispatchEvent(event);
+			return true;
+		}
+		return false;
+	})(%s)
+	`, tokenJSON)
+
+	result, err := evalWithContext(ctx, page, js)
+	if err != nil {
+		return err
+	}
+	if !result {
+		return fmt.Errorf("hCaptcha API not available")
+	}
+	return nil
+}
+
 // WaitForTokenInjectionEffect waits for the page to process the injected token.
 // Some sites need time to validate the token before proceeding.
 func WaitForTokenInjectionEffect(ctx context.Context, page *rod.Page, timeout time.Duration) error {

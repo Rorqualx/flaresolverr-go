@@ -312,3 +312,76 @@ func ExtractTurnstileCData(page *rod.Page) string {
 
 	return result.Result.Value.Str()
 }
+
+// ExtractHCaptchaSitekey extracts the hCaptcha sitekey from a page.
+// It looks for the data-sitekey attribute on hCaptcha elements and iframes.
+func ExtractHCaptchaSitekey(page *rod.Page) (string, error) {
+	js := `
+	(function() {
+		// hCaptcha elements with data-sitekey
+		var selectors = [
+			'.h-captcha[data-sitekey]',
+			'[data-hcaptcha-widget-id][data-sitekey]',
+			'div.h-captcha[data-sitekey]'
+		];
+
+		for (var i = 0; i < selectors.length; i++) {
+			var el = document.querySelector(selectors[i]);
+			if (el) {
+				var sitekey = el.getAttribute('data-sitekey');
+				if (sitekey && sitekey.length > 10) {
+					return sitekey;
+				}
+			}
+		}
+
+		// Check for hCaptcha in script initialization
+		var scripts = document.querySelectorAll('script');
+		for (var i = 0; i < scripts.length; i++) {
+			var text = scripts[i].textContent || '';
+			var match = text.match(/hcaptcha\.render\([^,]*,\s*\{[^}]*sitekey['":\s]+['"]([0-9a-f-]+)['"]/);
+			if (match && match[1]) {
+				return match[1];
+			}
+		}
+
+		// Check for hCaptcha in iframe src
+		var iframes = document.querySelectorAll('iframe');
+		for (var i = 0; i < iframes.length; i++) {
+			var src = iframes[i].src || '';
+			if (src.indexOf('hcaptcha.com') !== -1) {
+				var match = src.match(/sitekey=([0-9a-f-]+)/);
+				if (match && match[1]) {
+					return match[1];
+				}
+			}
+		}
+
+		return '';
+	})()
+	`
+
+	result, err := proto.RuntimeEvaluate{
+		Expression:    js,
+		ReturnByValue: true,
+	}.Call(page)
+
+	if err != nil {
+		return "", fmt.Errorf("hCaptcha js evaluation failed: %w", err)
+	}
+
+	if result == nil || result.Result == nil {
+		return "", fmt.Errorf("empty result from hCaptcha js evaluation")
+	}
+
+	if result.ExceptionDetails != nil {
+		return "", fmt.Errorf("js exception: %s", result.ExceptionDetails.Text)
+	}
+
+	sitekey := result.Result.Value.Str()
+	if sitekey == "" {
+		return "", types.ErrCaptchaSitekeyNotFound
+	}
+
+	return sitekey, nil
+}

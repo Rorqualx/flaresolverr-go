@@ -26,6 +26,7 @@ const (
 	MaxWaitSeconds         = 60
 	MaxTabsTillVerify      = 50
 	MaxSessionTTLMinutes   = 1440 // 24 hours
+	MaxCookieExtractDelay  = 30   // 30 seconds
 )
 
 // Request represents an incoming API request.
@@ -51,8 +52,12 @@ type Request struct {
 	CaptchaSolver     string            `json:"captchaSolver,omitempty"`    // Per-request captcha provider: "2captcha", "capsolver", or "none"
 	CaptchaApiKey     string            `json:"captchaApiKey,omitempty"`    // Per-request captcha API key
 	UserAgent         string            `json:"userAgent,omitempty"`        // Override User-Agent for this request
-	ReturnRawHtml     bool              `json:"returnRawHtml,omitempty"`    // Return raw HTML before JS rendering
-	ExecuteJs         string            `json:"executeJs,omitempty"`        // Custom JavaScript to execute after solve
+	ReturnRawHtml      bool              `json:"returnRawHtml,omitempty"`      // Return raw HTML before JS rendering
+	ExecuteJs          string            `json:"executeJs,omitempty"`          // Custom JavaScript to execute after solve
+	KeepaliveTTL       int               `json:"keepaliveTtl,omitempty"`       // New TTL in minutes for sessions.keepalive (0 = just touch)
+	CookieExtractDelay int               `json:"cookieExtractDelay,omitempty"` // Seconds to wait before extracting cookies (0-30)
+	BrowserFlags       *BrowserFlags     `json:"browserFlags,omitempty"`       // Per-session Chrome flag overrides (sessions.create only)
+	Fingerprint        *FingerprintConfig `json:"fingerprint,omitempty"`        // Per-request browser fingerprint customization
 }
 
 // Validate validates the request and returns an error if invalid.
@@ -68,7 +73,7 @@ func (r *Request) Validate() error {
 
 	// Validate cmd is a known command
 	switch r.Cmd {
-	case CmdRequestGet, CmdRequestPost, CmdSessionsCreate, CmdSessionsList, CmdSessionsDestroy:
+	case CmdRequestGet, CmdRequestPost, CmdSessionsCreate, CmdSessionsList, CmdSessionsDestroy, CmdSessionsKeepalive:
 		// Valid command
 	default:
 		// Use %q format for security (prevents log injection) - matches test expectations
@@ -182,11 +187,8 @@ func (r *Request) Validate() error {
 
 	// Validate captchaSolver if present
 	if r.CaptchaSolver != "" {
-		switch r.CaptchaSolver {
-		case "2captcha", "capsolver", "anticaptcha", "none":
-			// Valid
-		default:
-			return fmt.Errorf("captchaSolver must be '2captcha', 'capsolver', 'anticaptcha', or 'none'")
+		if !isValidCaptchaSolver(r.CaptchaSolver) {
+			return fmt.Errorf("captchaSolver %q is not a registered provider", r.CaptchaSolver)
 		}
 	}
 
@@ -196,6 +198,29 @@ func (r *Request) Validate() error {
 	}
 	if r.SessionTTL > MaxSessionTTLMinutes {
 		return fmt.Errorf("session_ttl_minutes exceeds maximum of %d", MaxSessionTTLMinutes)
+	}
+
+	// Validate keepaliveTtl bounds (same limits as session TTL)
+	if r.KeepaliveTTL < 0 {
+		return fmt.Errorf("keepaliveTtl cannot be negative")
+	}
+	if r.KeepaliveTTL > MaxSessionTTLMinutes {
+		return fmt.Errorf("keepaliveTtl exceeds maximum of %d minutes", MaxSessionTTLMinutes)
+	}
+
+	// Validate browserFlags if present
+	if r.BrowserFlags != nil {
+		if err := r.BrowserFlags.Validate(); err != nil {
+			return fmt.Errorf("browserFlags: %w", err)
+		}
+	}
+
+	// Validate cookieExtractDelay bounds
+	if r.CookieExtractDelay < 0 {
+		return fmt.Errorf("cookieExtractDelay cannot be negative")
+	}
+	if r.CookieExtractDelay > MaxCookieExtractDelay {
+		return fmt.Errorf("cookieExtractDelay exceeds maximum of %d seconds", MaxCookieExtractDelay)
 	}
 
 	return nil
@@ -319,7 +344,8 @@ const (
 	CmdRequestPost     = "request.post"
 	CmdSessionsCreate  = "sessions.create"
 	CmdSessionsList    = "sessions.list"
-	CmdSessionsDestroy = "sessions.destroy"
+	CmdSessionsDestroy   = "sessions.destroy"
+	CmdSessionsKeepalive = "sessions.keepalive"
 )
 
 // Status values for API responses.
@@ -333,3 +359,85 @@ const (
 	ContentTypeFormURLEncoded = "application/x-www-form-urlencoded"
 	ContentTypeJSON           = "application/json"
 )
+
+// BrowserFlags contains per-session Chrome flag overrides.
+// Only a curated subset of flags is supported for security.
+type BrowserFlags struct {
+	WindowSize string   `json:"windowSize,omitempty"` // e.g. "1280,720"
+	Language   string   `json:"language,omitempty"`    // e.g. "fr-FR"
+	Timezone   string   `json:"timezone,omitempty"`    // e.g. "Europe/Paris"
+	Headless   *bool    `json:"headless,omitempty"`    // Override global headless setting
+	DisableGPU *bool    `json:"disableGpu,omitempty"`  // Force software rendering
+	ExtraArgs  []string `json:"extraArgs,omitempty"`   // Validated against allowed whitelist
+}
+
+// Validate validates the browser flags.
+func (f *BrowserFlags) Validate() error {
+	if f.WindowSize != "" {
+		parts := strings.SplitN(f.WindowSize, ",", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("windowSize must be 'width,height' (e.g. '1280,720')")
+		}
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				return fmt.Errorf("windowSize dimensions cannot be empty")
+			}
+			for _, c := range p {
+				if c < '0' || c > '9' {
+					return fmt.Errorf("windowSize dimensions must be numeric")
+				}
+			}
+		}
+	}
+
+	if f.Language != "" && len(f.Language) > 20 {
+		return fmt.Errorf("language exceeds maximum length of 20")
+	}
+
+	if f.Timezone != "" && len(f.Timezone) > 50 {
+		return fmt.Errorf("timezone exceeds maximum length of 50")
+	}
+
+	if len(f.ExtraArgs) > 10 {
+		return fmt.Errorf("extraArgs exceeds maximum of 10 arguments")
+	}
+
+	for _, arg := range f.ExtraArgs {
+		if !strings.HasPrefix(arg, "--") {
+			return fmt.Errorf("extraArgs must start with '--': %s", arg)
+		}
+		if len(arg) > 256 {
+			return fmt.Errorf("extraArg exceeds maximum length of 256: %s", arg[:50])
+		}
+	}
+
+	return nil
+}
+
+// FingerprintConfig specifies per-session browser fingerprint customization.
+type FingerprintConfig struct {
+	Profile        string         `json:"profile,omitempty"`        // Builtin profile name: "default", "desktop-chrome-windows", "desktop-chrome-mac", "minimal"
+	Overrides      map[string]any `json:"overrides,omitempty"`      // Dimension overrides (timezone, locale, screenWidth, etc.)
+	DisablePatches []string       `json:"disablePatches,omitempty"` // Stealth patches to skip
+}
+
+// CaptchaSolverValidator is set by the captcha package to validate provider names
+// dynamically against the registry. Falls back to a hardcoded list if not set.
+var CaptchaSolverValidator func(name string) bool
+
+// isValidCaptchaSolver checks if a captcha solver name is valid.
+func isValidCaptchaSolver(name string) bool {
+	if name == "none" {
+		return true
+	}
+	if CaptchaSolverValidator != nil {
+		return CaptchaSolverValidator(name)
+	}
+	// Fallback: hardcoded list for when registry isn't initialized
+	switch name {
+	case "2captcha", "capsolver", "anticaptcha":
+		return true
+	}
+	return false
+}

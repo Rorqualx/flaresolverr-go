@@ -47,6 +47,10 @@ type Session struct {
 	// page state corruption from concurrent navigation/actions
 	// Fix #23: Always acquire opMu BEFORE mu when both are needed.
 	opMu sync.Mutex
+
+	// OwnsBrowser is true when the session owns a dedicated browser (not from pool).
+	// On destroy, the browser is Close()'d instead of returned to the pool.
+	OwnsBrowser bool
 }
 
 // Manager handles session lifecycle and cleanup.
@@ -224,9 +228,15 @@ func (m *Manager) Destroy(id string) error {
 		}
 	}
 
-	// CRITICAL: Return browser to pool
-	if session.Browser != nil && m.pool != nil {
-		m.pool.Release(session.Browser)
+	// CRITICAL: Return browser to pool, or close if session owns it
+	if session.Browser != nil {
+		if session.OwnsBrowser {
+			if err := session.Browser.Close(); err != nil {
+				log.Warn().Err(err).Str("session_id", id).Msg("Error closing session-owned browser")
+			}
+		} else if m.pool != nil {
+			m.pool.Release(session.Browser)
+		}
 	}
 
 	log.Info().
@@ -247,6 +257,20 @@ func (m *Manager) List() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// TouchAndExtend refreshes a session's last-used timestamp and optionally updates its TTL.
+// If newTTL is 0, only the timestamp is refreshed.
+func (m *Manager) TouchAndExtend(id string, newTTL time.Duration) error {
+	session, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	if newTTL > 0 {
+		session.SetTTL(newTTL)
+	}
+	session.Touch()
+	return nil
 }
 
 // Count returns the number of active sessions.
@@ -331,9 +355,15 @@ func (m *Manager) cleanupExpired() {
 				}
 			}
 
-			// CRITICAL: Return browser to pool
-			if sess.Browser != nil && m.pool != nil {
-				m.pool.Release(sess.Browser)
+			// CRITICAL: Return browser to pool, or close if session owns it
+			if sess.Browser != nil {
+				if sess.OwnsBrowser {
+					if err := sess.Browser.Close(); err != nil {
+						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during cleanup")
+					}
+				} else if m.pool != nil {
+					m.pool.Release(sess.Browser)
+				}
 			}
 
 			log.Info().
@@ -421,9 +451,15 @@ func (m *Manager) Close() error {
 					log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session page during shutdown")
 				}
 			}
-			// CRITICAL: Return browser to pool
-			if sess.Browser != nil && m.pool != nil {
-				m.pool.Release(sess.Browser)
+			// CRITICAL: Return browser to pool, or close if session owns it
+			if sess.Browser != nil {
+				if sess.OwnsBrowser {
+					if err := sess.Browser.Close(); err != nil {
+						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during shutdown")
+					}
+				} else if m.pool != nil {
+					m.pool.Release(sess.Browser)
+				}
 			}
 			log.Debug().Str("session_id", sess.ID).Msg("Session closed during shutdown")
 			return nil
@@ -455,6 +491,24 @@ func (s *Session) EffectiveTTL(defaultTTL time.Duration) time.Duration {
 		return s.TTL
 	}
 	return defaultTTL
+}
+
+// SetTTL updates the session's per-session TTL.
+func (s *Session) SetTTL(ttl time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TTL = ttl
+}
+
+// RemainingTTL returns the time remaining before the session expires.
+func (s *Session) RemainingTTL(defaultTTL time.Duration) time.Duration {
+	elapsed := time.Since(s.LastUsedTime())
+	ttl := s.EffectiveTTL(defaultTTL)
+	remaining := ttl - elapsed
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // SafeGetPage returns the session's page reference while holding the lock.

@@ -37,6 +37,12 @@ type TwoCaptchaSolver struct {
 	timeout    time.Duration
 }
 
+func init() {
+	Register("2captcha", func(apiKey string, timeout time.Duration) CaptchaSolver {
+		return NewTwoCaptchaSolver(TwoCaptchaConfig{APIKey: apiKey, Timeout: timeout})
+	})
+}
+
 // TwoCaptchaConfig contains configuration for 2Captcha solver.
 type TwoCaptchaConfig struct {
 	APIKey  string

@@ -95,6 +95,11 @@ type SolveOptions struct {
 	ReturnRawHtml bool
 	// ExecuteJs is custom JavaScript to execute on the page after solving.
 	ExecuteJs string
+	// CookieExtractDelay is the number of seconds to wait before extracting cookies.
+	// This allows late-set JS cookies to be captured.
+	CookieExtractDelay int
+	// Fingerprint specifies per-request browser fingerprint customization.
+	Fingerprint *types.FingerprintConfig
 
 	// SkipResponseValidation disables response URL validation (for testing only).
 	// WARNING: Do not enable in production - this disables SSRF protection.
@@ -455,7 +460,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 
 		// Main solve loop with DNS pinning
-		return s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
+		return s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
 	}
 
 	// GET request path
@@ -616,7 +621,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// Main solve loop with DNS pinning
-	result, err = s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
+	result, err = s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
 	if err != nil {
 		// If the challenge timed out and we still have time in the parent context,
 		// try the disconnect/reconnect approach. This disconnects the CDP debugger
@@ -1061,7 +1066,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	}
 	defer networkCleanup()
 
-	return s.buildResult(targetPage, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.SkipResponseValidation, networkCapture)
+	return s.buildResult(targetPage, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
 }
 
 // setCookies sets cookies on the page before navigation.
@@ -1457,7 +1462,7 @@ var turnstileTriggerSelectors = map[string]bool{
 //   - tabsTillVerify: Number of Tab presses to reach Turnstile checkbox (0 uses default of 10)
 //   - skipValidation: If true, skip response URL validation (for testing only)
 //   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
-func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, tabsTillVerify int, skipValidation bool, networkCapture *NetworkCapture) (*Result, error) {
+func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, tabsTillVerify int, skipValidation bool, networkCapture *NetworkCapture, cookieExtractDelay int) (*Result, error) {
 	// Phase 2: Use randomized poll interval (0.8-1.5s) instead of fixed 1s
 	// This makes polling patterns appear more human-like
 	avgPollInterval := 1150 * time.Millisecond // Average of 800-1500ms for calculation
@@ -1520,14 +1525,14 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 		// If no challenge indicators, we're done
 		if !challengeInTitle && challengeSelector == "" {
 			log.Info().Str("title", title).Msg("Challenge solved or no challenge present")
-			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture)
+			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture, cookieExtractDelay)
 		}
 
 		// For invisible Turnstile: if cf_clearance cookie is present, challenge is solved
 		// even if the widget is still visible on the page
 		if s.hasCfClearanceCookie(page) {
 			log.Info().Msg("cf_clearance cookie present - challenge solved (invisible Turnstile)")
-			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture)
+			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture, cookieExtractDelay)
 		}
 
 		// Check for access denied — but only after giving the JS challenge
@@ -2403,7 +2408,7 @@ func (s *Solver) validateResponseURL(page *rod.Page, expectedIP net.IP, skipVali
 //   - expectedIP: The IP resolved during initial validation for DNS pinning (nil to skip)
 //   - skipValidation: If true, skip response URL validation (for testing only)
 //   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
-func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, skipValidation bool, networkCapture *NetworkCapture) (*Result, error) {
+func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, skipValidation bool, networkCapture *NetworkCapture, cookieExtractDelay int) (*Result, error) {
 	// Validate response URL to detect DNS rebinding attacks
 	if err := s.validateResponseURL(page, expectedIP, skipValidation); err != nil {
 		return nil, err
@@ -2413,7 +2418,7 @@ func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool,
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract page HTML: %w", err)
 	}
-	return s.buildResultWithHTML(page, url, html, captureScreenshot, networkCapture)
+	return s.buildResultWithHTML(page, url, html, captureScreenshot, networkCapture, cookieExtractDelay)
 }
 
 // buildResultWithHTML constructs the result using pre-fetched HTML.
@@ -2425,7 +2430,7 @@ func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool,
 //   - html: Pre-fetched HTML content
 //   - captureScreenshot: Whether to capture a screenshot
 //   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
-func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, captureScreenshot bool, networkCapture *NetworkCapture) (*Result, error) {
+func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, captureScreenshot bool, networkCapture *NetworkCapture, cookieExtractDelay int) (*Result, error) {
 	// Fix #15: Track if HTML was truncated
 	htmlTruncated := false
 
@@ -2440,6 +2445,14 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 	}
 
 	var cookieError string
+
+	// Wait before extracting cookies if delay is configured.
+	// This allows late-set JS cookies (e.g., analytics, session tokens) to be captured.
+	if cookieExtractDelay > 0 {
+		log.Debug().Int("delay_seconds", cookieExtractDelay).Msg("Waiting before cookie extraction")
+		time.Sleep(time.Duration(cookieExtractDelay) * time.Second)
+	}
+
 	// Use Network.getAllCookies to get ALL cookies regardless of domain
 	// This is the same method Python FlareSolverr uses via Selenium's driver.get_cookies()
 	var cookies []*proto.NetworkCookie
@@ -2868,8 +2881,15 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	// Trying to re-apply stealth to a loaded page causes errors due to stale JS context
 	pageInfo, _ := page.Info()
 	if pageInfo == nil || pageInfo.URL == "" || pageInfo.URL == "about:blank" {
-		if err := browser.ApplyStealthToPage(page); err != nil {
-			log.Warn().Err(err).Msg("Failed to apply stealth patches")
+		if opts.Fingerprint != nil {
+			profile := browser.ResolveProfile(opts.Fingerprint.Profile, opts.Fingerprint.Overrides, opts.Fingerprint.DisablePatches)
+			if err := browser.ApplyStealthToPageWithProfile(page, profile); err != nil {
+				log.Warn().Err(err).Msg("Failed to apply stealth patches with fingerprint profile")
+			}
+		} else {
+			if err := browser.ApplyStealthToPage(page); err != nil {
+				log.Warn().Err(err).Msg("Failed to apply stealth patches")
+			}
 		}
 	} else {
 		log.Debug().Str("url", pageInfo.URL).Msg("Skipping stealth on reused session page")
@@ -2933,7 +2953,7 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	}
 
 	// Solve with DNS pinning
-	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture)
+	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
 	if err != nil {
 		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
 	}

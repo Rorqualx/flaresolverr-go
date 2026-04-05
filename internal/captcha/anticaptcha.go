@@ -17,6 +17,12 @@ type AntiCaptchaSolver struct {
 	*TwoCaptchaSolver
 }
 
+func init() {
+	Register("anticaptcha", func(apiKey string, timeout time.Duration) CaptchaSolver {
+		return NewAntiCaptchaSolver(AntiCaptchaConfig{APIKey: apiKey, Timeout: timeout})
+	})
+}
+
 // AntiCaptchaConfig contains configuration for anti-captcha.com solver.
 type AntiCaptchaConfig struct {
 	APIKey  string

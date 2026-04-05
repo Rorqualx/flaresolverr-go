@@ -11,11 +11,12 @@ import (
 // validCommands is a map of all valid API commands for fast lookup.
 // This prevents processing of unknown commands that could cause unexpected behavior.
 var validCommands = map[string]bool{
-	types.CmdRequestGet:      true,
-	types.CmdRequestPost:     true,
-	types.CmdSessionsCreate:  true,
-	types.CmdSessionsList:    true,
-	types.CmdSessionsDestroy: true,
+	types.CmdRequestGet:        true,
+	types.CmdRequestPost:       true,
+	types.CmdSessionsCreate:    true,
+	types.CmdSessionsList:      true,
+	types.CmdSessionsDestroy:   true,
+	types.CmdSessionsKeepalive: true,
 }
 
 // routeCommand routes API commands to their handlers.
@@ -38,6 +39,8 @@ func (h *Handler) routeCommand(w http.ResponseWriter, r *http.Request, req *type
 		h.handleSessionList(w, startTime)
 	case types.CmdSessionsDestroy:
 		h.handleSessionDestroy(w, req, startTime)
+	case types.CmdSessionsKeepalive:
+		h.handleSessionKeepalive(w, req, startTime)
 	default:
 		// This should never be reached due to validCommands check above,
 		// but kept for safety

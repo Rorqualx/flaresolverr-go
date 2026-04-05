@@ -22,6 +22,10 @@ type CaptchaSolver interface {
 	// Returns the solution token or an error.
 	SolveTurnstile(ctx context.Context, req *TurnstileRequest) (*TurnstileResult, error)
 
+	// SolveHCaptcha attempts to solve an hCaptcha challenge.
+	// Returns the solution token or an error.
+	SolveHCaptcha(ctx context.Context, req *HCaptchaRequest) (*CaptchaResult, error)
+
 	// Balance retrieves the current account balance from the provider.
 	Balance(ctx context.Context) (float64, error)
 
@@ -224,6 +228,92 @@ func (c *SolverChain) Solve(ctx context.Context, page *rod.Page, pageURL, userAg
 
 	if lastErr != nil {
 		return nil, fmt.Errorf("all providers failed, last error: %w", lastErr)
+	}
+
+	return nil, types.ErrCaptchaNoProviders
+}
+
+// SolveHCaptcha attempts to solve an hCaptcha challenge using external providers.
+// This follows the same fallback pattern as Solve but uses hCaptcha extraction/injection.
+func (c *SolverChain) SolveHCaptcha(ctx context.Context, page *rod.Page, pageURL, userAgent string) (*SolveResult, error) {
+	if !c.enabled {
+		return nil, fmt.Errorf("external CAPTCHA solving is not enabled")
+	}
+
+	startTime := time.Now()
+
+	// Extract hCaptcha sitekey from page
+	sitekey, err := ExtractHCaptchaSitekey(page)
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to extract hCaptcha sitekey")
+		return nil, fmt.Errorf("failed to extract hCaptcha sitekey: %w", err)
+	}
+
+	log.Info().
+		Str("sitekey", sitekey[:min(10, len(sitekey))]+"...").
+		Str("url", pageURL).
+		Msg("Attempting external hCaptcha solve")
+
+	req := &HCaptchaRequest{
+		SiteKey:   sitekey,
+		PageURL:   pageURL,
+		UserAgent: userAgent,
+	}
+
+	// Try each provider in order
+	var lastErr error
+	for _, provider := range c.providers {
+		if !provider.IsConfigured() {
+			continue
+		}
+
+		providerStart := time.Now()
+		result, err := provider.SolveHCaptcha(ctx, req)
+		providerDuration := time.Since(providerStart)
+
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("provider", provider.Name()).
+				Dur("duration", providerDuration).
+				Msg("External hCaptcha solver failed, trying next provider")
+			lastErr = err
+
+			if c.metrics != nil {
+				c.metrics.RecordAttempt(provider.Name(), false, 0, providerDuration)
+			}
+			continue
+		}
+
+		log.Info().
+			Str("provider", provider.Name()).
+			Dur("solve_time", result.SolveTime).
+			Float64("cost", result.Cost).
+			Msg("External hCaptcha solver succeeded")
+
+		injected := false
+		if err := InjectHCaptchaToken(ctx, page, result.Token); err != nil {
+			log.Warn().Err(err).Msg("Failed to inject hCaptcha token, returning token anyway")
+		} else {
+			injected = true
+			log.Debug().Msg("hCaptcha token injected successfully")
+		}
+
+		if c.metrics != nil {
+			c.metrics.RecordAttempt(provider.Name(), true, result.Cost, result.SolveTime)
+		}
+
+		return &SolveResult{
+			Token:     result.Token,
+			Provider:  provider.Name(),
+			SolveTime: time.Since(startTime),
+			Cost:      result.Cost,
+			Injected:  injected,
+		}, nil
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("all providers failed for hCaptcha, last error: %w", lastErr)
 	}
 
 	return nil, types.ErrCaptchaNoProviders

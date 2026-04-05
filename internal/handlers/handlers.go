@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/rs/zerolog/log"
 
@@ -199,40 +200,30 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 
 	// Set up external CAPTCHA solver chain if configured
 	if cfg.HasCaptchaFallback() {
-		var providers []captcha.CaptchaSolver
+		// Map provider names to their configured API keys
+		providerKeys := map[string]string{
+			"2captcha":    cfg.Captcha2CaptchaAPIKey,
+			"capsolver":   cfg.CaptchaCapSolverAPIKey,
+			"anticaptcha": cfg.CaptchaAntiCaptchaAPIKey,
+		}
 
-		// Build provider list in priority order
-		addProvider := func(name string, provider captcha.CaptchaSolver) {
+		// Build providers in priority order using the registry
+		var providers []captcha.CaptchaSolver
+		order := captcha.BuildPriorityOrder(cfg.CaptchaPrimaryProvider, captcha.Available())
+		for _, name := range order {
+			apiKey := providerKeys[name]
+			if apiKey == "" {
+				continue
+			}
+			factory := captcha.GetFactory(name)
+			if factory == nil {
+				continue
+			}
+			provider := factory(apiKey, cfg.CaptchaSolverTimeout)
 			if provider.IsConfigured() {
 				providers = append(providers, provider)
 				log.Debug().Str("provider", name).Msg("CAPTCHA provider registered")
 			}
-		}
-
-		twoCaptcha := captcha.NewTwoCaptchaSolver(captcha.TwoCaptchaConfig{
-			APIKey: cfg.Captcha2CaptchaAPIKey, Timeout: cfg.CaptchaSolverTimeout,
-		})
-		capSolver := captcha.NewCapSolverSolver(captcha.CapSolverConfig{
-			APIKey: cfg.CaptchaCapSolverAPIKey, Timeout: cfg.CaptchaSolverTimeout,
-		})
-		antiCaptcha := captcha.NewAntiCaptchaSolver(captcha.AntiCaptchaConfig{
-			APIKey: cfg.CaptchaAntiCaptchaAPIKey, Timeout: cfg.CaptchaSolverTimeout,
-		})
-
-		// Add primary provider first
-		switch cfg.CaptchaPrimaryProvider {
-		case "capsolver":
-			addProvider("capsolver", capSolver)
-			addProvider("2captcha", twoCaptcha)
-			addProvider("anticaptcha", antiCaptcha)
-		case "anticaptcha":
-			addProvider("anticaptcha", antiCaptcha)
-			addProvider("2captcha", twoCaptcha)
-			addProvider("capsolver", capSolver)
-		default: // "2captcha"
-			addProvider("2captcha", twoCaptcha)
-			addProvider("capsolver", capSolver)
-			addProvider("anticaptcha", antiCaptcha)
 		}
 
 		if len(providers) > 0 {
@@ -812,7 +803,9 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		CaptchaApiKey:   req.CaptchaApiKey,
 		UserAgent:       req.UserAgent,
 		ReturnRawHtml:   req.ReturnRawHtml,
-		ExecuteJs:       req.ExecuteJs,
+		ExecuteJs:          req.ExecuteJs,
+		CookieExtractDelay: req.CookieExtractDelay,
+		Fingerprint:        req.Fingerprint,
 	}
 
 	var result *solver.Result
@@ -875,11 +868,49 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		return
 	}
 
-	// Acquire browser for session
-	browserInstance, err := h.pool.Acquire(ctx)
-	if err != nil {
-		h.writeError(w, fmt.Sprintf("Failed to acquire browser: %v", err), startTime)
-		return
+	// Acquire browser — from pool or custom-spawned with flags
+	var browserInstance *rod.Browser
+	ownsBrowser := false
+
+	if req.BrowserFlags != nil {
+		// Validate extra args against whitelist
+		for _, arg := range req.BrowserFlags.ExtraArgs {
+			if browser.IsBlockedExtraArg(arg) {
+				h.writeError(w, fmt.Sprintf("browserFlags.extraArgs: blocked flag %q", arg), startTime)
+				return
+			}
+			if !browser.IsAllowedExtraArg(arg) {
+				h.writeError(w, fmt.Sprintf("browserFlags.extraArgs: unknown flag %q", arg), startTime)
+				return
+			}
+		}
+
+		opts := browser.LaunchOptions{
+			WindowSize: req.BrowserFlags.WindowSize,
+			Language:   req.BrowserFlags.Language,
+			Timezone:   req.BrowserFlags.Timezone,
+			Headless:   req.BrowserFlags.Headless,
+			DisableGPU: req.BrowserFlags.DisableGPU,
+			ExtraArgs:  req.BrowserFlags.ExtraArgs,
+		}
+		if req.Proxy != nil {
+			opts.ProxyURL = req.Proxy.URL
+		}
+
+		var err error
+		browserInstance, err = h.pool.SpawnWithOptions(ctx, opts)
+		if err != nil {
+			h.writeError(w, fmt.Sprintf("Failed to spawn custom browser: %v", err), startTime)
+			return
+		}
+		ownsBrowser = true
+	} else {
+		var err error
+		browserInstance, err = h.pool.Acquire(ctx)
+		if err != nil {
+			h.writeError(w, fmt.Sprintf("Failed to acquire browser: %v", err), startTime)
+			return
+		}
 	}
 
 	// Convert per-request TTL from minutes to duration (0 = use server default)
@@ -895,7 +926,11 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		// Idempotent behavior: if session already exists, return success
 		// (matches Python FlareSolverr behavior)
 		if errors.Is(err, types.ErrSessionAlreadyExists) {
-			h.pool.Release(browserInstance) // Release the unused browser
+			if ownsBrowser {
+				browserInstance.Close()
+			} else {
+				h.pool.Release(browserInstance)
+			}
 			h.writeJSONResponse(w, http.StatusOK, types.Response{
 				Status:    types.StatusOK,
 				Message:   "Session already exists.",
@@ -908,6 +943,11 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		// Note: Do NOT release browser here - session.Create() handles it on all error paths
 		h.writeError(w, fmt.Sprintf("Failed to create session: %v", err), startTime)
 		return
+	}
+
+	// Set browser ownership flag
+	if ownsBrowser {
+		sess.OwnsBrowser = true
 	}
 
 	log.Info().
@@ -965,6 +1005,39 @@ func (h *Handler) handleSessionDestroy(w http.ResponseWriter, req *types.Request
 	resp := types.Response{
 		Status:    types.StatusOK,
 		Message:   "Session destroyed successfully",
+		StartTime: startTime.UnixMilli(),
+		EndTime:   time.Now().UnixMilli(),
+		Version:   version.Full(),
+	}
+	h.writeJSONResponse(w, http.StatusOK, resp)
+}
+
+// handleSessionKeepalive refreshes a session's TTL and optionally extends it.
+func (h *Handler) handleSessionKeepalive(w http.ResponseWriter, req *types.Request, startTime time.Time) {
+	if req.Session == "" {
+		h.writeError(w, "session is required", startTime)
+		return
+	}
+
+	// Validate session ID format
+	if errMsg := security.ValidateSessionID(req.Session); errMsg != "" {
+		h.writeError(w, errMsg, startTime)
+		return
+	}
+
+	var newTTL time.Duration
+	if req.KeepaliveTTL > 0 {
+		newTTL = time.Duration(req.KeepaliveTTL) * time.Minute
+	}
+
+	if err := h.sessions.TouchAndExtend(req.Session, newTTL); err != nil {
+		h.writeError(w, "Session not found", startTime)
+		return
+	}
+
+	resp := types.Response{
+		Status:    types.StatusOK,
+		Message:   "Session keepalive successful",
 		StartTime: startTime.UnixMilli(),
 		EndTime:   time.Now().UnixMilli(),
 		Version:   version.Full(),

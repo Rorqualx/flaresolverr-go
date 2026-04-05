@@ -37,6 +37,12 @@ type CapSolverSolver struct {
 	timeout    time.Duration
 }
 
+func init() {
+	Register("capsolver", func(apiKey string, timeout time.Duration) CaptchaSolver {
+		return NewCapSolverSolver(CapSolverConfig{APIKey: apiKey, Timeout: timeout})
+	})
+}
+
 // CapSolverConfig contains configuration for CapSolver solver.
 type CapSolverConfig struct {
 	APIKey  string
@@ -163,6 +169,77 @@ func (s *CapSolverSolver) SolveTurnstile(ctx context.Context, req *TurnstileRequ
 	estimatedCost := 0.0025
 
 	return &TurnstileResult{
+		Token:     result.Solution.Token,
+		SolveTime: solveTime,
+		Cost:      estimatedCost,
+		Provider:  s.Name(),
+	}, nil
+}
+
+// SolveHCaptcha solves an hCaptcha challenge using the CapSolver API.
+func (s *CapSolverSolver) SolveHCaptcha(ctx context.Context, req *HCaptchaRequest) (*CaptchaResult, error) {
+	if !s.IsConfigured() {
+		return nil, fmt.Errorf("capsolver API key not configured")
+	}
+
+	startTime := time.Now()
+
+	// Create hCaptcha task
+	taskReq := capSolverCreateTaskRequest{
+		ClientKey: s.apiKey,
+		Task: capSolverTurnstileTask{
+			Type:       "HCaptchaTaskProxyLess",
+			WebsiteURL: req.PageURL,
+			WebsiteKey: req.SiteKey,
+		},
+	}
+
+	body, err := json.Marshal(taskReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+capSolverCreateTask, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var taskResp capSolverCreateTaskResponse
+	if err := json.Unmarshal(respBody, &taskResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if taskResp.ErrorID != 0 {
+		return nil, s.handleError(taskResp.ErrorCode, taskResp.ErrorDescription, "")
+	}
+
+	log.Debug().
+		Str("task_id", taskResp.TaskID).
+		Str("sitekey", req.SiteKey[:min(10, len(req.SiteKey))]+"...").
+		Msg("CapSolver hCaptcha task created")
+
+	// Poll for result (reuses same polling infrastructure)
+	result, err := s.pollResult(ctx, taskResp.TaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	solveTime := time.Since(startTime)
+	estimatedCost := 0.003 // CapSolver hCaptcha pricing ~$3.00 per 1000
+
+	return &CaptchaResult{
 		Token:     result.Solution.Token,
 		SolveTime: solveTime,
 		Cost:      estimatedCost,

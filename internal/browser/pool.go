@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
@@ -414,6 +415,122 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	// Store control URL for reconnection support
 	p.controlURLs.Store(browser, url)
 
+	return browser, nil
+}
+
+// LaunchOptions configures a custom browser spawn with per-session overrides.
+type LaunchOptions struct {
+	ProxyURL   string   // Proxy URL (replaces pool default)
+	WindowSize string   // "width,height" e.g. "1280,720"
+	Language   string   // Accept-Language e.g. "fr-FR"
+	Timezone   string   // Timezone for stealth patches (applied at JS level)
+	Headless   *bool    // Override global headless setting
+	DisableGPU *bool    // Force software rendering
+	ExtraArgs  []string // Pre-validated extra Chrome flags
+}
+
+// SpawnWithOptions creates a new browser with custom launch options.
+// This browser is NOT pooled and must be closed by the caller.
+// Use this when a session requires custom Chrome flags.
+//
+// The caller is responsible for closing the browser when done:
+//
+//	browser, err := pool.SpawnWithOptions(ctx, opts)
+//	if err != nil {
+//	    return err
+//	}
+//	defer browser.Close()
+func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.Browser, error) {
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
+
+	log.Debug().
+		Str("proxy", security.RedactProxyURL(opts.ProxyURL)).
+		Str("window_size", opts.WindowSize).
+		Str("language", opts.Language).
+		Msg("Spawning browser with custom options")
+
+	// Create launcher with proxy
+	l := p.createLauncher(opts.ProxyURL)
+
+	// Apply per-session overrides
+	if opts.WindowSize != "" {
+		l = l.Set("window-size", opts.WindowSize)
+	}
+	if opts.Language != "" {
+		lang := strings.ReplaceAll(opts.Language, "_", "-")
+		if idx := strings.Index(lang, "."); idx > 0 {
+			lang = lang[:idx]
+		}
+		l = l.Set("accept-lang", lang+",en;q=0.9")
+	}
+	if opts.Headless != nil {
+		if *opts.Headless {
+			l = l.Set("headless", "new")
+		} else {
+			l = l.Headless(false)
+		}
+	}
+	if opts.DisableGPU != nil && *opts.DisableGPU {
+		l = l.Set("disable-gpu")
+	}
+	for _, arg := range opts.ExtraArgs {
+		// Strip -- prefix for Rod's Set method
+		flagStr := strings.TrimPrefix(arg, "--")
+		if parts := strings.SplitN(flagStr, "=", 2); len(parts) == 2 {
+			l = l.Set(flags.Flag(parts[0]), parts[1])
+		} else {
+			l = l.Set(flags.Flag(flagStr))
+		}
+	}
+
+	// Launch with timeout (same pattern as SpawnWithProxy)
+	const launchTimeout = 60 * time.Second
+	launchCtx, launchCancel := context.WithTimeout(context.Background(), launchTimeout)
+	defer launchCancel()
+
+	launchDone := make(chan struct{})
+	var url string
+	var launchErr error
+	go func() {
+		url, launchErr = l.Launch()
+		close(launchDone)
+	}()
+
+	select {
+	case <-launchDone:
+		if launchErr != nil {
+			return nil, fmt.Errorf("failed to launch browser with custom options: %w", launchErr)
+		}
+	case <-launchCtx.Done():
+		l.Kill()
+		return nil, fmt.Errorf("browser launch timed out after %v", launchTimeout)
+	case <-ctx.Done():
+		l.Kill()
+		return nil, ctx.Err()
+	}
+
+	browser := rod.New().ControlURL(url)
+	if err := browser.Connect(); err != nil {
+		log.Warn().Err(err).Str("url", url).Msg("Failed to connect to browser, cleaning up process")
+		if closeErr := browser.Close(); closeErr != nil {
+			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
+		}
+		return nil, fmt.Errorf("failed to connect to browser: %w", err)
+	}
+
+	if p.config.IgnoreCertErrors {
+		if err := browser.IgnoreCertErrors(true); err != nil {
+			log.Warn().Err(err).Msg("Failed to set IgnoreCertErrors")
+		}
+	}
+
+	log.Debug().Str("url", url).Msg("Browser with custom options spawned successfully")
 	return browser, nil
 }
 
