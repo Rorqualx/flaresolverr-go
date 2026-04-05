@@ -273,7 +273,7 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	l = l.Set("use-gl", "angle").
 		Set("use-angle", "vulkan").
 		Set("ignore-gpu-blocklist").
-		Set("enable-webgl").  // Explicitly enable WebGL
+		Set("enable-webgl"). // Explicitly enable WebGL
 		Set("enable-webgl2") // Enable WebGL 2.0
 
 	// 6. Ignore certificate errors (like original FlareSolverr)

@@ -83,13 +83,13 @@ type Config struct {
 	APIKey        string // Required API key for requests (only used if APIKeyEnabled is true)
 
 	// CAPTCHA Solver settings
-	CaptchaNativeAttempts  int           // Native solve attempts before external fallback (default: 3)
-	CaptchaFallbackEnabled bool          // Enable external CAPTCHA solver fallback
-	Captcha2CaptchaAPIKey  string        // 2Captcha API key (TWOCAPTCHA_API_KEY)
-	CaptchaCapSolverAPIKey    string        // CapSolver API key (CAPSOLVER_API_KEY)
+	CaptchaNativeAttempts    int           // Native solve attempts before external fallback (default: 3)
+	CaptchaFallbackEnabled   bool          // Enable external CAPTCHA solver fallback
+	Captcha2CaptchaAPIKey    string        // 2Captcha API key (TWOCAPTCHA_API_KEY)
+	CaptchaCapSolverAPIKey   string        // CapSolver API key (CAPSOLVER_API_KEY)
 	CaptchaAntiCaptchaAPIKey string        // anti-captcha.com API key (ANTICAPTCHA_API_KEY)
 	CaptchaPrimaryProvider   string        // Primary provider: "2captcha", "capsolver", or "anticaptcha" (default: "2captcha")
-	CaptchaSolverTimeout   time.Duration // Timeout for external solver API (default: 120s)
+	CaptchaSolverTimeout     time.Duration // Timeout for external solver API (default: 120s)
 
 	// Selectors settings
 	SelectorsPath          string        // Path to external selectors.yaml override file
@@ -162,13 +162,13 @@ func Load() *Config {
 		APIKey:        getEnvString("API_KEY", ""),
 
 		// CAPTCHA Solver settings
-		CaptchaNativeAttempts:  getEnvInt("CAPTCHA_NATIVE_ATTEMPTS", 3),
-		CaptchaFallbackEnabled: getEnvBool("CAPTCHA_FALLBACK_ENABLED", false),
-		Captcha2CaptchaAPIKey:  getEnvString("TWOCAPTCHA_API_KEY", ""),
-		CaptchaCapSolverAPIKey:    getEnvString("CAPSOLVER_API_KEY", ""),
+		CaptchaNativeAttempts:    getEnvInt("CAPTCHA_NATIVE_ATTEMPTS", 3),
+		CaptchaFallbackEnabled:   getEnvBool("CAPTCHA_FALLBACK_ENABLED", false),
+		Captcha2CaptchaAPIKey:    getEnvString("TWOCAPTCHA_API_KEY", ""),
+		CaptchaCapSolverAPIKey:   getEnvString("CAPSOLVER_API_KEY", ""),
 		CaptchaAntiCaptchaAPIKey: getEnvString("ANTICAPTCHA_API_KEY", ""),
 		CaptchaPrimaryProvider:   getEnvString("CAPTCHA_PRIMARY_PROVIDER", "2captcha"),
-		CaptchaSolverTimeout:   getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
+		CaptchaSolverTimeout:     getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
 
 		// Selectors settings
 		SelectorsPath:          getEnvString("SELECTORS_PATH", ""),

@@ -784,25 +784,25 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 
 	// Build solve options with DNS pinning
 	opts := &solver.SolveOptions{
-		URL:             req.URL,
-		Timeout:         timeout,
-		Cookies:         req.Cookies,
-		Proxy:           req.Proxy,
-		PostData:        req.PostData,
-		ContentType:     contentType, // Content type for POST (json or form-urlencoded)
-		Headers:         req.Headers, // Custom HTTP headers
-		IsPost:          isPost,
-		Screenshot:      req.ReturnScreenshot,
-		DisableMedia:    req.DisableMedia || h.config.DisableMedia, // Per-request or global DISABLE_MEDIA env
-		WaitInSeconds:   waitInSeconds,
-		ExpectedIP:      resolvedIP,     // DNS pinning: verify response URL resolves to same IP
-		TabsTillVerify:  tabsTillVerify, // Number of Tab presses for Turnstile keyboard navigation
-		Download:        req.Download,
-		FollowRedirects: req.FollowRedirects,
-		CaptchaSolver:   req.CaptchaSolver,
-		CaptchaApiKey:   req.CaptchaApiKey,
-		UserAgent:       req.UserAgent,
-		ReturnRawHtml:   req.ReturnRawHtml,
+		URL:                req.URL,
+		Timeout:            timeout,
+		Cookies:            req.Cookies,
+		Proxy:              req.Proxy,
+		PostData:           req.PostData,
+		ContentType:        contentType, // Content type for POST (json or form-urlencoded)
+		Headers:            req.Headers, // Custom HTTP headers
+		IsPost:             isPost,
+		Screenshot:         req.ReturnScreenshot,
+		DisableMedia:       req.DisableMedia || h.config.DisableMedia, // Per-request or global DISABLE_MEDIA env
+		WaitInSeconds:      waitInSeconds,
+		ExpectedIP:         resolvedIP,     // DNS pinning: verify response URL resolves to same IP
+		TabsTillVerify:     tabsTillVerify, // Number of Tab presses for Turnstile keyboard navigation
+		Download:           req.Download,
+		FollowRedirects:    req.FollowRedirects,
+		CaptchaSolver:      req.CaptchaSolver,
+		CaptchaApiKey:      req.CaptchaApiKey,
+		UserAgent:          req.UserAgent,
+		ReturnRawHtml:      req.ReturnRawHtml,
 		ExecuteJs:          req.ExecuteJs,
 		CookieExtractDelay: req.CookieExtractDelay,
 		Fingerprint:        req.Fingerprint,

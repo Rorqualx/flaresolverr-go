@@ -45,7 +45,7 @@ func (h *Handler) handleMetrics(w http.ResponseWriter) {
 	if h.domainStats != nil {
 		allStats := h.domainStats.AllStats()
 		for domain, ds := range allStats {
-			labels := fmt.Sprintf(`domain="%s"`, escapeProm(domain))
+			labels := fmt.Sprintf(`domain="%s"`, escapeProm(domain)) //nolint:gocritic // Prometheus label format requires literal quotes, not %q
 			writeCounterLabeled(&b, "flaresolverr_domain_requests_total", "Total requests per domain", labels, float64(ds.RequestCount))
 			writeCounterLabeled(&b, "flaresolverr_domain_successes_total", "Successful requests per domain", labels, float64(ds.SuccessCount))
 			writeCounterLabeled(&b, "flaresolverr_domain_errors_total", "Failed requests per domain", labels, float64(ds.ErrorCount))

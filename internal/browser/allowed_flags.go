@@ -4,10 +4,10 @@ package browser
 // Security-sensitive flags are explicitly excluded.
 var AllowedExtraArgs = map[string]bool{
 	// Safe display/rendering flags
-	"--disable-gpu":              true,
-	"--disable-gpu-compositing":  true,
+	"--disable-gpu":                 true,
+	"--disable-gpu-compositing":     true,
 	"--disable-software-rasterizer": true,
-	"--force-device-scale-factor": true,
+	"--force-device-scale-factor":   true,
 
 	// Safe content flags
 	"--disable-images":     true,
@@ -26,14 +26,14 @@ var AllowedExtraArgs = map[string]bool{
 
 // BlockedExtraArgs contains flags that are explicitly forbidden for security.
 var BlockedExtraArgs = map[string]bool{
-	"--disable-web-security":      true,
-	"--remote-debugging-port":     true,
-	"--remote-debugging-address":  true,
+	"--disable-web-security":           true,
+	"--remote-debugging-port":          true,
+	"--remote-debugging-address":       true,
 	"--allow-running-insecure-content": true,
 	"--disable-site-isolation-trials":  true,
-	"--no-sandbox":                true, // already set globally
-	"--user-data-dir":             true,
-	"--proxy-server":              true, // use Proxy field instead
+	"--no-sandbox":                     true, // already set globally
+	"--user-data-dir":                  true,
+	"--proxy-server":                   true, // use Proxy field instead
 }
 
 // IsAllowedExtraArg checks if a Chrome flag is in the allowed whitelist.

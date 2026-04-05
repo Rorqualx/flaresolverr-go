@@ -16,9 +16,9 @@ import (
 // This should be called after page creation but BEFORE navigation.
 //
 // Uses two injection methods for defense-in-depth:
-// 1. PageAddScriptToEvaluateOnNewDocument: Runs at document_start BEFORE any page scripts.
-//    This closes the race window where Cloudflare's detection scripts could run before stealth.
-// 2. page.Evaluate: Immediate execution for the current context (about:blank).
+//  1. PageAddScriptToEvaluateOnNewDocument: Runs at document_start BEFORE any page scripts.
+//     This closes the race window where Cloudflare's detection scripts could run before stealth.
+//  2. page.Evaluate: Immediate execution for the current context (about:blank).
 //
 // Returns an error for critical failures (e.g., syntax errors in stealth script),
 // but logs and continues for non-critical issues (e.g., APIs not available on about:blank).
@@ -1135,4 +1135,3 @@ func GetBrowserUserAgent(page *rod.Page) (string, error) {
 	}
 	return result.Value.Str(), nil
 }
-

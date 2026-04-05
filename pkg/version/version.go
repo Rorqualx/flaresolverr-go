@@ -4,6 +4,7 @@
 package version
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -43,7 +44,11 @@ func CheckForUpdate() (latestVersion, releaseURL string) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", GitHubRepo)
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return "", ""
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", ""
 	}

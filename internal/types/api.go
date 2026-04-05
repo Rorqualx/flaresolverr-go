@@ -32,31 +32,31 @@ const (
 // Request represents an incoming API request.
 // This matches the FlareSolverr API specification.
 type Request struct {
-	Cmd               string            `json:"cmd"`
-	URL               string            `json:"url,omitempty"`
-	Session           string            `json:"session,omitempty"`
-	SessionTTL        int               `json:"session_ttl_minutes,omitempty"` // Per-session TTL override in minutes (0 = use server default)
-	MaxTimeout        int               `json:"maxTimeout,omitempty"`
-	Cookies           []RequestCookie   `json:"cookies,omitempty"`
-	ReturnOnlyCookies bool              `json:"returnOnlyCookies,omitempty"`
-	Proxy             *Proxy            `json:"proxy,omitempty"`
-	PostData          string            `json:"postData,omitempty"`
-	ContentType       string            `json:"contentType,omitempty"`      // Content type for POST: "application/json" or "application/x-www-form-urlencoded" (default)
-	Headers           map[string]string `json:"headers,omitempty"`          // Custom HTTP headers to send with the request
-	ReturnScreenshot  bool              `json:"returnScreenshot,omitempty"` // Capture screenshot and return as base64
-	DisableMedia      bool              `json:"disableMedia,omitempty"`     // Disable loading of media (images, CSS, fonts)
-	WaitInSeconds     int               `json:"waitInSeconds,omitempty"`    // Wait N seconds before returning the response
-	TabsTillVerify    int               `json:"tabsTillVerify,omitempty"`   // Number of Tab presses to reach Turnstile checkbox (default: 10)
-	Download          bool              `json:"download,omitempty"`         // Download URL as binary and return base64 in response
-	FollowRedirects   *bool             `json:"followRedirects,omitempty"`  // Follow HTTP redirects (default: true)
-	CaptchaSolver     string            `json:"captchaSolver,omitempty"`    // Per-request captcha provider: "2captcha", "capsolver", or "none"
-	CaptchaApiKey     string            `json:"captchaApiKey,omitempty"`    //nolint:revive,stylecheck // JSON API compatibility
-	UserAgent         string            `json:"userAgent,omitempty"`        // Override User-Agent for this request
-	ReturnRawHtml      bool              `json:"returnRawHtml,omitempty"`      //nolint:revive,stylecheck // JSON API compatibility
-	ExecuteJs          string            `json:"executeJs,omitempty"`          // Custom JavaScript to execute after solve
-	KeepaliveTTL       int               `json:"keepaliveTtl,omitempty"`       // New TTL in minutes for sessions.keepalive (0 = just touch)
-	CookieExtractDelay int               `json:"cookieExtractDelay,omitempty"` // Seconds to wait before extracting cookies (0-30)
-	BrowserFlags       *BrowserFlags     `json:"browserFlags,omitempty"`       // Per-session Chrome flag overrides (sessions.create only)
+	Cmd                string             `json:"cmd"`
+	URL                string             `json:"url,omitempty"`
+	Session            string             `json:"session,omitempty"`
+	SessionTTL         int                `json:"session_ttl_minutes,omitempty"` // Per-session TTL override in minutes (0 = use server default)
+	MaxTimeout         int                `json:"maxTimeout,omitempty"`
+	Cookies            []RequestCookie    `json:"cookies,omitempty"`
+	ReturnOnlyCookies  bool               `json:"returnOnlyCookies,omitempty"`
+	Proxy              *Proxy             `json:"proxy,omitempty"`
+	PostData           string             `json:"postData,omitempty"`
+	ContentType        string             `json:"contentType,omitempty"`        // Content type for POST: "application/json" or "application/x-www-form-urlencoded" (default)
+	Headers            map[string]string  `json:"headers,omitempty"`            // Custom HTTP headers to send with the request
+	ReturnScreenshot   bool               `json:"returnScreenshot,omitempty"`   // Capture screenshot and return as base64
+	DisableMedia       bool               `json:"disableMedia,omitempty"`       // Disable loading of media (images, CSS, fonts)
+	WaitInSeconds      int                `json:"waitInSeconds,omitempty"`      // Wait N seconds before returning the response
+	TabsTillVerify     int                `json:"tabsTillVerify,omitempty"`     // Number of Tab presses to reach Turnstile checkbox (default: 10)
+	Download           bool               `json:"download,omitempty"`           // Download URL as binary and return base64 in response
+	FollowRedirects    *bool              `json:"followRedirects,omitempty"`    // Follow HTTP redirects (default: true)
+	CaptchaSolver      string             `json:"captchaSolver,omitempty"`      // Per-request captcha provider: "2captcha", "capsolver", or "none"
+	CaptchaApiKey      string             `json:"captchaApiKey,omitempty"`      //nolint:revive,stylecheck // JSON API compatibility
+	UserAgent          string             `json:"userAgent,omitempty"`          // Override User-Agent for this request
+	ReturnRawHtml      bool               `json:"returnRawHtml,omitempty"`      //nolint:revive,stylecheck // JSON API compatibility
+	ExecuteJs          string             `json:"executeJs,omitempty"`          // Custom JavaScript to execute after solve
+	KeepaliveTTL       int                `json:"keepaliveTtl,omitempty"`       // New TTL in minutes for sessions.keepalive (0 = just touch)
+	CookieExtractDelay int                `json:"cookieExtractDelay,omitempty"` // Seconds to wait before extracting cookies (0-30)
+	BrowserFlags       *BrowserFlags      `json:"browserFlags,omitempty"`       // Per-session Chrome flag overrides (sessions.create only)
 	Fingerprint        *FingerprintConfig `json:"fingerprint,omitempty"`        // Per-request browser fingerprint customization
 }
 
@@ -313,7 +313,7 @@ type Solution struct {
 	ExecuteJsResult *string `json:"executeJsResult,omitempty"` // Result of executeJs if provided
 
 	// Response metadata (omitted when not applicable)
-	ResponseEncoding string `json:"responseEncoding,omitempty"` // "base64" when download=true, empty for HTML
+	ResponseEncoding  string  `json:"responseEncoding,omitempty"`  // "base64" when download=true, empty for HTML
 	ResponseTruncated *bool   `json:"responseTruncated,omitempty"` // true if HTML response was truncated due to size limit
 	CookieError       *string `json:"cookieError,omitempty"`       // error message if cookies could not be retrieved
 
@@ -340,10 +340,10 @@ type Cookie struct {
 
 // Commands supported by the API.
 const (
-	CmdRequestGet      = "request.get"
-	CmdRequestPost     = "request.post"
-	CmdSessionsCreate  = "sessions.create"
-	CmdSessionsList    = "sessions.list"
+	CmdRequestGet        = "request.get"
+	CmdRequestPost       = "request.post"
+	CmdSessionsCreate    = "sessions.create"
+	CmdSessionsList      = "sessions.list"
 	CmdSessionsDestroy   = "sessions.destroy"
 	CmdSessionsKeepalive = "sessions.keepalive"
 )
@@ -364,11 +364,11 @@ const (
 // Only a curated subset of flags is supported for security.
 type BrowserFlags struct {
 	WindowSize string   `json:"windowSize,omitempty"` // e.g. "1280,720"
-	Language   string   `json:"language,omitempty"`    // e.g. "fr-FR"
-	Timezone   string   `json:"timezone,omitempty"`    // e.g. "Europe/Paris"
-	Headless   *bool    `json:"headless,omitempty"`    // Override global headless setting
-	DisableGPU *bool    `json:"disableGpu,omitempty"`  // Force software rendering
-	ExtraArgs  []string `json:"extraArgs,omitempty"`   // Validated against allowed whitelist
+	Language   string   `json:"language,omitempty"`   // e.g. "fr-FR"
+	Timezone   string   `json:"timezone,omitempty"`   // e.g. "Europe/Paris"
+	Headless   *bool    `json:"headless,omitempty"`   // Override global headless setting
+	DisableGPU *bool    `json:"disableGpu,omitempty"` // Force software rendering
+	ExtraArgs  []string `json:"extraArgs,omitempty"`  // Validated against allowed whitelist
 }
 
 // Validate validates the browser flags.

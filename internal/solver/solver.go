@@ -89,7 +89,7 @@ type SolveOptions struct {
 	CaptchaSolver string
 	CaptchaApiKey string //nolint:revive,stylecheck // JSON API compatibility
 	// UserAgent overrides the browser's User-Agent for this request.
-	UserAgent string
+	UserAgent     string
 	ReturnRawHtml bool //nolint:revive,stylecheck // JSON API compatibility
 	// ExecuteJs is custom JavaScript to execute on the page after solving.
 	ExecuteJs string
@@ -786,12 +786,12 @@ func findBrowserBinary(configuredPath string) string {
 	// Candidates in priority order: configured path, then well-known locations
 	candidates := []string{
 		configuredPath,
-		"/usr/lib/chromium/chromium",                                          // Alpine actual binary
-		"/usr/bin/chromium",                                                   // Direct binary on some distros
-		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",        // macOS
-		"/usr/bin/google-chrome-stable",                                       // Debian/Ubuntu
-		"/usr/bin/google-chrome",                                              // Generic
-		"/usr/bin/chromium-browser",                                           // Fallback (may be wrapper)
+		"/usr/lib/chromium/chromium", // Alpine actual binary
+		"/usr/bin/chromium",          // Direct binary on some distros
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", // macOS
+		"/usr/bin/google-chrome-stable",                                // Debian/Ubuntu
+		"/usr/bin/google-chrome",                                       // Generic
+		"/usr/bin/chromium-browser",                                    // Fallback (may be wrapper)
 	}
 
 	for _, path := range candidates {
@@ -908,8 +908,8 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		"--no-sandbox",
 		"--user-data-dir=" + userDataDir,
 		"--window-size=1920,1080",
-		"--force-device-scale-factor=1.25",         // Realistic DPI (Xvfb defaults to 1.0)
-		"--load-extension=" + stealthExt.Dir(),      // Stealth patches without CDP
+		"--force-device-scale-factor=1.25",     // Realistic DPI (Xvfb defaults to 1.0)
+		"--load-extension=" + stealthExt.Dir(), // Stealth patches without CDP
 		opts.URL,
 	}
 	log.Debug().
@@ -1434,11 +1434,11 @@ var challengeSelectors = []string{
 // This is broader than just .cf-turnstile — it includes CF interstitial page indicators
 // where Turnstile is embedded inside iframes.
 var turnstileTriggerSelectors = map[string]bool{
-	"#turnstile-wrapper":                        true,
-	".cf-turnstile":                              true,
-	"iframe[src*='challenges.cloudflare.com']":   true,
-	"#cf-challenge-running":                      true,
-	"#challenge-stage":                           true,
+	"#turnstile-wrapper":                       true,
+	".cf-turnstile":                            true,
+	"iframe[src*='challenges.cloudflare.com']": true,
+	"#cf-challenge-running":                    true,
+	"#challenge-stage":                         true,
 }
 
 // solveLoop repeatedly checks for and attempts to solve challenges.
