@@ -192,7 +192,15 @@ func ApplyStealthToPageWithProfile(page *rod.Page, profile *FingerprintProfile) 
 		}
 	}
 
-	// Apply the main stealth script
+	// Register stealth for future navigations (document_start)
+	_, regErr := proto.PageAddScriptToEvaluateOnNewDocument{
+		Source: stealthScript,
+	}.Call(page)
+	if regErr != nil {
+		log.Warn().Err(regErr).Msg("Failed to register profiled stealth via EvalOnNewDocument")
+	}
+
+	// Also evaluate immediately for current context
 	_, err := page.Evaluate(rod.Eval(stealthScript))
 	if err != nil {
 		errStr := err.Error()

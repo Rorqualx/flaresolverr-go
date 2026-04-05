@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	neturl "net/url"
 	"os"
@@ -623,11 +624,11 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// Main solve loop with DNS pinning
 	result, err = s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
 	if err != nil {
-		// If the challenge timed out and we still have time in the parent context,
-		// try the disconnect/reconnect approach. This disconnects the CDP debugger
-		// so Cloudflare can't detect it, lets Chrome handle the challenge naturally,
-		// then reconnects to extract results.
-		if strings.Contains(err.Error(), "timed out") && ctx.Err() == nil {
+		// If the challenge timed out (or native Turnstile solving was exhausted early)
+		// and we still have time in the parent context, try the disconnect/reconnect
+		// approach. This launches a clean Chrome without CDP so Cloudflare can't detect
+		// it, lets Chrome handle the challenge naturally, then reconnects to extract results.
+		if (strings.Contains(err.Error(), "timed out") || strings.Contains(err.Error(), "turnstile_early_bypass")) && ctx.Err() == nil {
 			log.Info().Msg("Normal solve timed out, attempting CDP disconnect/reconnect bypass")
 			reconnResult, reconnErr := s.solveWithReconnect(ctx, browserInstance, opts)
 			if reconnErr == nil {
@@ -870,7 +871,8 @@ func (d *deadCDPClient) Call(_ context.Context, _, _ string, _ interface{}) ([]b
 // This works because Cloudflare's cf_clearance cookie is bound to IP + UA + TLS
 // fingerprint, all of which match since we use the same Chrome binary.
 func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *SolveOptions) (*Result, error) {
-	const phase1Wait = 25 * time.Second
+	// Randomize phase 1 wait to avoid timing correlation detection
+	phase1Wait := time.Duration(20+rand.Intn(16)) * time.Second // 20-35s
 
 	// Get a random available port for Phase 2's debugging endpoint
 	// to avoid conflicts if multiple bypass attempts run concurrently.
@@ -1588,6 +1590,17 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 				// Fix: Log but continue - Turnstile solve is best-effort, the loop will
 				// check again and return error if challenge persists past timeout
 				log.Warn().Err(err).Msg("Turnstile solve attempt failed, will retry")
+			}
+
+			// Early two-phase bypass: after 2 failed Turnstile attempts, try the
+			// CDP disconnect/reconnect approach instead of exhausting all native methods.
+			// This is more effective on heavily protected sites (e.g., 1337x.to).
+			if turnstileAttempts >= 2 && ctx.Err() == nil {
+				log.Info().
+					Int("native_attempts", turnstileAttempts).
+					Msg("Turnstile native solving struggling, attempting early two-phase bypass")
+				// Need access to browser — return a sentinel error to trigger reconnect in the caller
+				return nil, fmt.Errorf("turnstile_early_bypass: native solving exhausted after %d attempts", turnstileAttempts)
 			}
 
 			// Method 6: Try external solver fallback if native attempts exhausted
