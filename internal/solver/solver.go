@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
-	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
@@ -844,25 +843,6 @@ func getFreePort() (int, error) {
 		return 0, fmt.Errorf("failed to close listener: %w", err)
 	}
 	return port, nil
-}
-
-// deadCDPClient is a no-op CDP client used to sever the debugger connection
-// without killing the browser process. When set on a Browser via Client(),
-// it effectively disconnects rod from Chrome.
-type deadCDPClient struct {
-	ch chan *cdp.Event
-}
-
-func newDeadCDPClient() *deadCDPClient {
-	return &deadCDPClient{ch: make(chan *cdp.Event)}
-}
-
-func (d *deadCDPClient) Event() <-chan *cdp.Event {
-	return d.ch
-}
-
-func (d *deadCDPClient) Call(_ context.Context, _, _ string, _ interface{}) ([]byte, error) {
-	return nil, fmt.Errorf("CDP disconnected")
 }
 
 // solveWithReconnect bypasses Cloudflare's CDP detection using a two-phase approach:
