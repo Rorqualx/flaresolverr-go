@@ -61,6 +61,7 @@ type Result struct {
 	SessionStorage   map[string]string // All sessionStorage key-value pairs
 	ResponseHeaders  map[string]string // Headers from the final navigation response
 	ResponseEncoding string            // "base64" when download mode, empty for HTML
+	ExecuteJsResult  string            // Result of custom JS execution
 }
 
 // SolveOptions contains options for a solve request.
@@ -91,6 +92,8 @@ type SolveOptions struct {
 	UserAgent string
 	// ReturnRawHtml returns raw HTML from the initial page source before JS rendering.
 	ReturnRawHtml bool
+	// ExecuteJs is custom JavaScript to execute on the page after solving.
+	ExecuteJs string
 
 	// SkipResponseValidation disables response URL validation (for testing only).
 	// WARNING: Do not enable in production - this disables SSRF protection.
@@ -599,6 +602,18 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 				result.ResponseEncoding = "base64"
 				log.Info().Int("base64_length", len(b64)).Msg("Download complete")
 			}
+		}
+	}
+
+	// Execute custom JavaScript if provided
+	if opts.ExecuteJs != "" && result != nil {
+		log.Debug().Int("js_length", len(opts.ExecuteJs)).Msg("Executing custom JavaScript")
+		jsResult, evalErr := page.Timeout(10 * time.Second).Eval(fmt.Sprintf(`() => { %s }`, opts.ExecuteJs))
+		if evalErr != nil {
+			log.Warn().Err(evalErr).Msg("Custom JS execution failed")
+			result.ExecuteJsResult = "ERROR: " + evalErr.Error()
+		} else if jsResult != nil {
+			result.ExecuteJsResult = jsResult.Value.String()
 		}
 	}
 

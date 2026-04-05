@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	_ "net/http/pprof" // Import for side effects - registers pprof handlers
 	"os"
@@ -39,7 +40,7 @@ func main() {
 	cfg := config.Load()
 
 	// Setup logging first so validation warnings are visible
-	setupLogging(cfg.LogLevel)
+	setupLogging(cfg.LogLevel, cfg.LogFile)
 
 	// Validate configuration (Bug 12: config bounds validation)
 	cfg.Validate()
@@ -260,12 +261,24 @@ func main() {
 }
 
 // setupLogging configures zerolog based on the log level.
-func setupLogging(level string) {
-	// Use console writer for prettier output
-	log.Logger = log.Output(zerolog.ConsoleWriter{
+func setupLogging(level, logFile string) {
+	var output io.Writer = zerolog.ConsoleWriter{
 		Out:        os.Stdout,
 		TimeFormat: time.RFC3339,
-	})
+	}
+
+	// Add file logging if LOG_FILE is set
+	if logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Failed to open log file %s: %v\n", logFile, err)
+		} else {
+			output = io.MultiWriter(output, f)
+			fmt.Printf("Logging to file: %s\n", logFile)
+		}
+	}
+
+	log.Logger = log.Output(output)
 
 	switch level {
 	case "debug":

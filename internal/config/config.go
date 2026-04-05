@@ -54,9 +54,14 @@ type Config struct {
 	ProxyUsername string
 	ProxyPassword string
 
+	// Browser locale/timezone
+	BrowserTimezone string // TZ env var — sets browser timezone (e.g., "America/New_York")
+	BrowserLang     string // LANG env var — sets browser accept-language (e.g., "en_GB")
+
 	// Logging
 	LogLevel string
 	LogHTML  bool
+	LogFile  string // LOG_FILE — path to log file (in addition to stdout)
 
 	// Profiling
 	PProfEnabled  bool
@@ -125,9 +130,14 @@ func Load() *Config {
 		ProxyUsername: getEnvString("PROXY_USERNAME", ""),
 		ProxyPassword: getEnvString("PROXY_PASSWORD", ""),
 
+		// Browser locale/timezone
+		BrowserTimezone: getEnvString("TZ", ""),
+		BrowserLang:     getEnvString("LANG", ""),
+
 		// Logging
 		LogLevel: getEnvString("LOG_LEVEL", "info"),
 		LogHTML:  getEnvBool("LOG_HTML", false),
+		LogFile:  getEnvString("LOG_FILE", ""),
 
 		// Profiling - disabled by default for security
 		PProfEnabled:  getEnvBool("PPROF_ENABLED", false),

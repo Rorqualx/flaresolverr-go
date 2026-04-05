@@ -146,6 +146,9 @@ components:
         returnRawHtml:
           type: boolean
           description: Return raw HTML before JavaScript renders
+        executeJs:
+          type: string
+          description: Custom JavaScript to execute on the page after solving
 
     RequestCookie:
       type: object
@@ -228,6 +231,9 @@ components:
           description: Base64 PNG screenshot
         turnstile_token:
           type: string
+        executeJsResult:
+          type: string
+          description: Result of executeJs custom JavaScript
         responseTruncated:
           type: boolean
         rateLimited:

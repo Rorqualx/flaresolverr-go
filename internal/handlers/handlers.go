@@ -717,6 +717,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		CaptchaApiKey:   req.CaptchaApiKey,
 		UserAgent:       req.UserAgent,
 		ReturnRawHtml:   req.ReturnRawHtml,
+		ExecuteJs:       req.ExecuteJs,
 	}
 
 	var result *solver.Result
@@ -909,6 +910,9 @@ func (h *Handler) writeSuccess(w http.ResponseWriter, result *solver.Result, coo
 	}
 	if result.CookieError != "" {
 		solution.CookieError = &result.CookieError
+	}
+	if result.ExecuteJsResult != "" {
+		solution.ExecuteJsResult = &result.ExecuteJsResult
 	}
 
 	// Detect rate limiting in the response

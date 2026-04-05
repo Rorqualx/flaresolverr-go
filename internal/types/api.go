@@ -52,6 +52,7 @@ type Request struct {
 	CaptchaApiKey     string            `json:"captchaApiKey,omitempty"`    // Per-request captcha API key
 	UserAgent         string            `json:"userAgent,omitempty"`        // Override User-Agent for this request
 	ReturnRawHtml     bool              `json:"returnRawHtml,omitempty"`    // Return raw HTML before JS rendering
+	ExecuteJs         string            `json:"executeJs,omitempty"`        // Custom JavaScript to execute after solve
 }
 
 // Validate validates the request and returns an error if invalid.
@@ -283,8 +284,11 @@ type Solution struct {
 	SessionStorage  map[string]string `json:"sessionStorage,omitempty"`  // All sessionStorage key-value pairs
 	ResponseHeaders map[string]string `json:"responseHeaders,omitempty"` // Extracted response metadata
 
+	// Custom JS result
+	ExecuteJsResult *string `json:"executeJsResult,omitempty"` // Result of executeJs if provided
+
 	// Response metadata (omitted when not applicable)
-	ResponseEncoding  string  `json:"responseEncoding,omitempty"`  // "base64" when download=true, empty for HTML
+	ResponseEncoding string `json:"responseEncoding,omitempty"` // "base64" when download=true, empty for HTML
 	ResponseTruncated *bool   `json:"responseTruncated,omitempty"` // true if HTML response was truncated due to size limit
 	CookieError       *string `json:"cookieError,omitempty"`       // error message if cookies could not be retrieved
 

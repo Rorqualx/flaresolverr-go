@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -254,14 +255,17 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// 4. Enable network service features (normal browser behavior)
 	l = l.Set("enable-features", "NetworkService,NetworkServiceInProcess")
 
-	// 5. WebGL with SwiftShader - provides realistic GPU fingerprint
-	// Without this, WebGL returns empty/null values which is a detection signal
-	// SwiftShader provides software-rendered WebGL that works on all platforms including ARM
-	l = l.Set("use-gl", "swiftshader").
-		Set("use-angle", "swiftshader").
-		Set("enable-unsafe-swiftshader"). // Allow SwiftShader for WebGL
-		Set("enable-webgl").              // Explicitly enable WebGL
-		Set("enable-webgl2")              // Enable WebGL 2.0 as well
+	// 5. WebGL — prefer system GPU via ANGLE/Vulkan, fallback to SwiftShader
+	// SwiftShader reports "SwiftShader Device (0x0000C0DE)" which is an instant
+	// bot detection signal for Cloudflare Enterprise. Using the system's Vulkan
+	// driver (via ANGLE) reports the real GPU if available.
+	// --ignore-gpu-blocklist allows Chrome to use GPUs it would normally blacklist.
+	// --disable-gpu-sandbox is required for GPU access in Docker containers.
+	l = l.Set("use-gl", "angle").
+		Set("use-angle", "vulkan").
+		Set("ignore-gpu-blocklist").
+		Set("enable-webgl").  // Explicitly enable WebGL
+		Set("enable-webgl2") // Enable WebGL 2.0
 
 	// 6. Ignore certificate errors (like original FlareSolverr)
 	// Required for some proxies and helps avoid SSL-related detection
@@ -274,8 +278,18 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// Browser Behavior (Realistic)
 	// ========================================
 
-	// Language - consistent with user agent
-	l = l.Set("accept-lang", "en-US,en;q=0.9")
+	// Language — use LANG env var if set, otherwise default to en-US
+	acceptLang := "en-US,en;q=0.9"
+	if p.config.BrowserLang != "" {
+		// Convert locale format (e.g., "en_GB" → "en-GB,en;q=0.9")
+		lang := strings.ReplaceAll(p.config.BrowserLang, "_", "-")
+		// Strip .UTF-8 or similar suffixes
+		if idx := strings.Index(lang, "."); idx > 0 {
+			lang = lang[:idx]
+		}
+		acceptLang = lang + ",en;q=0.9"
+	}
+	l = l.Set("accept-lang", acceptLang)
 
 	// First-run and dialogs
 	l = l.Set("no-first-run").
