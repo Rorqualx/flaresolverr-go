@@ -927,7 +927,7 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		// (matches Python FlareSolverr behavior)
 		if errors.Is(err, types.ErrSessionAlreadyExists) {
 			if ownsBrowser {
-				browserInstance.Close()
+				_ = browserInstance.Close() // best-effort cleanup
 			} else {
 				h.pool.Release(browserInstance)
 			}
