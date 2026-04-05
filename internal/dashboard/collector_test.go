@@ -53,6 +53,12 @@ func TestCollector_Collect(t *testing.T) {
 		if snap.TotalRequests != 1 {
 			t.Errorf("expected TotalRequests=1, got %d", snap.TotalRequests)
 		}
+		if snap.RequestsPerSec != 0.5 {
+			t.Errorf("expected RequestsPerSec=0.5, got %f", snap.RequestsPerSec)
+		}
+		if snap.SessionCount != 0 {
+			t.Errorf("expected SessionCount=0, got %d", snap.SessionCount)
+		}
 		if snap.DomainCount != 2 {
 			t.Errorf("expected DomainCount=2, got %d", snap.DomainCount)
 		}

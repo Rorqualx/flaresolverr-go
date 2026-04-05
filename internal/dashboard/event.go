@@ -50,7 +50,7 @@ func (b *EventBuffer) Record(e RequestEvent) {
 
 // Snapshot returns the most recent n events (newest first) and the
 // total event count since startup. The returned slice is a copy.
-func (b *EventBuffer) Snapshot(n int) ([]RequestEvent, int64) {
+func (b *EventBuffer) Snapshot(n int) (events []RequestEvent, totalCount int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

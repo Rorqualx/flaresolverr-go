@@ -27,11 +27,11 @@ func IsTTY() bool {
 
 // Dashboard manages the TUI lifecycle.
 type Dashboard struct {
-	program   *tea.Program
-	events    *EventBuffer
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
-	origLog   zerolog.Logger
+	program  *tea.Program
+	events   *EventBuffer
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+	origLog  zerolog.Logger
 }
 
 // New creates a Dashboard wired to the application's live data sources.
