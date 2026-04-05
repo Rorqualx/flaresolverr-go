@@ -58,6 +58,7 @@ type Config struct {
 	BrowserTimezone string // TZ env var — sets browser timezone (e.g., "America/New_York")
 	BrowserLang     string // LANG env var — sets browser accept-language (e.g., "en_GB")
 	TestURL         string // TEST_URL — URL to verify browser works on startup (default: https://www.google.com)
+	DisableMedia    bool   // DISABLE_MEDIA — global default for blocking images/CSS/fonts
 
 	// Logging
 	LogLevel string
@@ -136,6 +137,7 @@ func Load() *Config {
 		BrowserTimezone: getEnvString("TZ", ""),
 		BrowserLang:     getEnvString("LANG", ""),
 		TestURL:         getEnvString("TEST_URL", "https://www.google.com"),
+		DisableMedia:    getEnvBool("DISABLE_MEDIA", false),
 
 		// Logging
 		LogLevel: getEnvString("LOG_LEVEL", "info"),

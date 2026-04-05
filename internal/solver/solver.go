@@ -690,6 +690,16 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		if !sleepWithContext(solveCtx, waitDuration) {
 			log.Warn().Msg("Wait interrupted by context cancellation")
 		}
+
+		// Re-fetch cookies after wait — JavaScript may set cookies during the delay
+		// (fixes Python FlareSolverr issue #1652, PR #1692)
+		if result != nil {
+			freshCookies, err := proto.NetworkGetAllCookies{}.Call(page)
+			if err == nil && freshCookies != nil {
+				result.Cookies = freshCookies.Cookies
+				log.Debug().Int("cookies", len(freshCookies.Cookies)).Msg("Re-fetched cookies after waitInSeconds")
+			}
+		}
 	}
 
 	return result, nil
@@ -1192,6 +1202,11 @@ func (s *Solver) buildFormFieldsJS(postData string) (string, error) {
 			key, err := neturl.QueryUnescape(parts[0])
 			if err != nil {
 				return "", fmt.Errorf("failed to decode form key %q: %w", parts[0], err)
+			}
+			// Skip fields named "submit" — they shadow HTMLFormElement.submit()
+			// and prevent form.submit() from working (Python FlareSolverr behavior)
+			if key == "submit" {
+				continue
 			}
 			value, err := neturl.QueryUnescape(parts[1])
 			if err != nil {

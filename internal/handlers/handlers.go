@@ -500,6 +500,7 @@ type HealthResponse struct {
 	StartTime      int64                            `json:"startTimestamp,omitempty"`
 	EndTime        int64                            `json:"endTimestamp,omitempty"`
 	Version        string                           `json:"version,omitempty"`
+	UserAgent      string                           `json:"userAgent,omitempty"`
 	Pool           *PoolStats                       `json:"pool,omitempty"`
 	DomainStats    map[string]stats.DomainStatsJSON `json:"domainStats,omitempty"`
 	Defaults       *DelayDefaults                   `json:"defaults,omitempty"`
@@ -520,6 +521,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, startTime time.Time) {
 		StartTime: startTime.UnixMilli(),
 		EndTime:   time.Now().UnixMilli(),
 		Version:   version.Full(),
+		UserAgent: h.userAgent,
 	}
 
 	// Include pool stats if pool is available
@@ -800,7 +802,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		Headers:         req.Headers, // Custom HTTP headers
 		IsPost:          isPost,
 		Screenshot:      req.ReturnScreenshot,
-		DisableMedia:    req.DisableMedia,
+		DisableMedia:    req.DisableMedia || h.config.DisableMedia, // Per-request or global DISABLE_MEDIA env
 		WaitInSeconds:   waitInSeconds,
 		ExpectedIP:      resolvedIP,     // DNS pinning: verify response URL resolves to same IP
 		TabsTillVerify:  tabsTillVerify, // Number of Tab presses for Turnstile keyboard navigation
@@ -890,6 +892,19 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 	// On error, Create() already releases the browser back to pool, so don't release here
 	sess, err := h.sessions.Create(sessionID, browserInstance, sessionTTL)
 	if err != nil {
+		// Idempotent behavior: if session already exists, return success
+		// (matches Python FlareSolverr behavior)
+		if errors.Is(err, types.ErrSessionAlreadyExists) {
+			h.pool.Release(browserInstance) // Release the unused browser
+			h.writeJSONResponse(w, http.StatusOK, types.Response{
+				Status:    types.StatusOK,
+				Message:   "Session already exists.",
+				StartTime: startTime.UnixMilli(),
+				EndTime:   time.Now().UnixMilli(),
+				Version:   version.Full(),
+			})
+			return
+		}
 		// Note: Do NOT release browser here - session.Create() handles it on all error paths
 		h.writeError(w, fmt.Sprintf("Failed to create session: %v", err), startTime)
 		return
