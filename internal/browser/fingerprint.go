@@ -236,8 +236,8 @@ func ResolveProfile(profileName string, overrides map[string]any, disablePatches
 	if profileName != "" {
 		if builtin, ok := BuiltinProfiles[profileName]; ok {
 			// Copy the builtin profile
-			copy := *builtin
-			profile = &copy
+			profileCopy := *builtin
+			profile = &profileCopy
 		}
 	}
 
