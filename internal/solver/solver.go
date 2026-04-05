@@ -1540,7 +1540,17 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 		// can briefly contain access denied patterns before redirecting.
 		html, err := page.HTML()
 		if err != nil {
-			// Fix: Return error if HTML retrieval fails since we can't determine page state
+			// "Cannot find context with specified id" means the page navigated
+			// (e.g., Turnstile click triggered a redirect after solving).
+			// Wait for the new page to load and retry.
+			if strings.Contains(err.Error(), "Cannot find context") {
+				log.Info().Msg("Page context changed (likely post-challenge redirect), waiting for new page")
+				if !sleepWithContext(ctx, 2*time.Second) {
+					return nil, types.NewChallengeTimeoutError(url)
+				}
+				// Try to get result from the new page
+				return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture, cookieExtractDelay)
+			}
 			log.Debug().Err(err).Msg("Failed to get page HTML for challenge detection")
 			return nil, fmt.Errorf("failed to get page HTML: %w", err)
 		}
