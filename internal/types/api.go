@@ -50,6 +50,8 @@ type Request struct {
 	FollowRedirects   *bool             `json:"followRedirects,omitempty"`  // Follow HTTP redirects (default: true)
 	CaptchaSolver     string            `json:"captchaSolver,omitempty"`    // Per-request captcha provider: "2captcha", "capsolver", or "none"
 	CaptchaApiKey     string            `json:"captchaApiKey,omitempty"`    // Per-request captcha API key
+	UserAgent         string            `json:"userAgent,omitempty"`        // Override User-Agent for this request
+	ReturnRawHtml     bool              `json:"returnRawHtml,omitempty"`    // Return raw HTML before JS rendering
 }
 
 // Validate validates the request and returns an error if invalid.

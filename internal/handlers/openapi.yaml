@@ -140,6 +140,12 @@ components:
         captchaApiKey:
           type: string
           description: Per-request captcha API key
+        userAgent:
+          type: string
+          description: Override User-Agent for this request
+        returnRawHtml:
+          type: boolean
+          description: Return raw HTML before JavaScript renders
 
     RequestCookie:
       type: object

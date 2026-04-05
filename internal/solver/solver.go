@@ -87,6 +87,10 @@ type SolveOptions struct {
 	CaptchaSolver string
 	// CaptchaApiKey overrides the global captcha API key for this request.
 	CaptchaApiKey string
+	// UserAgent overrides the browser's User-Agent for this request.
+	UserAgent string
+	// ReturnRawHtml returns raw HTML from the initial page source before JS rendering.
+	ReturnRawHtml bool
 
 	// SkipResponseValidation disables response URL validation (for testing only).
 	// WARNING: Do not enable in production - this disables SSRF protection.
@@ -458,9 +462,14 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 	defer page.Close()
 
-	// Set user agent
-	if s.userAgent != "" {
-		if err := browser.SetUserAgent(page, s.userAgent); err != nil {
+	// Set user agent — per-request override takes priority
+	ua := s.userAgent
+	if opts.UserAgent != "" {
+		ua = opts.UserAgent
+		log.Debug().Str("user_agent", ua).Msg("Using per-request User-Agent override")
+	}
+	if ua != "" {
+		if err := browser.SetUserAgent(page, ua); err != nil {
 			log.Warn().Err(err).Msg("Failed to set user agent")
 		}
 	}
@@ -522,6 +531,23 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// Wait for initial load
 	if err := page.Context(solveCtx).WaitLoad(); err != nil {
 		log.Warn().Err(err).Msg("WaitLoad failed, continuing anyway")
+	}
+
+	// Return raw HTML before JS rendering if requested
+	if opts.ReturnRawHtml {
+		rawHTML, htmlErr := page.HTML()
+		if htmlErr != nil {
+			log.Warn().Err(htmlErr).Msg("Failed to get raw HTML")
+		} else {
+			log.Debug().Int("length", len(rawHTML)).Msg("Returning raw HTML (before JS rendering)")
+			return &Result{
+				Success:    true,
+				StatusCode: 200,
+				HTML:       rawHTML,
+				URL:        opts.URL,
+				UserAgent:  ua,
+			}, nil
+		}
 	}
 
 	// Main solve loop with DNS pinning

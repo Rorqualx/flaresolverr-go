@@ -715,6 +715,8 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		FollowRedirects: req.FollowRedirects,
 		CaptchaSolver:   req.CaptchaSolver,
 		CaptchaApiKey:   req.CaptchaApiKey,
+		UserAgent:       req.UserAgent,
+		ReturnRawHtml:   req.ReturnRawHtml,
 	}
 
 	var result *solver.Result
