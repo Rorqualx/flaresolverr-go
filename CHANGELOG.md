@@ -72,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chrome user agent updated to v132** - Updated to match current stable version and avoid anti-bot detection.
 - **Improved stealth evasion** - WebRTC blocking at JavaScript level, Chrome loadTimes() caching, updated challenge selectors for newer Cloudflare versions.
 - **Improved middleware** - Better error handling, configurable CORS origins, request ID tracking, rate limit burst support, improved panic logging with stack traces.
-- **Removed Prometheus metrics** - Module was unused; will reconsider in future iteration if needed.
+- **Removed Prometheus metrics** - Module was unused; replaced by the built-in CLI dashboard.
 - **Alpine upgraded to 3.21** - Provides newer Chromium (136 vs 124) for better compatibility.
 - **Slice pre-allocation in stealth** - `buildBlockPatterns()` now pre-allocates slice capacity.
 
