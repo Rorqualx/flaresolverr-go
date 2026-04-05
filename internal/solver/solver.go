@@ -917,7 +917,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		Strs("args", phase1Args).
 		Msg("Phase 1 command")
 
-	cmd := exec.Command(browserPath, phase1Args...)
+	cmd := exec.Command(browserPath, phase1Args...) //nolint:gosec // browserPath is validated by findBrowserBinary
 
 	// Filter environment: remove software rendering signals that Cloudflare can detect.
 	// LIBGL_ALWAYS_SOFTWARE=1 and GALLIUM_DRIVER=llvmpipe cause WebGL to report
@@ -966,7 +966,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	// ========================================
 	log.Info().Int("port", debugPort).Msg("Phase 2: Relaunching with CDP for extraction...")
 
-	cmd2 := exec.Command(browserPath,
+	cmd2 := exec.Command(browserPath, //nolint:gosec // browserPath is validated by findBrowserBinary
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--no-sandbox",
