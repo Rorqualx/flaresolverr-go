@@ -36,7 +36,7 @@ type Session struct {
 	CreatedAt time.Time
 	TTL       time.Duration // Per-session TTL override; 0 means use global config TTL
 	lastUsed  atomic.Int64  // Unix nano timestamp for lock-free access
-	mu        sync.Mutex   // Only used for page operations (GetCookies/SetCookies)
+	mu        sync.Mutex    // Only used for page operations (GetCookies/SetCookies)
 
 	// Reference counting for safe page access during concurrent destroy
 	refCount atomic.Int32 // Number of active page references
