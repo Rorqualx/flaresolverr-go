@@ -88,13 +88,15 @@ func main() {
 	// Create handler
 	handler := handlers.NewWithSelectors(pool, sessionMgr, cfg, selectorsManager)
 
-	// Create dashboard (enabled by default, auto-disables without TTY)
+	// Create dashboard (enabled by default)
+	// TTY: full TUI dashboard | Non-TTY (Docker): periodic log-based stats reporter
 	var dash *dashboard.Dashboard
+	var logReporter *dashboard.LogReporter
 	if cfg.DashboardEnabled {
 		if dashboard.IsTTY() {
 			dash = dashboard.New(pool, sessionMgr, handler.DomainStats(), time.Now())
 		} else {
-			log.Info().Msg("Dashboard disabled: stdout is not a terminal")
+			logReporter = dashboard.NewLogReporter(pool, sessionMgr, handler.DomainStats(), time.Now(), 30*time.Second)
 		}
 	}
 
@@ -137,6 +139,8 @@ func main() {
 	finalHandler = middleware.Logging(finalHandler)
 	if dash != nil {
 		finalHandler = dashboard.RecordRequests(dash.Events())(finalHandler)
+	} else if logReporter != nil {
+		finalHandler = dashboard.RecordRequests(logReporter.Events())(finalHandler)
 	}
 	finalHandler = middleware.Recovery(finalHandler)
 
@@ -199,9 +203,11 @@ func main() {
 		}
 	}()
 
-	// Start dashboard if enabled
+	// Start dashboard or log reporter
 	if dash != nil {
 		dash.Start()
+	} else if logReporter != nil {
+		logReporter.Start()
 	}
 
 	// Wait for interrupt signal
@@ -235,9 +241,12 @@ func main() {
 		rateLimiter.Close()
 	}
 
-	// Stop dashboard
+	// Stop dashboard / log reporter
 	if dash != nil {
 		dash.Stop()
+	}
+	if logReporter != nil {
+		logReporter.Stop()
 	}
 
 	// Close selectors manager to stop file watcher
