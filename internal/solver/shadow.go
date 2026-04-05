@@ -613,7 +613,8 @@ func isNodeTurnstileRelated(node *proto.DOMNode) bool {
 
 // isNodeCheckbox checks if a DOM node represents a checkbox element.
 func isNodeCheckbox(node *proto.DOMNode) bool {
-	if node == nil || node.NodeType != 1 { // 1 = ELEMENT_NODE
+	const elementNode = 1
+	if node == nil || node.NodeType != elementNode {
 		return false
 	}
 

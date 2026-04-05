@@ -1002,7 +1002,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		}
 	}
 	if freshURL == "" {
-		return nil, fmt.Errorf("Phase 2 Chrome did not start debugging endpoint")
+		return nil, fmt.Errorf("phase 2 Chrome did not start debugging endpoint")
 	}
 
 	// Connect via rod
