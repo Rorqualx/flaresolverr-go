@@ -3,6 +3,7 @@ package handlers
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,9 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 	"github.com/Rorqualx/flaresolverr-go/pkg/version"
 )
+
+//go:embed openapi.yaml
+var openAPIDocs []byte
 
 // sensitiveParams contains query parameter names that may contain secrets
 // and should be redacted in logs.
@@ -265,6 +269,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Handle health check
 	if r.URL.Path == "/health" {
 		h.handleHealth(w, startTime)
+		return
+	}
+
+	// Serve OpenAPI docs
+	if r.URL.Path == "/docs" {
+		w.Header().Set("Content-Type", "text/yaml")
+		w.Write(openAPIDocs)
 		return
 	}
 
@@ -687,19 +698,23 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 
 	// Build solve options with DNS pinning
 	opts := &solver.SolveOptions{
-		URL:            req.URL,
-		Timeout:        timeout,
-		Cookies:        req.Cookies,
-		Proxy:          req.Proxy,
-		PostData:       req.PostData,
-		ContentType:    contentType, // Content type for POST (json or form-urlencoded)
-		Headers:        req.Headers, // Custom HTTP headers
-		IsPost:         isPost,
-		Screenshot:     req.ReturnScreenshot,
-		DisableMedia:   req.DisableMedia,
-		WaitInSeconds:  waitInSeconds,
-		ExpectedIP:     resolvedIP,     // DNS pinning: verify response URL resolves to same IP
-		TabsTillVerify: tabsTillVerify, // Number of Tab presses for Turnstile keyboard navigation
+		URL:             req.URL,
+		Timeout:         timeout,
+		Cookies:         req.Cookies,
+		Proxy:           req.Proxy,
+		PostData:        req.PostData,
+		ContentType:     contentType, // Content type for POST (json or form-urlencoded)
+		Headers:         req.Headers, // Custom HTTP headers
+		IsPost:          isPost,
+		Screenshot:      req.ReturnScreenshot,
+		DisableMedia:    req.DisableMedia,
+		WaitInSeconds:   waitInSeconds,
+		ExpectedIP:      resolvedIP,     // DNS pinning: verify response URL resolves to same IP
+		TabsTillVerify:  tabsTillVerify, // Number of Tab presses for Turnstile keyboard navigation
+		Download:        req.Download,
+		FollowRedirects: req.FollowRedirects,
+		CaptchaSolver:   req.CaptchaSolver,
+		CaptchaApiKey:   req.CaptchaApiKey,
 	}
 
 	var result *solver.Result
@@ -871,17 +886,18 @@ func (h *Handler) writeSuccess(w http.ResponseWriter, result *solver.Result, coo
 	}
 
 	solution := &types.Solution{
-		URL:             result.URL,
-		Status:          result.StatusCode,
-		Response:        response,
-		Cookies:         cookies,
-		UserAgent:       result.UserAgent,
-		BrowserVersion:  extractChromeVersion(result.UserAgent),
-		Screenshot:      result.Screenshot,
-		TurnstileToken:  result.TurnstileToken,
-		LocalStorage:    result.LocalStorage,
-		SessionStorage:  result.SessionStorage,
-		ResponseHeaders: result.ResponseHeaders,
+		URL:              result.URL,
+		Status:           result.StatusCode,
+		Response:         response,
+		ResponseEncoding: result.ResponseEncoding,
+		Cookies:          cookies,
+		UserAgent:        result.UserAgent,
+		BrowserVersion:   extractChromeVersion(result.UserAgent),
+		Screenshot:       result.Screenshot,
+		TurnstileToken:   result.TurnstileToken,
+		LocalStorage:     result.LocalStorage,
+		SessionStorage:   result.SessionStorage,
+		ResponseHeaders:  result.ResponseHeaders,
 	}
 
 	// Add response metadata if applicable

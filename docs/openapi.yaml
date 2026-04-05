@@ -1,0 +1,258 @@
+openapi: 3.0.3
+info:
+  title: FlareSolverr API
+  description: Proxy server to bypass Cloudflare and other anti-bot protections
+  version: "1.0"
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8191
+
+paths:
+  /:
+    get:
+      summary: Index
+      description: Returns server status and version
+      responses:
+        "200":
+          description: Server info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  msg:
+                    type: string
+                  version:
+                    type: string
+                  userAgent:
+                    type: string
+
+  /health:
+    get:
+      summary: Health check
+      description: Returns server health and pool statistics
+      responses:
+        "200":
+          description: Health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  pool:
+                    type: object
+
+  /v1:
+    post:
+      summary: Execute command
+      description: Main API endpoint for all FlareSolverr commands
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Request"
+      responses:
+        "200":
+          description: Command result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+
+components:
+  schemas:
+    Request:
+      type: object
+      required: [cmd]
+      properties:
+        cmd:
+          type: string
+          description: Command to execute
+          enum:
+            - request.get
+            - request.post
+            - sessions.create
+            - sessions.list
+            - sessions.destroy
+        url:
+          type: string
+          description: Target URL (required for request.get/request.post)
+        session:
+          type: string
+          description: Session ID for persistent browser sessions
+        session_ttl_minutes:
+          type: integer
+          description: Per-session TTL override in minutes (1-1440)
+        maxTimeout:
+          type: integer
+          description: Maximum timeout in milliseconds (default 60000)
+        cookies:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestCookie"
+        returnOnlyCookies:
+          type: boolean
+          description: Return only cookies, skip HTML response
+        returnScreenshot:
+          type: boolean
+          description: Capture and return base64 PNG screenshot
+        proxy:
+          $ref: "#/components/schemas/Proxy"
+        postData:
+          type: string
+          description: POST body (required for request.post)
+        contentType:
+          type: string
+          description: POST content type
+          enum:
+            - application/x-www-form-urlencoded
+            - application/json
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Custom HTTP headers
+        disableMedia:
+          type: boolean
+          description: Block images, CSS, and fonts
+        waitInSeconds:
+          type: integer
+          description: Wait N seconds before returning (0-60)
+        tabsTillVerify:
+          type: integer
+          description: Tab presses to reach Turnstile checkbox (0-50)
+        download:
+          type: boolean
+          description: Download URL as binary, return base64 in response
+        followRedirects:
+          type: boolean
+          description: Follow HTTP redirects (default true)
+        captchaSolver:
+          type: string
+          description: Per-request captcha provider override
+          enum: ["2captcha", "capsolver", "none"]
+        captchaApiKey:
+          type: string
+          description: Per-request captcha API key
+
+    RequestCookie:
+      type: object
+      required: [name, value]
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+        domain:
+          type: string
+        path:
+          type: string
+        secure:
+          type: boolean
+        httpOnly:
+          type: boolean
+
+    Proxy:
+      type: object
+      properties:
+        url:
+          type: string
+          description: "Proxy URL (http, https, socks4, socks5)"
+        username:
+          type: string
+        password:
+          type: string
+
+    Response:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        message:
+          type: string
+        startTimestamp:
+          type: integer
+          format: int64
+        endTimestamp:
+          type: integer
+          format: int64
+        version:
+          type: string
+        solution:
+          $ref: "#/components/schemas/Solution"
+        sessions:
+          type: array
+          items:
+            type: string
+
+    Solution:
+      type: object
+      properties:
+        url:
+          type: string
+        status:
+          type: integer
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        response:
+          type: string
+          description: HTML content, or base64 when download=true
+        responseEncoding:
+          type: string
+          description: '"base64" when download=true'
+        cookies:
+          type: array
+          items:
+            $ref: "#/components/schemas/Cookie"
+        userAgent:
+          type: string
+        browserVersion:
+          type: string
+        screenshot:
+          type: string
+          description: Base64 PNG screenshot
+        turnstile_token:
+          type: string
+        responseTruncated:
+          type: boolean
+        rateLimited:
+          type: boolean
+        suggestedDelayMs:
+          type: integer
+        errorCode:
+          type: string
+        errorCategory:
+          type: string
+
+    Cookie:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+        domain:
+          type: string
+        path:
+          type: string
+        expires:
+          type: number
+        size:
+          type: integer
+        httpOnly:
+          type: boolean
+        secure:
+          type: boolean
+        session:
+          type: boolean
+        sameSite:
+          type: string

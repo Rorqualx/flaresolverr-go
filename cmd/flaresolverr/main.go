@@ -182,6 +182,17 @@ func main() {
 			Bool("rate_limit_enabled", cfg.RateLimitEnabled).
 			Msg("FlareSolverr is ready to accept requests")
 
+		// Check for updates in background (non-blocking)
+		go func() {
+			if latestVersion, releaseURL := version.CheckForUpdate(); latestVersion != "" {
+				log.Info().
+					Str("current", version.Full()).
+					Str("latest", latestVersion).
+					Str("url", releaseURL).
+					Msg("A newer version of FlareSolverr is available")
+			}
+		}()
+
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal().Err(err).Msg("Server failed")
 		}

@@ -57,9 +57,10 @@ type Result struct {
 	TurnstileToken string // cf-turnstile-response token if present
 
 	// Extended extraction for debugging/advanced use
-	LocalStorage    map[string]string // All localStorage key-value pairs
-	SessionStorage  map[string]string // All sessionStorage key-value pairs
-	ResponseHeaders map[string]string // Headers from the final navigation response
+	LocalStorage     map[string]string // All localStorage key-value pairs
+	SessionStorage   map[string]string // All sessionStorage key-value pairs
+	ResponseHeaders  map[string]string // Headers from the final navigation response
+	ResponseEncoding string            // "base64" when download mode, empty for HTML
 }
 
 // SolveOptions contains options for a solve request.
@@ -77,6 +78,15 @@ type SolveOptions struct {
 	WaitInSeconds  int    // Wait N seconds before returning the response
 	ExpectedIP     net.IP // Expected IP from DNS resolution for pinning (nil to skip)
 	TabsTillVerify int    // Number of Tab presses to reach Turnstile checkbox (default: 10)
+
+	// Download returns URL content as base64 instead of page HTML.
+	Download bool
+	// FollowRedirects controls whether to follow HTTP redirects (default: true).
+	FollowRedirects *bool
+	// CaptchaSolver overrides the global captcha provider for this request.
+	CaptchaSolver string
+	// CaptchaApiKey overrides the global captcha API key for this request.
+	CaptchaApiKey string
 
 	// SkipResponseValidation disables response URL validation (for testing only).
 	// WARNING: Do not enable in production - this disables SSRF protection.
@@ -530,6 +540,40 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 			log.Warn().Err(reconnErr).Msg("Reconnect bypass also failed")
 		}
 		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
+	}
+
+	// Download mode: re-fetch the URL via Fetch API and return base64
+	if opts.Download && result != nil {
+		log.Info().Str("url", opts.URL).Msg("Download mode: fetching URL as binary via Fetch API")
+		downloadJS := fmt.Sprintf(`(async () => {
+			try {
+				const resp = await fetch('%s', { credentials: 'include' });
+				const buf = await resp.arrayBuffer();
+				const bytes = new Uint8Array(buf);
+				let binary = '';
+				const chunkSize = 8192;
+				for (let i = 0; i < bytes.length; i += chunkSize) {
+					binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, bytes.length)));
+				}
+				return btoa(binary);
+			} catch(e) {
+				return 'ERROR:' + e.message;
+			}
+		})()`, strings.ReplaceAll(opts.URL, "'", "\\'"))
+
+		downloadResult, evalErr := page.Timeout(30 * time.Second).Eval(downloadJS)
+		if evalErr != nil {
+			log.Warn().Err(evalErr).Msg("Download fetch failed")
+		} else {
+			b64 := downloadResult.Value.Str()
+			if strings.HasPrefix(b64, "ERROR:") {
+				log.Warn().Str("error", b64).Msg("Download fetch returned error")
+			} else {
+				result.HTML = b64
+				result.ResponseEncoding = "base64"
+				log.Info().Int("base64_length", len(b64)).Msg("Download complete")
+			}
+		}
 	}
 
 	// Wait additional time if requested (waitInSeconds)

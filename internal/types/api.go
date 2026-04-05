@@ -46,6 +46,10 @@ type Request struct {
 	DisableMedia      bool              `json:"disableMedia,omitempty"`     // Disable loading of media (images, CSS, fonts)
 	WaitInSeconds     int               `json:"waitInSeconds,omitempty"`    // Wait N seconds before returning the response
 	TabsTillVerify    int               `json:"tabsTillVerify,omitempty"`   // Number of Tab presses to reach Turnstile checkbox (default: 10)
+	Download          bool              `json:"download,omitempty"`         // Download URL as binary and return base64 in response
+	FollowRedirects   *bool             `json:"followRedirects,omitempty"`  // Follow HTTP redirects (default: true)
+	CaptchaSolver     string            `json:"captchaSolver,omitempty"`    // Per-request captcha provider: "2captcha", "capsolver", or "none"
+	CaptchaApiKey     string            `json:"captchaApiKey,omitempty"`    // Per-request captcha API key
 }
 
 // Validate validates the request and returns an error if invalid.
@@ -173,6 +177,16 @@ func (r *Request) Validate() error {
 		return fmt.Errorf("tabsTillVerify exceeds maximum of %d", MaxTabsTillVerify)
 	}
 
+	// Validate captchaSolver if present
+	if r.CaptchaSolver != "" {
+		switch r.CaptchaSolver {
+		case "2captcha", "capsolver", "none":
+			// Valid
+		default:
+			return fmt.Errorf("captchaSolver must be '2captcha', 'capsolver', or 'none'")
+		}
+	}
+
 	// Validate session_ttl_minutes bounds
 	if r.SessionTTL < 0 {
 		return fmt.Errorf("session_ttl_minutes cannot be negative")
@@ -268,6 +282,7 @@ type Solution struct {
 	ResponseHeaders map[string]string `json:"responseHeaders,omitempty"` // Extracted response metadata
 
 	// Response metadata (omitted when not applicable)
+	ResponseEncoding  string  `json:"responseEncoding,omitempty"`  // "base64" when download=true, empty for HTML
 	ResponseTruncated *bool   `json:"responseTruncated,omitempty"` // true if HTML response was truncated due to size limit
 	CookieError       *string `json:"cookieError,omitempty"`       // error message if cookies could not be retrieved
 
