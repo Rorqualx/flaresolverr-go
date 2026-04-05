@@ -23,10 +23,17 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 - **Cloudflare Bypass** - Solves JavaScript challenges and Turnstile CAPTCHAs
 - **Anti-Fingerprinting** - Comprehensive stealth patches including canvas noise, Battery API, WebRTC blocking, and font enumeration limiting
 - **Human-Like Behavior** - Bezier curve mouse movements, randomized timing, and natural scroll patterns
-- **External CAPTCHA Fallback** - Optional 2Captcha and CapSolver integration for difficult Turnstile challenges
+- **Two-Phase CDP Bypass** - Bypasses Cloudflare's managed challenge loop by launching a clean Chrome without CDP for challenge resolution
+- **External CAPTCHA Fallback** - Optional 2Captcha, CapSolver, and anti-captcha.com integration for Turnstile and hCaptcha
+- **hCaptcha Support** - Detects hCaptcha challenges and solves via external providers
 - **Hot-Reload Selectors** - Update challenge selectors via file watching or remote URL without restarts
 - **Adaptive Solving** - Per-domain tracking of which solving methods work best
+- **Custom JS Execution** - Run arbitrary JavaScript on pages after challenge solving
+- **Binary Downloads** - Download files as base64 through the browser (bypasses TLS fingerprinting)
+- **Prometheus Metrics** - `/metrics` endpoint compatible with Prometheus/Grafana
+- **OpenAPI Docs** - `/docs` endpoint serves the full API specification
 - **CLI Dashboard** - Optional split-screen TUI showing live requests and server stats (`DASHBOARD_ENABLED=true`)
+- **Multi-Architecture** - Docker images for amd64, arm64, and armv7
 - **Docker Support** - Production-ready Docker image with Xvfb
 
 ## Quick Start
@@ -60,7 +67,9 @@ The API accepts POST requests with JSON body at both `/` and `/v1` endpoints. Al
 |----------|--------|-------------|
 | `/` | POST | Main API endpoint (legacy) |
 | `/v1` | POST | Main API endpoint (recommended) |
-| `/health` | GET | Health check endpoint |
+| `/health` | GET | Health check with pool and domain stats |
+| `/metrics` | GET | Prometheus-compatible metrics |
+| `/docs` | GET | OpenAPI 3.0 specification (YAML) |
 
 ### Commands
 
@@ -146,6 +155,16 @@ curl -X POST http://localhost:8191/v1 \
 | `returnScreenshot` | bool | No | Return base64 PNG screenshot |
 | `disableMedia` | bool | No | Block images, CSS, fonts to speed up loading |
 | `waitInSeconds` | int | No | Wait N seconds before returning response |
+| `contentType` | string | No | POST content type: `application/json` or `application/x-www-form-urlencoded` |
+| `headers` | object | No | Custom HTTP headers (max 50) |
+| `tabsTillVerify` | int | No | Tab presses for Turnstile keyboard navigation (0-50) |
+| `download` | bool | No | Download URL as binary, return base64 in `response` field |
+| `followRedirects` | bool | No | Follow HTTP redirects (default: true) |
+| `userAgent` | string | No | Override User-Agent for this request |
+| `returnRawHtml` | bool | No | Return raw HTML before JavaScript renders |
+| `executeJs` | string | No | Custom JavaScript to execute after solving |
+| `captchaSolver` | string | No | Per-request captcha provider: `2captcha`, `capsolver`, `anticaptcha`, or `none` |
+| `captchaApiKey` | string | No | Per-request captcha API key |
 
 #### Cookie Object
 
@@ -232,6 +251,9 @@ Supported proxy schemes: `http`, `https`, `socks4`, `socks5`
 | `responseHeaders` | object | Extracted response metadata (cf-ray, etc.) |
 | `responseTruncated` | bool | `true` if HTML was truncated due to 10MB size limit (optional) |
 | `cookieError` | string | Error message if cookies could not be retrieved (optional) |
+| `responseEncoding` | string | `"base64"` when `download=true` (optional) |
+| `executeJsResult` | string | Result of `executeJs` custom JavaScript (optional) |
+| `browserVersion` | string | Chrome major version for TLS profile matching (optional) |
 | `rateLimited` | bool | `true` if rate limiting detected (optional) |
 | `suggestedDelayMs` | int | Recommended delay before retry in ms (optional) |
 | `errorCode` | string | Specific error code like `CF_1015` (optional) |
@@ -364,21 +386,28 @@ environment:
 
 ### CAPTCHA Solver Settings
 
-External CAPTCHA solver fallback for challenging Turnstile CAPTCHAs that native solving cannot handle.
+External CAPTCHA solver fallback for Turnstile and hCaptcha challenges that native solving cannot handle.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CAPTCHA_NATIVE_ATTEMPTS` | `3` | Native solve attempts before external fallback (1-10) |
 | `CAPTCHA_FALLBACK_ENABLED` | `false` | Enable external CAPTCHA solver fallback |
-| `TWOCAPTCHA_API_KEY` | (none) | 2Captcha API key for Turnstile solving |
-| `CAPSOLVER_API_KEY` | (none) | CapSolver API key for Turnstile solving |
-| `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha` or `capsolver` |
+| `TWOCAPTCHA_API_KEY` | (none) | 2Captcha API key |
+| `CAPSOLVER_API_KEY` | (none) | CapSolver API key |
+| `ANTICAPTCHA_API_KEY` | (none) | anti-captcha.com API key |
+| `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha`, `capsolver`, or `anticaptcha` |
 | `CAPTCHA_SOLVER_TIMEOUT` | `120s` | Timeout for external solver API (30s-300s) |
+
+**Supported CAPTCHA types:**
+- **Turnstile** — Cloudflare's challenge widget (native + external solving)
+- **hCaptcha** — Detected automatically, solved via external provider
 
 **How it works:**
 1. FlareSolverr attempts native Turnstile solving first (click methods, keyboard, etc.)
 2. If native solving fails after `CAPTCHA_NATIVE_ATTEMPTS`, it falls back to the external solver
-3. External solver extracts the sitekey, submits to 2Captcha/CapSolver, and injects the token
+3. For hCaptcha, external solving is used directly (no native solving available)
+4. External solver extracts the sitekey, submits to the provider, and injects the token
+5. Per-request override: use `captchaSolver` and `captchaApiKey` fields in the request
 
 **Example configuration:**
 ```yaml
@@ -409,6 +438,10 @@ When `SELECTORS_REMOTE_URL` is configured, selectors are fetched periodically fr
 |----------|---------|-------------|
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `LOG_HTML` | `false` | Log HTML responses (verbose) |
+| `LOG_FILE` | (none) | Path to log file (in addition to stdout) |
+| `TZ` | (none) | Browser timezone (e.g., `America/New_York`) |
+| `LANG` | (none) | Browser language (e.g., `en_GB`) |
+| `TEST_URL` | `https://www.google.com` | URL to verify browser works on startup |
 | `DASHBOARD_ENABLED` | `true` | TUI dashboard (auto-disables without TTY) |
 | `PPROF_ENABLED` | `false` | Enable pprof profiling |
 | `PPROF_PORT` | `6060` | pprof server port |
