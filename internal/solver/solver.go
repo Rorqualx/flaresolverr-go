@@ -574,23 +574,24 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// Download mode: re-fetch the URL via Fetch API and return base64
 	if opts.Download && result != nil {
 		log.Info().Str("url", opts.URL).Msg("Download mode: fetching URL as binary via Fetch API")
-		downloadJS := fmt.Sprintf(`(async () => {
+		escapedURL := strings.ReplaceAll(opts.URL, "'", "\\'")
+		escapedURL = strings.ReplaceAll(escapedURL, "\\", "\\\\")
+		downloadJS := `async function() {
 			try {
-				const resp = await fetch('%s', { credentials: 'include' });
-				const buf = await resp.arrayBuffer();
-				const bytes = new Uint8Array(buf);
-				let binary = '';
-				const chunkSize = 8192;
-				for (let i = 0; i < bytes.length; i += chunkSize) {
-					binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, bytes.length)));
-				}
-				return btoa(binary);
+				const resp = await fetch('` + escapedURL + `', { credentials: 'include' });
+				const blob = await resp.blob();
+				return await new Promise((resolve, reject) => {
+					const reader = new FileReader();
+					reader.onloadend = () => resolve(reader.result.split(',')[1] || '');
+					reader.onerror = () => reject(reader.error);
+					reader.readAsDataURL(blob);
+				});
 			} catch(e) {
 				return 'ERROR:' + e.message;
 			}
-		})()`, strings.ReplaceAll(opts.URL, "'", "\\'"))
+		}`
 
-		downloadResult, evalErr := page.Timeout(30 * time.Second).Eval(downloadJS)
+		downloadResult, evalErr := page.Timeout(30 * time.Second).Evaluate(rod.Eval(downloadJS).ByPromise())
 		if evalErr != nil {
 			log.Warn().Err(evalErr).Msg("Download fetch failed")
 		} else {

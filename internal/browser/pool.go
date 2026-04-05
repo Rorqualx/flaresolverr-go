@@ -319,13 +319,11 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// GPU sandbox - required for container environments
 	l = l.Set("disable-gpu-sandbox")
 
-	// ARM-specific: Use software rendering flags
-	// IMPORTANT: Do NOT use --disable-gpu on ARM as it breaks WebGL/SwiftShader
-	// SwiftShader provides software WebGL rendering which is critical for anti-detection
+	// ARM-specific: Use software compositing since hardware GPU compositing
+	// may not be available on ARM devices (Raspberry Pi, etc.)
 	if isARM() {
-		// Use software compositing for ARM
 		l = l.Set("disable-gpu-compositing")
-		log.Debug().Msg("ARM detected: using software rendering with SwiftShader for WebGL")
+		log.Debug().Msg("ARM detected: using software compositing")
 	}
 
 	return l
