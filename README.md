@@ -45,6 +45,19 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 docker run -d -p 8191:8191 --name flaresolverr rorqualx/flaresolverr-go:latest
 ```
 
+The image declares `/tmp/rod` as a `VOLUME`, so Chromium's per-browser user-data
+dirs land in an anonymous Docker volume (cleaned up by `docker rm -v`) instead
+of the container's writable layer. For tighter disk control — recommended on
+hosts where the Docker image is size-bounded (e.g. Unraid `docker.img`) — back
+it with a tmpfs:
+
+```bash
+docker run -d -p 8191:8191 --tmpfs /tmp/rod:size=512m \
+    --name flaresolverr rorqualx/flaresolverr-go:latest
+```
+
+The bundled `docker-compose.yml` already configures this tmpfs.
+
 ### From Source
 
 ```bash

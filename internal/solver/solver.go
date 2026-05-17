@@ -376,12 +376,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		if spawnErr != nil {
 			return nil, fmt.Errorf("failed to spawn browser with proxy: %w", spawnErr)
 		}
-		defer func() {
-			// Fix HIGH: Use explicit variable name to avoid shadowing outer 'err'
-			if closeErr := browserInstance.Close(); closeErr != nil {
-				log.Warn().Err(closeErr).Msg("failed to close dedicated browser")
-			}
-		}()
+		defer s.pool.CleanupBrowser(browserInstance)
 		usePooledBrowser = false
 	} else {
 		// No per-request proxy: use pooled browser (may have default proxy from config)

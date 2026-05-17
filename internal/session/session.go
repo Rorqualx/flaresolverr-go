@@ -232,9 +232,12 @@ func (m *Manager) Destroy(id string) error {
 		}
 	}
 
-	// CRITICAL: Return browser to pool, or close if session owns it
+	// CRITICAL: Return browser to pool, or fully tear down if session owns it.
+	// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
 	if session.Browser != nil {
-		if session.OwnsBrowser {
+		if session.OwnsBrowser && m.pool != nil {
+			m.pool.CleanupBrowser(session.Browser)
+		} else if session.OwnsBrowser {
 			if err := session.Browser.Close(); err != nil {
 				log.Warn().Err(err).Str("session_id", id).Msg("Error closing session-owned browser")
 			}
@@ -359,9 +362,12 @@ func (m *Manager) cleanupExpired() {
 				}
 			}
 
-			// CRITICAL: Return browser to pool, or close if session owns it
+			// CRITICAL: Return browser to pool, or fully tear down if session owns it.
+			// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
 			if sess.Browser != nil {
-				if sess.OwnsBrowser {
+				if sess.OwnsBrowser && m.pool != nil {
+					m.pool.CleanupBrowser(sess.Browser)
+				} else if sess.OwnsBrowser {
 					if err := sess.Browser.Close(); err != nil {
 						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during cleanup")
 					}
@@ -455,9 +461,12 @@ func (m *Manager) Close() error {
 					log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session page during shutdown")
 				}
 			}
-			// CRITICAL: Return browser to pool, or close if session owns it
+			// CRITICAL: Return browser to pool, or fully tear down if session owns it.
+			// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
 			if sess.Browser != nil {
-				if sess.OwnsBrowser {
+				if sess.OwnsBrowser && m.pool != nil {
+					m.pool.CleanupBrowser(sess.Browser)
+				} else if sess.OwnsBrowser {
 					if err := sess.Browser.Close(); err != nil {
 						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during shutdown")
 					}

@@ -115,9 +115,16 @@ ENV LIBGL_ALWAYS_SOFTWARE=1 \
     LP_NUM_THREADS=4
 
 # Create directories and set permissions
-RUN mkdir -p /home/flaresolverr/.cache /tmp/.X11-unix && \
-    chown -R flaresolverr:flaresolverr /home/flaresolverr && \
+RUN mkdir -p /home/flaresolverr/.cache /tmp/.X11-unix /tmp/rod && \
+    chown -R flaresolverr:flaresolverr /home/flaresolverr /tmp/rod && \
     chmod 1777 /tmp/.X11-unix
+
+# Declare /tmp/rod as an anonymous mount point so Rod's Chromium user-data dirs
+# never accumulate in the container's writable layer (GitHub issue #6). With
+# this directive, `docker run` without --tmpfs/-v still creates an ephemeral
+# anonymous volume that is reclaimed by `docker rm -v` instead of bloating
+# docker.img. Bind-mount it or use --tmpfs for explicit control.
+VOLUME ["/tmp/rod"]
 
 # Switch to non-root user
 USER flaresolverr

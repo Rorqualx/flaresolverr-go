@@ -57,9 +57,12 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    # Temp filesystem for browser cache
+    # Temp filesystem for browser cache.
+    # /tmp/rod is the user-data dir parent for every Chromium process; sizing it
+    # generously prevents pool recycles from running out of tmpfs space.
     tmpfs:
       - /tmp:size=128M
+      - /tmp/rod:size=512M
       - /home/flaresolverr/.cache:size=256M
 
     healthcheck:

@@ -65,6 +65,12 @@ type Pool struct {
 	// Maps browser pointer to its WebSocket debugging URL.
 	controlURLs sync.Map // map[*rod.Browser]string
 
+	// Launchers per browser, retained so we can call launcher.Cleanup()
+	// (which removes /tmp/rod/user-data-<random>) after browser.Close().
+	// Without this, Rod's default user-data dirs accumulate on disk and
+	// fill the container's writable layer over time (GitHub issue #6).
+	launchers sync.Map // map[*rod.Browser]*launcher.Launcher
+
 	// Statistics for monitoring
 	stats PoolStats
 }
@@ -399,6 +405,7 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 		if closeErr := browser.Close(); closeErr != nil {
 			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
 		}
+		l.Cleanup() // remove the /tmp/rod/user-data-<random> dir we just orphaned
 		return nil, fmt.Errorf("failed to connect to browser: %w", err)
 	}
 
@@ -415,6 +422,8 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 
 	// Store control URL for reconnection support
 	p.controlURLs.Store(browser, url)
+	// Retain the launcher so we can clean its user-data dir on close
+	p.launchers.Store(browser, l)
 
 	return browser, nil
 }
@@ -431,16 +440,18 @@ type LaunchOptions struct {
 }
 
 // SpawnWithOptions creates a new browser with custom launch options.
-// This browser is NOT pooled and must be closed by the caller.
+// This browser is NOT pooled and must be cleaned up by the caller.
 // Use this when a session requires custom Chrome flags.
 //
-// The caller is responsible for closing the browser when done:
+// The caller MUST call pool.CleanupBrowser(browser) when done — that closes
+// the browser AND removes its /tmp/rod/user-data-<random> dir. Plain
+// browser.Close() leaks the user-data dir on disk (GitHub issue #6):
 //
 //	browser, err := pool.SpawnWithOptions(ctx, opts)
 //	if err != nil {
 //	    return err
 //	}
-//	defer browser.Close()
+//	defer pool.CleanupBrowser(browser)
 func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.Browser, error) {
 	if ctx != nil {
 		select {
@@ -522,6 +533,7 @@ func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.B
 		if closeErr := browser.Close(); closeErr != nil {
 			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
 		}
+		l.Cleanup() // remove the /tmp/rod/user-data-<random> dir we just orphaned
 		return nil, fmt.Errorf("failed to connect to browser: %w", err)
 	}
 
@@ -531,21 +543,26 @@ func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.B
 		}
 	}
 
+	p.controlURLs.Store(browser, url)
+	p.launchers.Store(browser, l)
+
 	log.Debug().Str("url", url).Msg("Browser with custom options spawned successfully")
 	return browser, nil
 }
 
 // SpawnWithProxy creates a new browser with a specific proxy configuration.
-// This browser is NOT pooled and must be closed by the caller.
+// This browser is NOT pooled and must be cleaned up by the caller.
 // Use this when a request specifies a proxy different from the pool default.
 //
-// The caller is responsible for closing the browser when done:
+// The caller MUST call pool.CleanupBrowser(browser) when done — that closes
+// the browser AND removes its /tmp/rod/user-data-<random> dir. Plain
+// browser.Close() leaks the user-data dir on disk (GitHub issue #6):
 //
 //	browser, err := pool.SpawnWithProxy(ctx, proxyURL)
 //	if err != nil {
 //	    return err
 //	}
-//	defer browser.Close()
+//	defer pool.CleanupBrowser(browser)
 //
 // Fix HIGH: Properly handles Chrome process cleanup on Connect() failure,
 // and adds timeout to Launch() operation to prevent indefinite blocking.
@@ -603,6 +620,7 @@ func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browse
 		if closeErr := browser.Close(); closeErr != nil {
 			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
 		}
+		l.Cleanup() // remove the /tmp/rod/user-data-<random> dir we just orphaned
 		return nil, fmt.Errorf("failed to connect to browser: %w", err)
 	}
 
@@ -612,6 +630,9 @@ func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browse
 			log.Warn().Err(err).Msg("Failed to set IgnoreCertErrors")
 		}
 	}
+
+	p.controlURLs.Store(browser, url)
+	p.launchers.Store(browser, l)
 
 	// Use redacted proxy URL in logs to prevent credential exposure
 	log.Debug().Str("url", url).Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Browser with proxy spawned successfully")
@@ -648,9 +669,7 @@ func (p *Pool) Acquire(ctx context.Context) (*rod.Browser, error) {
 			// Fix #3: Handle closed channel - ok is false when channel is closed
 			if !ok || p.closed.Load() {
 				// Channel was closed or pool is closing
-				if browser != nil {
-					_ = browser.Close() // Clean up any browser we received
-				}
+				p.CleanupBrowser(browser) // safe on nil; also removes user-data dir
 				return nil, types.ErrBrowserPoolClosed
 			}
 
@@ -718,10 +737,8 @@ func (p *Pool) Release(browser *rod.Browser) {
 	// Check closed flag while holding lock
 	if p.closed.Load() {
 		p.mu.Unlock()
-		// Pool is closed, just close the browser
-		if err := browser.Close(); err != nil {
-			log.Warn().Err(err).Msg("Error closing browser during release (pool closed)")
-		}
+		// Pool is closed, just close the browser and remove its user-data dir
+		p.CleanupBrowser(browser)
 		return
 	}
 
@@ -762,9 +779,7 @@ func (p *Pool) Release(browser *rod.Browser) {
 
 	// Double-check closed flag (may have changed during page cleanup)
 	if p.closed.Load() {
-		if err := browser.Close(); err != nil {
-			log.Warn().Err(err).Msg("Error closing browser during release (pool closed during cleanup)")
-		}
+		p.CleanupBrowser(browser)
 		return
 	}
 
@@ -778,9 +793,7 @@ func (p *Pool) Release(browser *rod.Browser) {
 	default:
 		// Pool is full (shouldn't happen with correct usage)
 		log.Warn().Msg("Pool is full, closing excess browser")
-		if err := browser.Close(); err != nil {
-			log.Warn().Err(err).Msg("Error closing excess browser")
-		}
+		p.CleanupBrowser(browser)
 	}
 }
 
@@ -887,6 +900,33 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 	p.addBrowserToPool(newBrowser)
 }
 
+// CleanupBrowser closes a browser and removes its on-disk user-data dir.
+// This is the single chokepoint for browser teardown — every close path
+// (internal and external) goes through here so /tmp/rod/user-data-<random>
+// is always removed.
+//
+// External callers (solver, session manager, handlers) must use this method
+// instead of browser.Close() for any browser obtained via SpawnWithProxy,
+// SpawnWithOptions, or session ownership. Pooled browsers from Acquire()
+// continue to use Release(), which routes here on close paths.
+//
+// Safe to call with a nil browser. Errors are logged but not returned because
+// cleanup must not block shutdown paths.
+func (p *Pool) CleanupBrowser(browser *rod.Browser) {
+	if browser == nil {
+		return
+	}
+	if err := browser.Close(); err != nil {
+		log.Warn().Err(err).Msg("Error closing browser")
+	}
+	if v, ok := p.launchers.LoadAndDelete(browser); ok {
+		if l, ok := v.(*launcher.Launcher); ok {
+			l.Cleanup() // waits for process exit, then os.RemoveAll(user-data dir)
+		}
+	}
+	p.controlURLs.Delete(browser)
+}
+
 // closeBrowserWithTimeout closes a browser with a timeout and proper goroutine handling.
 // If the close times out, the goroutine is tracked as leaked but we proceed.
 // Returns true if the browser was closed within the timeout.
@@ -900,9 +940,10 @@ func (p *Pool) closeBrowserWithTimeout(browser *rod.Browser, timeout time.Durati
 	go func() {
 		defer p.closeWg.Done()
 		defer close(closeDone)
-		if err := browser.Close(); err != nil {
-			log.Warn().Err(err).Msg("Error closing browser")
-		}
+		// Use CleanupBrowser so the user-data dir is also removed,
+		// not just the browser process. Without this, /tmp/rod fills up
+		// over time as browsers recycle (GitHub issue #6).
+		p.CleanupBrowser(browser)
 	}()
 
 	select {
@@ -941,9 +982,7 @@ func (p *Pool) addBrowserToPool(browser *rod.Browser) {
 
 	if p.closed.Load() {
 		log.Warn().Msg("Pool closed, closing browser instead of adding to pool")
-		if err := browser.Close(); err != nil {
-			log.Warn().Err(err).Msg("Error closing browser (pool was closed)")
-		}
+		p.CleanupBrowser(browser)
 		return
 	}
 
@@ -953,9 +992,7 @@ func (p *Pool) addBrowserToPool(browser *rod.Browser) {
 		log.Info().Msg("Browser added to pool")
 	default:
 		log.Warn().Msg("Pool is full, closing browser")
-		if err := browser.Close(); err != nil {
-			log.Warn().Err(err).Msg("Error closing excess browser")
-		}
+		p.CleanupBrowser(browser)
 	}
 }
 
@@ -1182,10 +1219,10 @@ func (p *Pool) Close() error {
 	for _, entry := range browsers {
 		browser := entry.browser // Capture for closure
 		eg.Go(func() error {
-			if err := browser.Close(); err != nil {
-				log.Warn().Err(err).Msg("Error closing browser during pool shutdown")
-				return err
-			}
+			// CleanupBrowser closes the browser AND removes its user-data dir.
+			// Errors are already logged inside; returning nil keeps the parallel
+			// shutdown progressing instead of bailing on the first failure.
+			p.CleanupBrowser(browser)
 			return nil
 		})
 	}
@@ -1195,10 +1232,7 @@ func (p *Pool) Close() error {
 
 	// Drain any remaining items from channel (safe after close)
 	for b := range p.available {
-		// Close any browsers that were still in the channel
-		if b != nil {
-			_ = b.Close()
-		}
+		p.CleanupBrowser(b) // safe on nil
 	}
 
 	// Fix MEDIUM: Capture stats before resetting so we can log actual values
