@@ -134,7 +134,7 @@ func Load() *Config {
 		ProxyPassword: getEnvString("PROXY_PASSWORD", ""),
 
 		// Browser locale/timezone
-		BrowserTimezone: getEnvString("TZ", ""),
+		BrowserTimezone: getEnvTimezone("TZ", ""),
 		BrowserLang:     getEnvString("LANG", ""),
 		TestURL:         getEnvString("TEST_URL", "https://www.google.com"),
 		DisableMedia:    getEnvBool("DISABLE_MEDIA", false),
@@ -637,6 +637,23 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 			Msg("Invalid duration in environment variable, using default")
 	}
 	return defaultValue
+}
+
+func getEnvTimezone(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	if _, err := time.LoadLocation(value); err != nil {
+		log.Warn().
+			Str("key", key).
+			Str("value", value).
+			Err(err).
+			Str("default", defaultValue).
+			Msg("Invalid IANA timezone in environment variable, using default")
+		return defaultValue
+	}
+	return value
 }
 
 func getEnvStringSlice(key string, defaultValue []string) []string {

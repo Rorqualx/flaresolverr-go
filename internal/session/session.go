@@ -51,6 +51,10 @@ type Session struct {
 	// OwnsBrowser is true when the session owns a dedicated browser (not from pool).
 	// On destroy, the browser is Close()'d instead of returned to the pool.
 	OwnsBrowser bool
+
+	// Timezone is the IANA timezone applied to this session's page via CDP at creation.
+	// Empty means no per-session override; callers may apply a global default instead.
+	Timezone string
 }
 
 // Manager handles session lifecycle and cleanup.

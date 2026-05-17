@@ -98,6 +98,10 @@ type SolveOptions struct {
 	CookieExtractDelay int
 	// Fingerprint specifies per-request browser fingerprint customization.
 	Fingerprint *types.FingerprintConfig
+	// DefaultTimezone is the global timezone fallback (from TZ env var). Applied
+	// per page via CDP Emulation.setTimezoneOverride when no per-request
+	// Fingerprint.Overrides["timezone"] takes priority.
+	DefaultTimezone string
 
 	// SkipResponseValidation disables response URL validation (for testing only).
 	// WARNING: Do not enable in production - this disables SSRF protection.
@@ -135,6 +139,20 @@ func New(pool *browser.Pool, userAgent string) *Solver {
 		pool:      pool,
 		userAgent: userAgent,
 	}
+}
+
+// resolveTimezone picks the per-page timezone in precedence order:
+// Fingerprint.Overrides["timezone"] > DefaultTimezone. Returns "" when neither is set.
+func resolveTimezone(opts *SolveOptions) string {
+	if opts == nil {
+		return ""
+	}
+	if opts.Fingerprint != nil && opts.Fingerprint.Overrides != nil {
+		if v, ok := opts.Fingerprint.Overrides["timezone"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return opts.DefaultTimezone
 }
 
 // NewWithSelectors creates a new Solver with a SelectorsManager.
@@ -399,6 +417,12 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 		defer page.Close()
 
+		if tz := resolveTimezone(opts); tz != "" {
+			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
+				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
+			}
+		}
+
 		// Set user agent
 		if s.userAgent != "" {
 			if err := browser.SetUserAgent(page, s.userAgent); err != nil {
@@ -468,6 +492,12 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		return nil, fmt.Errorf("failed to create stealth page: %w", err)
 	}
 	defer page.Close()
+
+	if tz := resolveTimezone(opts); tz != "" {
+		if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
+			log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
+		}
+	}
 
 	// Set user agent — per-request override takes priority
 	ua := s.userAgent
@@ -2901,6 +2931,11 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		} else {
 			if err := browser.ApplyStealthToPage(page); err != nil {
 				log.Warn().Err(err).Msg("Failed to apply stealth patches")
+			}
+		}
+		if tz := resolveTimezone(opts); tz != "" {
+			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
+				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
 			}
 		}
 	} else {

@@ -175,6 +175,29 @@ func TestHasDefaultProxy(t *testing.T) {
 	}
 }
 
+func TestBrowserTimezone(t *testing.T) {
+	tests := []struct {
+		name string
+		tz   string
+		want string
+	}{
+		{name: "unset", tz: "", want: ""},
+		{name: "valid IANA", tz: "America/New_York", want: "America/New_York"},
+		{name: "valid Europe", tz: "Europe/Paris", want: "Europe/Paris"},
+		{name: "invalid name ignored", tz: "Not/A/Real/Zone", want: ""},
+		{name: "garbage ignored", tz: "garbage", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TZ", tt.tz)
+			cfg := Load()
+			if cfg.BrowserTimezone != tt.want {
+				t.Errorf("BrowserTimezone = %q, want %q", cfg.BrowserTimezone, tt.want)
+			}
+		})
+	}
+}
+
 func TestInvalidEnvValues(t *testing.T) {
 	// Set invalid values
 	os.Setenv("PORT", "not_a_number")

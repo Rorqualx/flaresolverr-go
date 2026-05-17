@@ -806,6 +806,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		ExecuteJs:          req.ExecuteJs,
 		CookieExtractDelay: req.CookieExtractDelay,
 		Fingerprint:        req.Fingerprint,
+		DefaultTimezone:    h.config.BrowserTimezone, // TZ env fallback; per-request fingerprint override wins
 	}
 
 	var result *solver.Result
@@ -818,6 +819,11 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			log.Warn().Err(sessErr).Str("session", req.Session).Msg("Session lookup failed")
 			h.writeError(w, "Session not found or expired", startTime)
 			return
+		}
+
+		// Per-session timezone takes precedence over the global TZ default.
+		if sess.Timezone != "" {
+			opts.DefaultTimezone = sess.Timezone
 		}
 
 		// Acquire operation lock to prevent concurrent operations on the same session
@@ -868,6 +874,13 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		return
 	}
 
+	// Resolve effective per-session timezone: per-session browserFlags overrides
+	// the global TZ default. Either may be empty (no override).
+	sessionTimezone := h.config.BrowserTimezone
+	if req.BrowserFlags != nil && req.BrowserFlags.Timezone != "" {
+		sessionTimezone = req.BrowserFlags.Timezone
+	}
+
 	// Acquire browser — from pool or custom-spawned with flags
 	var browserInstance *rod.Browser
 	ownsBrowser := false
@@ -888,7 +901,7 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		opts := browser.LaunchOptions{
 			WindowSize: req.BrowserFlags.WindowSize,
 			Language:   req.BrowserFlags.Language,
-			Timezone:   req.BrowserFlags.Timezone,
+			Timezone:   sessionTimezone,
 			Headless:   req.BrowserFlags.Headless,
 			DisableGPU: req.BrowserFlags.DisableGPU,
 			ExtraArgs:  req.BrowserFlags.ExtraArgs,
@@ -948,6 +961,17 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 	// Set browser ownership flag
 	if ownsBrowser {
 		sess.OwnsBrowser = true
+	}
+
+	// Apply timezone override to the session's page so it persists for the session lifetime,
+	// and record it so subsequent solves on this session reuse the same value.
+	if sessionTimezone != "" {
+		sess.Timezone = sessionTimezone
+		if page := sess.SafeGetPage(); page != nil {
+			if err := browser.ApplyTimezoneOverride(page, sessionTimezone); err != nil {
+				log.Warn().Err(err).Str("timezone", sessionTimezone).Str("session_id", sess.ID).Msg("Failed to apply timezone override to session page")
+			}
+		}
 	}
 
 	log.Info().
