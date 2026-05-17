@@ -235,13 +235,14 @@ func (m *Manager) Destroy(id string) error {
 	// CRITICAL: Return browser to pool, or fully tear down if session owns it.
 	// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
 	if session.Browser != nil {
-		if session.OwnsBrowser && m.pool != nil {
+		switch {
+		case session.OwnsBrowser && m.pool != nil:
 			m.pool.CleanupBrowser(session.Browser)
-		} else if session.OwnsBrowser {
+		case session.OwnsBrowser:
 			if err := session.Browser.Close(); err != nil {
 				log.Warn().Err(err).Str("session_id", id).Msg("Error closing session-owned browser")
 			}
-		} else if m.pool != nil {
+		case m.pool != nil:
 			m.pool.Release(session.Browser)
 		}
 	}
@@ -365,13 +366,14 @@ func (m *Manager) cleanupExpired() {
 			// CRITICAL: Return browser to pool, or fully tear down if session owns it.
 			// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
 			if sess.Browser != nil {
-				if sess.OwnsBrowser && m.pool != nil {
+				switch {
+				case sess.OwnsBrowser && m.pool != nil:
 					m.pool.CleanupBrowser(sess.Browser)
-				} else if sess.OwnsBrowser {
+				case sess.OwnsBrowser:
 					if err := sess.Browser.Close(); err != nil {
 						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during cleanup")
 					}
-				} else if m.pool != nil {
+				case m.pool != nil:
 					m.pool.Release(sess.Browser)
 				}
 			}
@@ -464,13 +466,14 @@ func (m *Manager) Close() error {
 			// CRITICAL: Return browser to pool, or fully tear down if session owns it.
 			// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
 			if sess.Browser != nil {
-				if sess.OwnsBrowser && m.pool != nil {
+				switch {
+				case sess.OwnsBrowser && m.pool != nil:
 					m.pool.CleanupBrowser(sess.Browser)
-				} else if sess.OwnsBrowser {
+				case sess.OwnsBrowser:
 					if err := sess.Browser.Close(); err != nil {
 						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during shutdown")
 					}
-				} else if m.pool != nil {
+				case m.pool != nil:
 					m.pool.Release(sess.Browser)
 				}
 			}
