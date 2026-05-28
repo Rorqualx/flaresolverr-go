@@ -1606,18 +1606,8 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 				log.Warn().Err(err).Msg("Turnstile solve attempt failed, will retry")
 			}
 
-			// Early two-phase bypass: after 2 failed Turnstile attempts, try the
-			// CDP disconnect/reconnect approach instead of exhausting all native methods.
-			// This is more effective on heavily protected sites (e.g., 1337x.to).
-			if turnstileAttempts >= 2 && ctx.Err() == nil {
-				log.Info().
-					Int("native_attempts", turnstileAttempts).
-					Msg("Turnstile native solving struggling, attempting early two-phase bypass")
-				// Need access to browser — return a sentinel error to trigger reconnect in the caller
-				return nil, fmt.Errorf("turnstile_early_bypass: native solving exhausted after %d attempts", turnstileAttempts)
-			}
-
-			// Method 6: Try external solver fallback if native attempts exhausted
+			// Try external solver fallback before the early bypass so that
+			// configured providers (2Captcha, CapSolver, etc.) get a chance.
 			if s.solverChain != nil && s.solverChain.ShouldFallback(turnstileAttempts) {
 				log.Info().
 					Int("native_attempts", turnstileAttempts).
@@ -1625,7 +1615,23 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 
 				if err := s.solveTurnstileExternal(ctx, page, url); err != nil {
 					log.Warn().Err(err).Msg("External solver fallback failed")
+				} else {
+					continue
 				}
+			}
+
+			// Early two-phase bypass: bail to CDP disconnect/reconnect approach.
+			// When an external solver chain is configured, raise the threshold
+			// so the external provider has at least one shot before we bail.
+			earlyBypassThreshold := 2
+			if s.solverChain != nil && s.solverChain.IsEnabled() {
+				earlyBypassThreshold = s.solverChain.NativeAttempts() + 1
+			}
+			if turnstileAttempts >= earlyBypassThreshold && ctx.Err() == nil {
+				log.Info().
+					Int("native_attempts", turnstileAttempts).
+					Msg("Turnstile native solving struggling, attempting early two-phase bypass")
+				return nil, fmt.Errorf("turnstile_early_bypass: native solving exhausted after %d attempts", turnstileAttempts)
 			}
 		}
 

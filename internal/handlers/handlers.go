@@ -228,8 +228,9 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 
 		if len(providers) > 0 {
 			chain := captcha.NewSolverChain(captcha.SolverChainConfig{
-				NativeAttempts: cfg.CaptchaNativeAttempts,
-				Providers:      providers,
+				NativeAttempts:  cfg.CaptchaNativeAttempts,
+				Providers:       providers,
+				FallbackEnabled: true,
 			})
 			solverInstance.SetSolverChain(chain)
 		}
