@@ -78,6 +78,12 @@ type Config struct {
 	CORSAllowedOrigins []string // Allowed CORS origins (empty = allow all with warning)
 	AllowLocalProxies  bool     // Allow localhost/private IP proxies (default: true for backward compatibility)
 
+	// DNSRebindingProtection pins the response URL to the IP resolved at request
+	// time. Disable (DNS_REBINDING_PROTECTION=false) for sites that legitimately
+	// serve identical content across multiple TLDs/CDN IPs. SSRF protection
+	// (blocking private/internal/metadata IPs) stays active either way.
+	DNSRebindingProtection bool
+
 	// API Key Authentication
 	APIKeyEnabled bool   // Enable API key authentication
 	APIKey        string // Required API key for requests (only used if APIKeyEnabled is true)
@@ -156,6 +162,8 @@ func Load() *Config {
 		IgnoreCertErrors:   getEnvBool("IGNORE_CERT_ERRORS", false),
 		CORSAllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", nil),
 		AllowLocalProxies:  getEnvBool("ALLOW_LOCAL_PROXIES", false), // Default false for security
+
+		DNSRebindingProtection: getEnvBool("DNS_REBINDING_PROTECTION", true), // Default true for security
 
 		// API Key Authentication
 		APIKeyEnabled: getEnvBool("API_KEY_ENABLED", false),
@@ -381,6 +389,11 @@ func (c *Config) Validate() {
 		} else {
 			log.Info().Msg("IGNORE_CERT_ERRORS enabled for proxy compatibility")
 		}
+	}
+
+	// DNS rebinding protection warning
+	if !c.DNSRebindingProtection {
+		log.Warn().Msg("DNS_REBINDING_PROTECTION disabled - response URL IP pinning is off (SSRF protection against private/internal IPs remains active)")
 	}
 
 	// Fix #17: Proxy URL and credential validation

@@ -783,6 +783,16 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		tabsTillVerify = maxTabsTillVerify
 	}
 
+	// DNS rebinding protection: pin the response URL to the IP resolved above.
+	// When disabled, pass nil so the solver skips same-IP pinning but still
+	// runs SSRF validation (blocking private/internal/metadata IPs) on the
+	// final URL. This unblocks sites that serve identical content across
+	// multiple TLDs/CDN IPs (issue #9).
+	expectedIP := resolvedIP
+	if !h.config.DNSRebindingProtection {
+		expectedIP = nil
+	}
+
 	// Build solve options with DNS pinning
 	opts := &solver.SolveOptions{
 		URL:                req.URL,
@@ -796,7 +806,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		Screenshot:         req.ReturnScreenshot,
 		DisableMedia:       req.DisableMedia || h.config.DisableMedia, // Per-request or global DISABLE_MEDIA env
 		WaitInSeconds:      waitInSeconds,
-		ExpectedIP:         resolvedIP,     // DNS pinning: verify response URL resolves to same IP
+		ExpectedIP:         expectedIP,     // DNS pinning: verify response URL resolves to same IP (nil = pinning off)
 		TabsTillVerify:     tabsTillVerify, // Number of Tab presses for Turnstile keyboard navigation
 		Download:           req.Download,
 		FollowRedirects:    req.FollowRedirects,

@@ -482,6 +482,7 @@ All configuration is done via environment variables.
 | `CORS_ALLOWED_ORIGINS` | (all) | Comma-separated allowed origins |
 | `ALLOW_LOCAL_PROXIES` | `true` | Allow localhost/private IP proxies |
 | `IGNORE_CERT_ERRORS` | `false` | Ignore TLS certificate errors |
+| `DNS_REBINDING_PROTECTION` | `true` | Pin response URL to the request-time IP. Set `false` for sites serving identical content across multiple TLDs/CDN IPs (SSRF protection stays on) |
 | `API_KEY_ENABLED` | `false` | Enable API key authentication |
 | `API_KEY` | (none) | Required API key (use 16+ chars) |
 
