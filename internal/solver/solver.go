@@ -666,8 +666,23 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
 	}
 
+	// Post-solve processing: download re-fetch, custom JS, waitInSeconds.
+	s.applyPostSolveProcessing(solveCtx, page, opts, result)
+
+	return result, nil
+}
+
+// applyPostSolveProcessing runs the post-solve steps shared by Solve and
+// SolveWithPage so the session and non-session paths stay in sync:
+// download-mode re-fetch, custom JS execution (executeJs), and the optional
+// waitInSeconds delay with a cookie re-fetch afterward.
+func (s *Solver) applyPostSolveProcessing(ctx context.Context, page *rod.Page, opts *SolveOptions, result *Result) {
+	if result == nil {
+		return
+	}
+
 	// Download mode: re-fetch the URL via Fetch API and return base64
-	if opts.Download && result != nil {
+	if opts.Download {
 		log.Info().Str("url", opts.URL).Msg("Download mode: fetching URL as binary via Fetch API")
 		escapedURL := strings.ReplaceAll(opts.URL, "'", "\\'")
 		escapedURL = strings.ReplaceAll(escapedURL, "\\", "\\\\")
@@ -702,7 +717,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// Execute custom JavaScript if provided
-	if opts.ExecuteJs != "" && result != nil {
+	if opts.ExecuteJs != "" {
 		log.Debug().Int("js_length", len(opts.ExecuteJs)).Msg("Executing custom JavaScript")
 		jsResult, evalErr := page.Timeout(10 * time.Second).Eval(fmt.Sprintf(`() => { %s }`, opts.ExecuteJs))
 		if evalErr != nil {
@@ -717,22 +732,18 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	if opts.WaitInSeconds > 0 {
 		waitDuration := time.Duration(opts.WaitInSeconds) * time.Second
 		log.Debug().Int("seconds", opts.WaitInSeconds).Msg("Waiting additional time before returning")
-		if !sleepWithContext(solveCtx, waitDuration) {
+		if !sleepWithContext(ctx, waitDuration) {
 			log.Warn().Msg("Wait interrupted by context cancellation")
 		}
 
 		// Re-fetch cookies after wait — JavaScript may set cookies during the delay
 		// (fixes Python FlareSolverr issue #1652, PR #1692)
-		if result != nil {
-			freshCookies, err := proto.NetworkGetAllCookies{}.Call(page)
-			if err == nil && freshCookies != nil {
-				result.Cookies = freshCookies.Cookies
-				log.Debug().Int("cookies", len(freshCookies.Cookies)).Msg("Re-fetched cookies after waitInSeconds")
-			}
+		freshCookies, err := proto.NetworkGetAllCookies{}.Call(page)
+		if err == nil && freshCookies != nil {
+			result.Cookies = freshCookies.Cookies
+			log.Debug().Int("cookies", len(freshCookies.Cookies)).Msg("Re-fetched cookies after waitInSeconds")
 		}
 	}
-
-	return result, nil
 }
 
 // solveHCaptchaExternal uses external CAPTCHA solvers to solve an hCaptcha challenge.
@@ -3006,14 +3017,10 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
 	}
 
-	// Wait additional time if requested (waitInSeconds)
-	if opts.WaitInSeconds > 0 {
-		waitDuration := time.Duration(opts.WaitInSeconds) * time.Second
-		log.Debug().Int("seconds", opts.WaitInSeconds).Msg("Waiting additional time before returning")
-		if !sleepWithContext(solveCtx, waitDuration) {
-			log.Warn().Msg("Wait interrupted by context cancellation")
-		}
-	}
+	// Post-solve processing: download re-fetch, custom JS, waitInSeconds.
+	// Shared with the non-session Solve path so executeJs/download/cookie
+	// re-fetch behave identically whether or not a session is active.
+	s.applyPostSolveProcessing(solveCtx, page, opts, result)
 
 	return result, nil
 }
