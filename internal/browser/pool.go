@@ -196,6 +196,16 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	l := launcher.New()
 
+	// Disable Rod's leakless watchdog (GitHub issue #10).
+	// leakless execs a helper binary from $TMPDIR/leakless-* to kill the browser
+	// if our process dies unexpectedly. That exec fails with "permission denied"
+	// whenever /tmp is mounted noexec (the default for tmpfs, and the norm on
+	// Unraid), breaking every browser launch. We don't need it: the container
+	// runs dumb-init as PID 1 (reaps orphaned children and forwards signals) and
+	// every teardown path goes through CleanupBrowser/l.Kill(), so the browser is
+	// always reaped without the fragile exec-on-/tmp dependency.
+	l = l.Leakless(false)
+
 	// Custom browser path if specified
 	if p.config.BrowserPath != "" {
 		l = l.Bin(p.config.BrowserPath)

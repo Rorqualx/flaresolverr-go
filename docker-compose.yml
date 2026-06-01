@@ -57,13 +57,17 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    # Temp filesystem for browser cache.
-    # /tmp/rod is the user-data dir parent for every Chromium process; sizing it
-    # generously prevents pool recycles from running out of tmpfs space.
-    tmpfs:
-      - /tmp:size=128M
-      - /tmp/rod:size=512M
-      - /home/flaresolverr/.cache:size=256M
+    # NOTE: Do NOT mount a tmpfs at /tmp or /tmp/rod (GitHub issue #10).
+    # tmpfs defaults to noexec, which breaks Chromium launch, and a nested
+    # tmpfs at /tmp/rod breaks Chrome's process-singleton lock (the failure
+    # seen on Unraid). It is also unnecessary: Rod's per-browser user-data
+    # dirs under /tmp/rod are now cleaned up after every browser close
+    # (issue #6), so they no longer accumulate on disk.
+    #
+    # If you specifically want browser scratch space in RAM, mount a tmpfs
+    # with the exec flag at a path that is NOT nested under /tmp/rod, e.g.:
+    #   tmpfs:
+    #     - /home/flaresolverr/.cache:exec,size=256M
 
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8191/health"]

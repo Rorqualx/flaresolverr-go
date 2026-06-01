@@ -47,16 +47,25 @@ docker run -d -p 8191:8191 --name flaresolverr rorqualx/flaresolverr-go:latest
 
 The image declares `/tmp/rod` as a `VOLUME`, so Chromium's per-browser user-data
 dirs land in an anonymous Docker volume (cleaned up by `docker rm -v`) instead
-of the container's writable layer. For tighter disk control — recommended on
-hosts where the Docker image is size-bounded (e.g. Unraid `docker.img`) — back
-it with a tmpfs:
+of the container's writable layer. These dirs are removed after every browser
+close, so they do not accumulate on disk.
 
-```bash
-docker run -d -p 8191:8191 --tmpfs /tmp/rod:size=512m \
-    --name flaresolverr rorqualx/flaresolverr-go:latest
-```
+> **⚠️ Do not mount a tmpfs at `/tmp/rod` (or `/tmp`).** It is a common
+> suggestion for "putting browser scratch space in RAM", but it breaks Chromium
+> launch (GitHub issue [#10]):
+>
+> - tmpfs defaults to **`noexec`**, so Chromium's launch helper cannot exec →
+>   `permission denied`.
+> - A **nested** tmpfs at `/tmp/rod` breaks Chrome's process-singleton lock →
+>   `Failed to get the debug url: Opening in existing browser session`. This is
+>   the failure most commonly hit on **Unraid**.
+>
+> The container works correctly with no tmpfs flag — just use the default
+> anonymous volume. If you really want browser scratch space in RAM, mount a
+> tmpfs **with the `exec` option** at a path that is **not** nested under
+> `/tmp/rod`.
 
-The bundled `docker-compose.yml` already configures this tmpfs.
+[#10]: https://github.com/Rorqualx/flaresolverr-go/issues/10
 
 ### From Source
 
