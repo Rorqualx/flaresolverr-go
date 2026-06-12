@@ -412,6 +412,14 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 		defer page.Close()
 
+		// Install the turnstile.render interceptor before navigation so managed
+		// challenges expose their sitekey/action/cData/chlPageData to the external
+		// solver. Only when an external solver chain can consume them.
+		if s.solverChain != nil {
+			captcha.InstallTurnstileInterceptor(page)
+			defer captcha.RemoveTurnstileInterceptor(page)
+		}
+
 		if tz := resolveTimezone(opts); tz != "" {
 			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
 				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
@@ -487,6 +495,14 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		return nil, fmt.Errorf("failed to create stealth page: %w", err)
 	}
 	defer page.Close()
+
+	// Install the turnstile.render interceptor before navigation so managed
+	// challenges expose their sitekey/action/cData/chlPageData to the external
+	// solver. Only when an external solver chain can consume them.
+	if s.solverChain != nil {
+		captcha.InstallTurnstileInterceptor(page)
+		defer captcha.RemoveTurnstileInterceptor(page)
+	}
 
 	if tz := resolveTimezone(opts); tz != "" {
 		if err := browser.ApplyTimezoneOverride(page, tz); err != nil {

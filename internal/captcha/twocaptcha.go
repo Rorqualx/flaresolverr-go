@@ -89,12 +89,16 @@ type twoCaptchaCreateTaskRequest struct {
 }
 
 // twoCaptchaTurnstileTask is the task specification for Turnstile.
+// For Cloudflare managed challenges, action/data/pagedata are all required and
+// are captured from the turnstile.render() call (see intercept.go).
 type twoCaptchaTurnstileTask struct {
 	Type       string `json:"type"`
 	WebsiteURL string `json:"websiteURL"`
 	WebsiteKey string `json:"websiteKey"`
 	Action     string `json:"action,omitempty"`
 	Data       string `json:"data,omitempty"`
+	PageData   string `json:"pagedata,omitempty"`
+	UserAgent  string `json:"userAgent,omitempty"`
 }
 
 // twoCaptchaCreateTaskResponse is the response from createTask.
@@ -185,6 +189,8 @@ func (s *TwoCaptchaSolver) createTask(ctx context.Context, req *TurnstileRequest
 			WebsiteKey: req.SiteKey,
 			Action:     req.Action,
 			Data:       req.CData,
+			PageData:   req.PageData,
+			UserAgent:  req.UserAgent,
 		},
 	}
 

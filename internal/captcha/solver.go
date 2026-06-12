@@ -40,6 +40,7 @@ type TurnstileRequest struct {
 	UserAgent string // The user agent to use for solving
 	Action    string // Optional action parameter
 	CData     string // Optional cData parameter
+	PageData  string // Optional chlPageData — required for Cloudflare managed challenges
 }
 
 // HCaptchaRequest contains the parameters needed to solve an hCaptcha challenge.
@@ -153,23 +154,48 @@ func (c *SolverChain) Solve(ctx context.Context, page *rod.Page, pageURL, userAg
 
 	startTime := time.Now()
 
-	// Extract sitekey from page
-	sitekey, err := ExtractTurnstileSitekey(page)
-	if err != nil {
-		log.Debug().Err(err).Msg("Failed to extract Turnstile sitekey")
-		return nil, fmt.Errorf("failed to extract sitekey: %w", err)
-	}
+	// Prefer parameters captured live from the turnstile.render() call (managed
+	// challenges expose sitekey/action/cData/chlPageData only there, never as DOM
+	// attributes). Fall back to DOM/iframe extraction for embedded widgets.
+	captured, hasCaptured := ReadCapturedChallengeParams(page)
 
-	log.Info().
-		Str("sitekey", sitekey[:min(10, len(sitekey))]+"...").
-		Str("url", pageURL).
-		Msg("Attempting external CAPTCHA solve")
+	var sitekey string
+	if hasCaptured && captured.SiteKey != "" {
+		sitekey = captured.SiteKey
+		log.Debug().Str("source", "render_intercept").Msg("Using intercepted Turnstile params")
+	} else {
+		var err error
+		sitekey, err = ExtractTurnstileSitekey(page)
+		if err != nil {
+			log.Debug().Err(err).Msg("Failed to extract Turnstile sitekey")
+			return nil, fmt.Errorf("failed to extract sitekey: %w", err)
+		}
+	}
 
 	req := &TurnstileRequest{
 		SiteKey:   sitekey,
 		PageURL:   pageURL,
 		UserAgent: userAgent,
+		Action:    ExtractTurnstileAction(page),
+		CData:     ExtractTurnstileCData(page),
 	}
+	// Captured render() params win over DOM scraping when present.
+	if hasCaptured {
+		if captured.Action != "" {
+			req.Action = captured.Action
+		}
+		if captured.CData != "" {
+			req.CData = captured.CData
+		}
+		req.PageData = captured.PageData
+	}
+
+	log.Info().
+		Str("sitekey", sitekey[:min(10, len(sitekey))]+"...").
+		Str("url", pageURL).
+		Bool("managed", req.PageData != "").
+		Bool("intercepted", hasCaptured).
+		Msg("Attempting external CAPTCHA solve")
 
 	// Try each provider in order
 	var lastErr error
@@ -205,7 +231,11 @@ func (c *SolverChain) Solve(ctx context.Context, page *rod.Page, pageURL, userAg
 			Msg("External solver succeeded")
 
 		injected := false
-		if err := InjectTurnstileToken(ctx, page, result.Token); err != nil {
+		// Managed challenges complete through the captured render() callback;
+		// try that first, then fall back to the generic textarea/callback methods.
+		if InjectCapturedCallback(page, result.Token) {
+			injected = true
+		} else if err := InjectTurnstileToken(ctx, page, result.Token); err != nil {
 			log.Warn().Err(err).Msg("Failed to inject token, returning token anyway")
 		} else {
 			injected = true

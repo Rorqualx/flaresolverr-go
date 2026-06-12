@@ -28,14 +28,101 @@ func ExtractTurnstileSitekey(page *rod.Page) (string, error) {
 		return sitekey, nil
 	}
 
-	// Method 3: Try iframe src attribute
+	// Method 3: Try iframe src attribute (light DOM only)
 	sitekey, err = extractSitekeyIframe(page)
 	if err == nil && sitekey != "" {
 		log.Debug().Str("method", "iframe").Msg("Extracted sitekey from iframe")
 		return sitekey, nil
 	}
 
+	// Method 4: Pierce shadow roots and nested frames. Cloudflare *managed*
+	// challenges render the Turnstile iframe inside a shadow root, so it is
+	// invisible to light-DOM querySelector/Elements. Walk the flattened DOM tree
+	// to find the challenges.cloudflare.com iframe URL and parse the sitekey.
+	sitekey, err = extractSitekeyViaPierce(page)
+	if err == nil && sitekey != "" {
+		log.Debug().Str("method", "pierce").Msg("Extracted sitekey via shadow-DOM pierce")
+		return sitekey, nil
+	}
+
 	return "", types.ErrCaptchaSitekeyNotFound
+}
+
+// extractSitekeyViaPierce walks the entire DOM tree (including closed shadow
+// roots and nested iframe documents) looking for the Cloudflare Turnstile
+// challenge iframe, and parses the sitekey out of its URL. This is the reliable
+// path for managed challenges where the widget lives inside a shadow root.
+func extractSitekeyViaPierce(page *rod.Page) (string, error) {
+	depth := -1
+	result, err := proto.DOMGetDocument{
+		Depth:  &depth,
+		Pierce: true,
+	}.Call(page)
+	if err != nil {
+		return "", fmt.Errorf("failed to get pierced DOM tree: %w", err)
+	}
+	if result == nil || result.Root == nil {
+		return "", fmt.Errorf("pierced DOM tree is empty")
+	}
+
+	const maxNodes = 50000
+	visited := 0
+	found := ""
+
+	var walk func(node *proto.DOMNode)
+	walk = func(node *proto.DOMNode) {
+		if node == nil || found != "" {
+			return
+		}
+		visited++
+		if visited > maxNodes {
+			return
+		}
+
+		// Attributes is a flat [name, value, name, value, ...] slice. Any value
+		// that is a turnstile challenge URL carries the sitekey.
+		for i := 0; i+1 < len(node.Attributes); i += 2 {
+			val := node.Attributes[i+1]
+			if containsTurnstilePattern(val) {
+				if key := extractSitekeyFromURL(val); key != "" {
+					found = key
+					return
+				}
+			}
+		}
+
+		for _, shadow := range node.ShadowRoots {
+			walk(shadow)
+			if found != "" {
+				return
+			}
+		}
+		if node.ContentDocument != nil {
+			walk(node.ContentDocument)
+			if found != "" {
+				return
+			}
+		}
+		if node.TemplateContent != nil {
+			walk(node.TemplateContent)
+			if found != "" {
+				return
+			}
+		}
+		for _, child := range node.Children {
+			walk(child)
+			if found != "" {
+				return
+			}
+		}
+	}
+
+	walk(result.Root)
+
+	if found == "" {
+		return "", fmt.Errorf("no turnstile sitekey found via pierce (nodes_visited=%d)", visited)
+	}
+	return found, nil
 }
 
 // extractSitekeyJS uses JavaScript to find the sitekey from various sources.
@@ -254,7 +341,42 @@ func extractSitekeyFromURL(url string) string {
 		}
 	}
 
+	// Pattern 3: Cloudflare *managed challenge* iframes embed the sitekey as a bare
+	// path segment rather than after /sitekey/ or sitekey=, e.g.
+	//   .../turnstile/f/ov2/av0/rch/<token>/0x4AAAAAAADnPIDROrmt1Wwj/light/...
+	// Turnstile sitekeys are always "0x" followed by base62 characters, so match
+	// the longest such run. Only trusted because the caller already verified the
+	// URL belongs to challenges.cloudflare.com (containsTurnstilePattern).
+	if key := findTurnstileSitekeyToken(url); key != "" {
+		return key
+	}
+
 	return ""
+}
+
+// findTurnstileSitekeyToken scans s for a Cloudflare Turnstile sitekey token of
+// the form "0x" + base62, length-bounded to avoid matching unrelated hex blobs.
+func findTurnstileSitekeyToken(s string) string {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '0' || (s[i+1] != 'x' && s[i+1] != 'X') {
+			continue
+		}
+		end := i + 2
+		for end < len(s) && isSitekeyChar(s[end]) {
+			end++
+		}
+		// Real sitekeys are ~24 chars ("0x" + 22). Require a sane minimum to
+		// reject things like "0x0" or short hex fragments.
+		if end-i >= 18 {
+			return s[i:end]
+		}
+	}
+	return ""
+}
+
+// isSitekeyChar reports whether c is valid inside a Turnstile sitekey body.
+func isSitekeyChar(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // ExtractTurnstileAction extracts the optional action parameter from the page.

@@ -72,6 +72,11 @@ func TestExtractSitekeyFromURL(t *testing.T) {
 			url:  "https://challenges.cloudflare.com/sitekey/0x4CCCCCC",
 			want: "0x4CCCCCC",
 		},
+		{
+			name: "managed challenge iframe url (sitekey as bare path segment)",
+			url:  "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2/av0/rch/zcabn/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto",
+			want: "0x4AAAAAAADnPIDROrmt1Wwj",
+		},
 	}
 
 	for _, tt := range tests {
