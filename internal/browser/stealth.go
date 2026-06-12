@@ -36,8 +36,15 @@ func ApplyStealthToPage(page *rod.Page) error {
 		log.Debug().Msg("Stealth registered via EvalOnNewDocument (will run at document_start)")
 	}
 
-	// Method 2: Also evaluate immediately for the current context (about:blank)
-	_, evalErr := page.Evaluate(rod.Eval(stealthScript))
+	// Method 2: Also evaluate immediately for the current context (about:blank).
+	//
+	// go-rod wraps every Eval argument as `function() { return (JS).apply(this, arguments) }`
+	// (see page_eval.go formatToJSFunc). stealthScript is a self-invoking IIFE, so the
+	// raw form evaluates to `((()=>{...})()).apply(...)` — the IIFE returns undefined and
+	// reading `.apply` on it throws `TypeError: Cannot read properties of undefined
+	// (reading 'apply')` at the script's final line (issue #13). Wrapping in an arrow gives
+	// rod's wrapper a callable target; the trailing `;` rod trims, so the IIFE still runs once.
+	_, evalErr := page.Evaluate(rod.Eval("() => " + stealthScript))
 	if evalErr != nil {
 		errStr := evalErr.Error()
 
