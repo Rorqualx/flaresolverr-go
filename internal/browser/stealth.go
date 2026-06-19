@@ -64,6 +64,95 @@ func ApplyStealthToPage(page *rod.Page) error {
 	return nil
 }
 
+// ApplyGate2Corrections layers two surgical fingerprint fixes over the
+// go-rod/stealth base used on the GET/POST request paths. Measured against live
+// detectors (docs/INVESTIGATION-fingerprint-gate2.md), go-rod/stealth alone:
+//   - reports a macOS WebGL renderer ("Intel Iris OpenGL Engine") on a Linux
+//     browser — an OS-layer inconsistency Cloudflare cross-checks, and
+//   - leaves screen at the headless 800x600 default while the viewport is larger
+//     — a physically impossible geometry and a strong headless tell.
+//
+// It deliberately does NOT layer the full custom stealthScript here: doing so
+// regressed go-rod/stealth's (more correct) navigator.webdriver and
+// navigator.plugins patches. This applies ONLY the WebGL/OS and geometry fixes.
+// Registered after go-rod/stealth so the WebGL override wins; idempotent.
+func ApplyGate2Corrections(page *rod.Page) error {
+	if _, err := (proto.PageAddScriptToEvaluateOnNewDocument{
+		Source: gate2CorrectionsScript,
+	}).Call(page); err != nil {
+		return fmt.Errorf("failed to register gate-2 corrections: %w", err)
+	}
+	// Also apply to the current document; non-fatal if the context is not ready.
+	if _, err := page.Evaluate(rod.Eval("() => " + gate2CorrectionsScript)); err != nil {
+		log.Debug().Err(err).Msg("gate-2 corrections immediate eval non-fatal error")
+	}
+	return nil
+}
+
+// gate2CorrectionsScript holds only the WebGL-OS-consistency and screen/window
+// geometry fixes — see ApplyGate2Corrections. Self-contained and idempotent.
+const gate2CorrectionsScript = `
+(() => {
+  if (window.__gate2Applied) return;
+  window.__gate2Applied = true;
+
+  // 1. WebGL renderer must match the OS. go-rod/stealth returns a macOS-style
+  // renderer on Linux; override with a Linux ANGLE renderer/vendor pair.
+  try {
+    const VENDOR = 37445, RENDERER = 37446;
+    const vendor = 'Google Inc. (Intel)';
+    const renderer = 'ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 655, OpenGL 4.1)';
+    ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(function (n) {
+      try {
+        const ctx = window[n];
+        if (!ctx || !ctx.prototype) return;
+        const orig = ctx.prototype.getParameter;
+        if (!orig || typeof orig !== 'function') return;
+        ctx.prototype.getParameter = function (p) {
+          try {
+            if (p === VENDOR) return vendor;
+            if (p === RENDERER) return renderer;
+          } catch (e) {}
+          return orig.call(this, p);
+        };
+      } catch (e) {}
+    });
+  } catch (e) {}
+
+  // 2. Coherent screen/window geometry derived from the REAL viewport, so that
+  // inner <= outer <= avail <= screen always holds (fixes the headless
+  // "screen smaller than window" impossibility) without lying about
+  // innerWidth/innerHeight (which can be cross-checked via media queries).
+  try {
+    const iw = window.innerWidth || 1920;
+    const ih = window.innerHeight || 1080;
+    const chrome = 82; // toolbar + tabs + address bar
+    const windowX = 50 + Math.floor(Math.random() * 200);
+    const windowY = 30 + Math.floor(Math.random() * 80);
+    const outerW = iw;
+    const outerH = ih + chrome;
+    const screenW = Math.max(2560, windowX + outerW + 50);
+    const screenH = Math.max(1440, windowY + outerH + 60);
+    const taskbar = 40;
+    const props = {
+      width: screenW, height: screenH,
+      availWidth: screenW, availHeight: screenH - taskbar,
+      availLeft: 0, availTop: 0, colorDepth: 24, pixelDepth: 24
+    };
+    Object.keys(props).forEach(function (k) {
+      try {
+        Object.defineProperty(screen, k, {
+          get: (function (v) { return function () { return v; }; })(props[k]),
+          configurable: true
+        });
+      } catch (e) {}
+    });
+    Object.defineProperty(window, 'outerWidth', { get: function () { return outerW; }, configurable: true });
+    Object.defineProperty(window, 'outerHeight', { get: function () { return outerH; }, configurable: true });
+  } catch (e) {}
+})();
+`
+
 // stealthScript contains JavaScript to mask automation.
 // These patches address common detection vectors used by anti-bot systems.
 const stealthScript = `

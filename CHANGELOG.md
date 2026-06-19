@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Browser fingerprint gate-2 tells (#11/#13)** - Live probes against bot detectors (see `docs/INVESTIGATION-fingerprint-gate2.md`) found two automation tells on the primary `request.get`/POST paths, which used only `go-rod/stealth`: (1) a **macOS WebGL renderer reported on a Linux browser** (OS-layer inconsistency), and (2) **`screen` stuck at the headless 800×600 default** while the viewport was larger — a physically impossible geometry. Added `ApplyGate2Corrections` (a surgical WebGL-OS + coherent screen/window geometry override) applied on all request paths. Validated on live Chrome: WebGL now reports a Linux ANGLE renderer, geometry satisfies `inner ≤ outer ≤ avail ≤ screen`, and sannysoft still passes every check with no regression. Probes also **ruled out** TLS/JA3/HTTP2 (genuine Chrome 136) and the CDP `Runtime.enable` leak (go-rod never calls it) as tells.
 - **Path traversal detection** - Replaced simple `strings.Contains("..")` checks with proper `filepath.Clean()` and `filepath.Abs()` normalization in config validation. Handles edge cases like `....//`, symlinks, and other obfuscation techniques.
 - **Context cancellation leak** - Fixed non-deferred `cancel()` call in selectors manager that could leak context on early returns.
 - **Context propagation in POST** - `navigatePost()` and `navigatePostJSON()` now accept explicit context parameter instead of using `page.GetContext()` for proper timeout/cancellation propagation.
