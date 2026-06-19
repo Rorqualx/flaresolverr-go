@@ -202,7 +202,7 @@ curl -X POST http://localhost:8191/v1 \
 | `userAgent` | string | No | Override User-Agent for this request |
 | `returnRawHtml` | bool | No | Return raw HTML before JavaScript renders |
 | `executeJs` | string | No | Custom JavaScript to execute after solving |
-| `captchaSolver` | string | No | Per-request captcha provider: `2captcha`, `capsolver`, `anticaptcha`, or `none` |
+| `captchaSolver` | string | No | Per-request captcha provider: `2captcha`, `capsolver`, `anticaptcha`, `9kw`, or `none` |
 | `captchaApiKey` | string | No | Per-request captcha API key |
 | `keepaliveTtl` | int | No | New TTL in minutes for `sessions.keepalive` (0 = just touch, max 1440) |
 | `cookieExtractDelay` | int | No | Seconds to wait before extracting cookies (0-30). Captures late-set JS cookies |
@@ -530,7 +530,8 @@ External CAPTCHA solver fallback for Turnstile and hCaptcha challenges that nati
 | `TWOCAPTCHA_API_KEY` | (none) | 2Captcha API key |
 | `CAPSOLVER_API_KEY` | (none) | CapSolver API key |
 | `ANTICAPTCHA_API_KEY` | (none) | anti-captcha.com API key |
-| `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha`, `capsolver`, or `anticaptcha` |
+| `NINEKW_API_KEY` | (none) | 9kw.eu API key (hCaptcha/reCAPTCHA only — does **not** solve Cloudflare Turnstile) |
+| `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha`, `capsolver`, `anticaptcha`, or `9kw` |
 | `CAPTCHA_SOLVER_TIMEOUT` | `120s` | Timeout for external solver API (30s-300s) |
 
 **Supported CAPTCHA types:**
