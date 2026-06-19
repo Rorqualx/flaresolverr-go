@@ -412,6 +412,15 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 		defer page.Close()
 
+		// Layer our custom stealth over go-rod/stealth. go-rod/stealth alone
+		// reports a macOS WebGL renderer on Linux and leaves screen at the
+		// headless 800x600 default — both bot tells. ApplyStealthToPage fixes the
+		// WebGL/OS consistency and screen geometry (registered after go-rod/stealth
+		// so it wins). See docs/INVESTIGATION-fingerprint-gate2.md.
+		if err := browser.ApplyGate2Corrections(page); err != nil {
+			log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (POST)")
+		}
+
 		// Install the turnstile.render interceptor before navigation so managed
 		// challenges expose their sitekey/action/cData/chlPageData to the external
 		// solver. Only when an external solver chain can consume them.
@@ -495,6 +504,15 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		return nil, fmt.Errorf("failed to create stealth page: %w", err)
 	}
 	defer page.Close()
+
+	// Layer our custom stealth over go-rod/stealth. go-rod/stealth alone reports a
+	// macOS WebGL renderer on Linux and leaves screen at the headless 800x600
+	// default — both bot tells. ApplyStealthToPage fixes WebGL/OS consistency and
+	// screen geometry (registered after go-rod/stealth so it wins).
+	// See docs/INVESTIGATION-fingerprint-gate2.md.
+	if err := browser.ApplyGate2Corrections(page); err != nil {
+		log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (GET)")
+	}
 
 	// Install the turnstile.render interceptor before navigation so managed
 	// challenges expose their sitekey/action/cData/chlPageData to the external
@@ -2960,6 +2978,11 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 			if err := browser.ApplyStealthToPage(page); err != nil {
 				log.Warn().Err(err).Msg("Failed to apply stealth patches")
 			}
+		}
+		// Screen/window geometry coherence (the full stealthScript already sets a
+		// Linux-correct WebGL renderer, but not screen geometry).
+		if err := browser.ApplyGate2Corrections(page); err != nil {
+			log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (session)")
 		}
 		if tz := resolveTimezone(opts); tz != "" {
 			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
