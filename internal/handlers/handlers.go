@@ -205,6 +205,7 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 			"2captcha":    cfg.Captcha2CaptchaAPIKey,
 			"capsolver":   cfg.CaptchaCapSolverAPIKey,
 			"anticaptcha": cfg.CaptchaAntiCaptchaAPIKey,
+			"9kw":         cfg.Captcha9kwAPIKey,
 		}
 
 		// Build providers in priority order using the registry

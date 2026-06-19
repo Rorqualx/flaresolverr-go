@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Response body cleanup** - Added `defer resp.Body.Close()` to all integration test functions following Go best practices.
 
 ### Added
+- **9kw.eu CAPTCHA provider** (#3) - Added the 9kw.eu human-powered solver as a fourth external provider. Configure via `NINEKW_API_KEY` and select with `CAPTCHA_PRIMARY_PROVIDER=9kw` or the per-request `captchaSolver` field. 9kw solves hCaptcha (and image/reCAPTCHA-style challenges) but has **no Cloudflare Turnstile support**, so `SolveTurnstile` returns an unsupported error and the chain falls through to a Turnstile-capable provider. It does not help the Cloudflare managed-challenge path in #11/#13.
 - **Per-request session TTL** - `session_ttl_minutes` field in `sessions.create` requests now overrides the global `SESSION_TTL` for individual sessions (1-1440 minutes). Sessions without a custom TTL continue using the server default.
 - **CLI dashboard** - New `internal/dashboard` package provides a split-screen TUI showing live incoming requests and server stats (pool, sessions, domains, memory, request rate). Enable via `DASHBOARD_ENABLED=true`. Built with bubbletea/lipgloss.
 - **Human-like behavior patterns** - New `internal/humanize` package with randomized timing, natural mouse movements using Bezier curves, and realistic scroll behavior. Makes automated actions appear more human-like to avoid detection.

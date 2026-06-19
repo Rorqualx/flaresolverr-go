@@ -94,7 +94,8 @@ type Config struct {
 	Captcha2CaptchaAPIKey    string        // 2Captcha API key (TWOCAPTCHA_API_KEY)
 	CaptchaCapSolverAPIKey   string        // CapSolver API key (CAPSOLVER_API_KEY)
 	CaptchaAntiCaptchaAPIKey string        // anti-captcha.com API key (ANTICAPTCHA_API_KEY)
-	CaptchaPrimaryProvider   string        // Primary provider: "2captcha", "capsolver", or "anticaptcha" (default: "2captcha")
+	Captcha9kwAPIKey         string        // 9kw.eu API key (NINEKW_API_KEY) — hCaptcha/reCAPTCHA only, no Turnstile
+	CaptchaPrimaryProvider   string        // Primary provider: "2captcha", "capsolver", "anticaptcha", or "9kw" (default: "2captcha")
 	CaptchaSolverTimeout     time.Duration // Timeout for external solver API (default: 120s)
 
 	// Selectors settings
@@ -175,6 +176,7 @@ func Load() *Config {
 		Captcha2CaptchaAPIKey:    getEnvString("TWOCAPTCHA_API_KEY", ""),
 		CaptchaCapSolverAPIKey:   getEnvString("CAPSOLVER_API_KEY", ""),
 		CaptchaAntiCaptchaAPIKey: getEnvString("ANTICAPTCHA_API_KEY", ""),
+		Captcha9kwAPIKey:         getEnvString("NINEKW_API_KEY", ""),
 		CaptchaPrimaryProvider:   getEnvString("CAPTCHA_PRIMARY_PROVIDER", "2captcha"),
 		CaptchaSolverTimeout:     getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
 
@@ -720,7 +722,7 @@ func (c *Config) validateCaptchaConfig() {
 	}
 
 	// Validate primary provider
-	validProviders := map[string]bool{"2captcha": true, "capsolver": true, "anticaptcha": true}
+	validProviders := map[string]bool{"2captcha": true, "capsolver": true, "anticaptcha": true, "9kw": true}
 	if c.CaptchaPrimaryProvider != "" && !validProviders[strings.ToLower(c.CaptchaPrimaryProvider)] {
 		log.Warn().
 			Str("provider", c.CaptchaPrimaryProvider).
@@ -731,8 +733,8 @@ func (c *Config) validateCaptchaConfig() {
 
 	// Warn if fallback enabled but no API keys configured
 	if c.CaptchaFallbackEnabled {
-		if c.Captcha2CaptchaAPIKey == "" && c.CaptchaCapSolverAPIKey == "" && c.CaptchaAntiCaptchaAPIKey == "" {
-			log.Warn().Msg("CAPTCHA_FALLBACK_ENABLED is true but no API keys configured (TWOCAPTCHA_API_KEY, CAPSOLVER_API_KEY, or ANTICAPTCHA_API_KEY)")
+		if c.Captcha2CaptchaAPIKey == "" && c.CaptchaCapSolverAPIKey == "" && c.CaptchaAntiCaptchaAPIKey == "" && c.Captcha9kwAPIKey == "" {
+			log.Warn().Msg("CAPTCHA_FALLBACK_ENABLED is true but no API keys configured (TWOCAPTCHA_API_KEY, CAPSOLVER_API_KEY, ANTICAPTCHA_API_KEY, or NINEKW_API_KEY)")
 		} else {
 			// Log which providers are configured
 			var configured []string
@@ -745,6 +747,9 @@ func (c *Config) validateCaptchaConfig() {
 			if c.CaptchaAntiCaptchaAPIKey != "" {
 				configured = append(configured, "anticaptcha")
 			}
+			if c.Captcha9kwAPIKey != "" {
+				configured = append(configured, "9kw")
+			}
 			log.Info().
 				Strs("providers", configured).
 				Str("primary", c.CaptchaPrimaryProvider).
@@ -756,5 +761,5 @@ func (c *Config) validateCaptchaConfig() {
 
 // HasCaptchaFallback returns true if external CAPTCHA fallback is configured.
 func (c *Config) HasCaptchaFallback() bool {
-	return c.CaptchaFallbackEnabled && (c.Captcha2CaptchaAPIKey != "" || c.CaptchaCapSolverAPIKey != "" || c.CaptchaAntiCaptchaAPIKey != "")
+	return c.CaptchaFallbackEnabled && (c.Captcha2CaptchaAPIKey != "" || c.CaptchaCapSolverAPIKey != "" || c.CaptchaAntiCaptchaAPIKey != "" || c.Captcha9kwAPIKey != "")
 }
