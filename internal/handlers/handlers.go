@@ -237,6 +237,12 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 		}
 	}
 
+	// Layer-2 clean-egress path: reuse minted cf_clearance across requests.
+	if cfg.ClearanceCacheEnabled {
+		solverInstance.SetClearanceCache(solver.NewClearanceCache(cfg.ClearanceTTL, 0))
+		log.Info().Dur("ttl", cfg.ClearanceTTL).Msg("cf_clearance cache enabled")
+	}
+
 	return &Handler{
 		pool:             pool,
 		sessions:         sessions,

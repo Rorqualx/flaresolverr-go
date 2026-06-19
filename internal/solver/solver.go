@@ -115,6 +115,7 @@ type Solver struct {
 	solverChain      *captcha.SolverChain // External CAPTCHA solver fallback
 	selectorsManager *selectors.Manager   // Hot-reload capable selectors manager
 	statsManager     StatsManager         // Domain stats for method tracking (optional)
+	clearanceCache   *ClearanceCache      // cf_clearance reuse cache (optional)
 }
 
 // StatsManager interface for domain statistics tracking.
@@ -183,6 +184,11 @@ func (s *Solver) SetStatsManager(sm StatsManager) {
 // SetSolverChain sets the external CAPTCHA solver chain.
 func (s *Solver) SetSolverChain(chain *captcha.SolverChain) {
 	s.solverChain = chain
+}
+
+// SetClearanceCache enables cf_clearance reuse (Layer-2 of the clean-egress path).
+func (s *Solver) SetClearanceCache(c *ClearanceCache) {
+	s.clearanceCache = c
 }
 
 // getSelectors returns the current selectors, using the manager if available.
@@ -356,6 +362,32 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		Bool("disable_media", opts.DisableMedia).
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve attempt")
+
+	// Layer-2 clean-egress path: reuse a cached cf_clearance keyed by registrable
+	// domain + egress identity. Injecting a still-valid cf_clearance before
+	// navigation makes the normal solve loop clear instantly (no challenge), so the
+	// expensive solve/two-phase-bypass is a once-per-(domain,egress) cost.
+	cacheDomain := registrableDomain(opts.URL)
+	cacheEgress := proxyID(opts.Proxy)
+	cacheEligible := s.clearanceCache != nil && !opts.IsPost && cacheDomain != ""
+	if cacheEligible {
+		if e := s.clearanceCache.Get(cacheDomain, cacheEgress); e != nil &&
+			(opts.UserAgent == "" || opts.UserAgent == e.userAgent) {
+			// cf_clearance is IP+UA bound — reuse the exact UA that minted it.
+			opts.UserAgent = e.userAgent
+			opts.Cookies = append(append([]types.RequestCookie{}, e.cookies...), opts.Cookies...)
+			log.Info().
+				Str("domain", cacheDomain).
+				Str("egress", cacheEgress).
+				Msg("Injected cached cf_clearance (clearance-cache fast path)")
+		}
+		// Populate the cache on any successful solve that minted a cf_clearance.
+		defer func() {
+			if err == nil && result != nil && result.Success {
+				s.clearanceCache.Put(cacheDomain, cacheEgress, result.UserAgent, result.Cookies)
+			}
+		}()
+	}
 
 	// Acquire browser - use dedicated browser for per-request proxy, pooled otherwise
 	var browserInstance *rod.Browser
