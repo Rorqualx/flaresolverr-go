@@ -116,6 +116,7 @@ type Solver struct {
 	selectorsManager *selectors.Manager   // Hot-reload capable selectors manager
 	statsManager     StatsManager         // Domain stats for method tracking (optional)
 	clearanceCache   *ClearanceCache      // cf_clearance reuse cache (optional)
+	egressPool       *EgressPool          // sticky clean-egress proxy pool (optional)
 }
 
 // StatsManager interface for domain statistics tracking.
@@ -189,6 +190,11 @@ func (s *Solver) SetSolverChain(chain *captcha.SolverChain) {
 // SetClearanceCache enables cf_clearance reuse (Layer-2 of the clean-egress path).
 func (s *Solver) SetClearanceCache(c *ClearanceCache) {
 	s.clearanceCache = c
+}
+
+// SetEgressPool enables sticky clean egress (Layer-1 of the clean-egress path).
+func (s *Solver) SetEgressPool(p *EgressPool) {
+	s.egressPool = p
 }
 
 // getSelectors returns the current selectors, using the manager if available.
@@ -368,6 +374,20 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// navigation makes the normal solve loop clear instantly (no challenge), so the
 	// expensive solve/two-phase-bypass is a once-per-(domain,egress) cost.
 	cacheDomain := registrableDomain(opts.URL)
+
+	// Layer-1 clean egress: if no per-request proxy is set, pick a sticky egress
+	// for this domain. Sticky-by-domain keeps the same exit IP per site, which is
+	// what keeps the Layer-2 cf_clearance cache valid (clearance is IP-bound).
+	if opts.Proxy == nil && s.egressPool != nil {
+		if p := s.egressPool.Select(cacheDomain); p != nil {
+			opts.Proxy = p
+			log.Info().
+				Str("domain", cacheDomain).
+				Str("egress", proxyID(p)).
+				Msg("Selected sticky clean egress")
+		}
+	}
+
 	cacheEgress := proxyID(opts.Proxy)
 	cacheEligible := s.clearanceCache != nil && !opts.IsPost && cacheDomain != ""
 	if cacheEligible {

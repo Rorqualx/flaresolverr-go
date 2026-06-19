@@ -57,6 +57,8 @@ type Config struct {
 	ProxyURL      string
 	ProxyUsername string
 	ProxyPassword string
+	ProxyList     string // Pool of egress proxies, comma/newline-separated (PROXY_LIST)
+	ProxyStrategy string // Egress selection: sticky-domain|round-robin|per-request (PROXY_STRATEGY)
 
 	// Browser locale/timezone
 	BrowserTimezone string // TZ env var — sets browser timezone (e.g., "America/New_York")
@@ -146,6 +148,8 @@ func Load() *Config {
 		ProxyURL:      getEnvString("PROXY_URL", ""),
 		ProxyUsername: getEnvString("PROXY_USERNAME", ""),
 		ProxyPassword: getEnvString("PROXY_PASSWORD", ""),
+		ProxyList:     getEnvString("PROXY_LIST", ""),
+		ProxyStrategy: getEnvString("PROXY_STRATEGY", "sticky-domain"),
 
 		// Browser locale/timezone
 		BrowserTimezone: getEnvTimezone("TZ", ""),
