@@ -42,6 +42,10 @@ type Config struct {
 	SessionCleanupInterval time.Duration
 	MaxSessions            int
 
+	// Clearance cache (Layer-2 of the clean-egress path)
+	ClearanceCacheEnabled bool          // Reuse minted cf_clearance across requests (CLEARANCE_CACHE_ENABLED)
+	ClearanceTTL          time.Duration // Max lifetime of a cached cf_clearance (CLEARANCE_TTL)
+
 	// Timeouts
 	DefaultTimeout time.Duration
 	MaxTimeout     time.Duration
@@ -130,6 +134,9 @@ func Load() *Config {
 		SessionTTL:             getEnvDuration("SESSION_TTL", 30*time.Minute),
 		SessionCleanupInterval: getEnvDuration("SESSION_CLEANUP_INTERVAL", 1*time.Minute),
 		MaxSessions:            getEnvInt("MAX_SESSIONS", 100),
+
+		ClearanceCacheEnabled: getEnvBool("CLEARANCE_CACHE_ENABLED", true),
+		ClearanceTTL:          getEnvDuration("CLEARANCE_TTL", 25*time.Minute),
 
 		// Timeouts
 		DefaultTimeout: getEnvDuration("DEFAULT_TIMEOUT", 60*time.Second),
