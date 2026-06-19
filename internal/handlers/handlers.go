@@ -237,6 +237,13 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 		}
 	}
 
+	// Layer-1 clean-egress path: sticky proxy pool (same exit IP per domain).
+	if proxies := solver.ParseProxyList(cfg.ProxyList); len(proxies) > 0 {
+		strategy := solver.ParseEgressStrategy(cfg.ProxyStrategy)
+		solverInstance.SetEgressPool(solver.NewEgressPool(proxies, strategy))
+		log.Info().Int("proxies", len(proxies)).Str("strategy", string(strategy)).Msg("Clean-egress proxy pool enabled")
+	}
+
 	// Layer-2 clean-egress path: reuse minted cf_clearance across requests.
 	if cfg.ClearanceCacheEnabled {
 		solverInstance.SetClearanceCache(solver.NewClearanceCache(cfg.ClearanceTTL, 0))

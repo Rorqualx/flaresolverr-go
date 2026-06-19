@@ -480,6 +480,10 @@ All configuration is done via environment variables.
 | `PROXY_URL` | (none) | Default proxy URL for all requests |
 | `PROXY_USERNAME` | (none) | Default proxy username |
 | `PROXY_PASSWORD` | (none) | Default proxy password |
+| `PROXY_LIST` | (none) | Pool of egress proxies (comma/newline-separated, embedded `user:pass@` ok). Enables clean-egress routing |
+| `PROXY_STRATEGY` | `sticky-domain` | Egress selection: `sticky-domain` (same exit IP per site — keeps cf_clearance valid), `round-robin`, or `per-request` |
+| `CLEARANCE_CACHE_ENABLED` | `true` | Reuse a minted `cf_clearance` (+UA) per domain/egress to skip repeat solves |
+| `CLEARANCE_TTL` | `25m` | Max lifetime of a cached `cf_clearance` |
 
 ### Security Settings
 
