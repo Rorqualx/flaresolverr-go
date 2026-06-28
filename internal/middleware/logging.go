@@ -7,8 +7,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
+
+// infraLogPaths holds monitoring endpoints whose request logs are demoted to
+// debug, so health polling doesn't spam the default info log (#14).
+var infraLogPaths = map[string]bool{"/health": true}
+
+// requestLogLevel returns the log level for a completed request. Monitoring
+// endpoints (see infraLogPaths) are demoted to debug; everything else stays at
+// info.
+func requestLogLevel(path string) zerolog.Level {
+	if infraLogPaths[path] {
+		return zerolog.DebugLevel
+	}
+	return zerolog.InfoLevel
+}
 
 // sensitiveParams contains query parameter names that may contain secrets
 // and should be redacted in logs.
@@ -112,7 +127,7 @@ func Logging(next http.Handler) http.Handler {
 		// Log after completion
 		duration := time.Since(start)
 
-		log.Info().
+		log.WithLevel(requestLogLevel(r.URL.Path)).
 			Str("method", r.Method).
 			Str("path", sanitizeURLForLogging(r.URL.String())).
 			Str("remote_addr", maskIP(r.RemoteAddr)).

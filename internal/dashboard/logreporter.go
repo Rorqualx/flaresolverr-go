@@ -86,8 +86,9 @@ func (r *LogReporter) reportLoop() {
 func (r *LogReporter) report() {
 	snap := r.collector.Collect(logReporterMaxRows)
 
-	// Server stats
-	log.Info().
+	// Server stats — demoted to debug so periodic stats don't spam the default
+	// info log (#14); surface with LOG_LEVEL=debug.
+	log.Debug().
 		Str("uptime", formatDuration(snap.Uptime)).
 		Int64("total_requests", snap.TotalRequests).
 		Str("req_per_sec", fmt.Sprintf("%.1f", snap.RequestsPerSec)).
@@ -101,7 +102,7 @@ func (r *LogReporter) report() {
 
 	// Top domains (if any)
 	for _, d := range snap.TopDomains {
-		log.Info().
+		log.Debug().
 			Str("domain", d.Domain).
 			Int64("requests", d.RequestCount).
 			Str("success_rate", fmt.Sprintf("%.0f%%", d.SuccessRate)).

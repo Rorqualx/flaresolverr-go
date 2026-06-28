@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 )
 
@@ -88,6 +90,27 @@ func TestLoggingMiddlewareCapturesStatusCode(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("Expected status 404, got %d", w.Code)
+	}
+}
+
+func TestRequestLogLevel(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want zerolog.Level
+	}{
+		{"health is demoted to debug", "/health", zerolog.DebugLevel},
+		{"v1 stays info", "/v1", zerolog.InfoLevel},
+		{"index stays info", "/", zerolog.InfoLevel},
+		{"unknown path stays info", "/whatever", zerolog.InfoLevel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := requestLogLevel(tt.path); got != tt.want {
+				t.Errorf("requestLogLevel(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 

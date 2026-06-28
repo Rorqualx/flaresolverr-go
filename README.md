@@ -576,7 +576,7 @@ When `SELECTORS_REMOTE_URL` is configured, selectors are fetched periodically fr
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
+| `LOG_LEVEL` | `info` | Log level (trace, debug, info, warn, error). Health-check request logs and periodic `Server stats` are emitted at `debug`, so set `LOG_LEVEL=debug` to see them. |
 | `LOG_HTML` | `false` | Log HTML responses (verbose) |
 | `LOG_FILE` | (none) | Path to log file (in addition to stdout) |
 | `TZ` | (none) | Browser timezone (e.g., `America/New_York`) |

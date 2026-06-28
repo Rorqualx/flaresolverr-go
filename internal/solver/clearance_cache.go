@@ -26,8 +26,8 @@ const (
 	cfClearanceCookie   = "cf_clearance"
 )
 
-// clearanceEntry holds reusable Cloudflare clearance state for one (domain, egress).
-type clearanceEntry struct {
+// ClearanceEntry holds reusable Cloudflare clearance state for one (domain, egress).
+type ClearanceEntry struct {
 	cookies   []types.RequestCookie // ready to inject before navigation
 	userAgent string
 	expiresAt time.Time
@@ -35,31 +35,31 @@ type clearanceEntry struct {
 
 // ClearanceCache is a bounded, TTL'd store of cf_clearance cookies.
 type ClearanceCache struct {
-	mu      sync.RWMutex
-	entries map[string]*clearanceEntry
-	ttl     time.Duration
-	max     int
-	now     func() time.Time // injectable for tests
+	mu         sync.RWMutex
+	entries    map[string]*ClearanceEntry
+	ttl        time.Duration
+	maxEntries int
+	now        func() time.Time // injectable for tests
 }
 
 // NewClearanceCache creates a cache with the given TTL ceiling and max entries.
-func NewClearanceCache(ttl time.Duration, max int) *ClearanceCache {
+func NewClearanceCache(ttl time.Duration, maxEntries int) *ClearanceCache {
 	if ttl <= 0 {
 		ttl = defaultClearanceTTL
 	}
-	if max <= 0 {
-		max = maxClearanceEntries
+	if maxEntries <= 0 {
+		maxEntries = maxClearanceEntries
 	}
 	return &ClearanceCache{
-		entries: make(map[string]*clearanceEntry),
-		ttl:     ttl,
-		max:     max,
-		now:     time.Now,
+		entries:    make(map[string]*ClearanceEntry),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		now:        time.Now,
 	}
 }
 
 // Get returns a fresh cached clearance for (domain, egress), or nil on miss/expiry.
-func (c *ClearanceCache) Get(domain, egress string) *clearanceEntry {
+func (c *ClearanceCache) Get(domain, egress string) *ClearanceEntry {
 	if c == nil || domain == "" {
 		return nil
 	}
@@ -103,13 +103,13 @@ func (c *ClearanceCache) Put(domain, egress, userAgent string, cookies []*proto.
 		return // already expired; nothing worth caching
 	}
 
-	entry := &clearanceEntry{cookies: reqCookies, userAgent: userAgent, expiresAt: expiresAt}
+	entry := &ClearanceEntry{cookies: reqCookies, userAgent: userAgent, expiresAt: expiresAt}
 	key := clearanceKey(domain, egress)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[key] = entry
-	if len(c.entries) > c.max {
+	if len(c.entries) > c.maxEntries {
 		c.evictLocked(now)
 	}
 }
@@ -122,7 +122,7 @@ func (c *ClearanceCache) evictLocked(now time.Time) {
 			delete(c.entries, k)
 		}
 	}
-	for len(c.entries) > c.max {
+	for len(c.entries) > c.maxEntries {
 		var oldestKey string
 		var oldest time.Time
 		for k, e := range c.entries {

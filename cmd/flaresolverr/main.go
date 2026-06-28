@@ -290,6 +290,8 @@ func setupLogging(level, logFile string) {
 	log.Logger = log.Output(output)
 
 	switch level {
+	case "trace":
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
 	case "debug":
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	case "info":
