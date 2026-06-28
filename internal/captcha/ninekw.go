@@ -209,7 +209,7 @@ func (s *NineKwSolver) submit(ctx context.Context, oldsource, sitekey, pageURL, 
 }
 
 // poll retrieves the solved token, blocking until ready, the budget expires, or
-// the context is cancelled.
+// the context is canceled.
 func (s *NineKwSolver) poll(ctx context.Context, captchaID string) (string, error) {
 	pollCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()

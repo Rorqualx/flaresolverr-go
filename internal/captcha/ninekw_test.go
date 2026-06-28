@@ -67,7 +67,7 @@ func TestNineKwSolver_SolveTurnstile_Unsupported(t *testing.T) {
 }
 
 func TestNineKwSolver_SolveHCaptcha_Success(t *testing.T) {
-	const wantToken = "P0_eyJ0eXAfor-hcaptcha"
+	const wantToken = "P0_eyJ0eXAfor-hcaptcha" //nolint:gosec // test fixture, not a real credential
 	polls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()

@@ -13,7 +13,7 @@ func TestGate2CorrectionsScriptContent(t *testing.T) {
 	mustContain := []string{
 		"WebGLRenderingContext",
 		"WebGL2RenderingContext",
-		"ANGLE (Intel",       // Linux ANGLE renderer
+		"ANGLE (Intel",        // Linux ANGLE renderer
 		"Google Inc. (Intel)", // Linux ANGLE vendor
 		"availWidth",
 		"availHeight",
