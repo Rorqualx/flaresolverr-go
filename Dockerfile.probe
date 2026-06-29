@@ -1,0 +1,15 @@
+# Investigation-only image for cmd/probe-oopif (GitHub issue #11 Part 2).
+# Compiles the probe, then layers it onto the investigation image so it runs
+# against the SAME Chromium 136 as production. Not used by CI or releases.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache git ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /probe ./cmd/probe-oopif
+
+FROM flaresolverr-go:investigation
+COPY --from=builder /probe /usr/local/bin/probe
+USER flaresolverr
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
