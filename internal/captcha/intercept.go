@@ -99,11 +99,16 @@ const turnstileInterceptorJS = `
 })();
 `
 
-// interceptors tracks installed pages so Read/Inject can find them, keyed by TargetID.
-var interceptors sync.Map // map[proto.TargetTargetID]struct{}
+// interceptors tracks installed pages so Read/Inject can find them, keyed by
+// TargetID. The value is the page's *oopifState (auto-attach capture for its
+// out-of-process iframe children); see oopif.go.
+var interceptors sync.Map // map[proto.TargetTargetID]*oopifState
 
 // InstallTurnstileInterceptor registers the render() interceptor on the page. It
 // must be called BEFORE navigation so the script is present at document_start.
+// It also installs OOPIF auto-attach (oopif.go) so managed-challenge Turnstile
+// widgets — which render in a cross-origin out-of-process iframe invisible to the
+// main frame — are captured too.
 // Best-effort: failures are logged but never fatal — DOM/iframe/pierce extraction
 // remains as a fallback (see extraction.go).
 func InstallTurnstileInterceptor(page *rod.Page) {
@@ -111,17 +116,37 @@ func InstallTurnstileInterceptor(page *rod.Page) {
 		log.Debug().Err(err).Msg("Failed to register turnstile interceptor")
 		return
 	}
-	interceptors.Store(page.TargetID, struct{}{})
-	log.Debug().Msg("Turnstile render interceptor installed")
+	interceptors.Store(page.TargetID, installOOPIFCapture(page))
+	log.Debug().Msg("Turnstile render interceptor installed (main frame + OOPIF auto-attach)")
+}
+
+// loadState returns the page's interceptor state, or (nil, false) if not installed.
+func loadState(page *rod.Page) (*oopifState, bool) {
+	v, ok := interceptors.Load(page.TargetID)
+	if !ok {
+		return nil, false
+	}
+	st, _ := v.(*oopifState)
+	return st, true
 }
 
 // ReadCapturedChallengeParams returns the parameters captured from
-// turnstile.render() in the main frame, or (nil, false) if nothing usable was
-// captured.
+// turnstile.render(). It checks the main frame first, then any captured
+// out-of-process iframe (managed-challenge case). Returns (nil, false) if nothing
+// usable was captured.
 func ReadCapturedChallengeParams(page *rod.Page) (*ChallengeParams, bool) {
-	if _, ok := interceptors.Load(page.TargetID); !ok {
+	st, ok := loadState(page)
+	if !ok {
 		return nil, false
 	}
+	if p, ok := readMainFrameParams(page); ok {
+		return p, true
+	}
+	return st.params()
+}
+
+// readMainFrameParams reads window.__cfChallengeParams from the page's main frame.
+func readMainFrameParams(page *rod.Page) (*ChallengeParams, bool) {
 	res, err := (proto.RuntimeEvaluate{
 		Expression:    `JSON.stringify(window.__cfChallengeParams || null)`,
 		ReturnByValue: true,
@@ -133,22 +158,17 @@ func ReadCapturedChallengeParams(page *rod.Page) (*ChallengeParams, bool) {
 	if raw == "" || raw == "null" {
 		return nil, false
 	}
-	var params ChallengeParams
-	if err := json.Unmarshal([]byte(raw), &params); err != nil {
-		return nil, false
-	}
-	if !params.hasSiteKey() {
-		return nil, false
-	}
-	return &params, true
+	return parseChallengeParams([]byte(raw))
 }
 
 // InjectCapturedCallback delivers a solved token through the turnstile.render
 // callback captured at render time. This is the correct completion path for a
 // Turnstile widget — writing the cf-turnstile-response textarea is not always
-// enough. Returns true if the callback fired.
+// enough. It tries the main frame first, then any captured OOPIF child. Returns
+// true if the callback fired.
 func InjectCapturedCallback(page *rod.Page, token string) bool {
-	if _, ok := interceptors.Load(page.TargetID); !ok {
+	st, ok := loadState(page)
+	if !ok {
 		return false
 	}
 	tokenJSON, err := json.Marshal(token)
@@ -157,19 +177,25 @@ func InjectCapturedCallback(page *rod.Page, token string) bool {
 	}
 	expr := `(() => { try { if (typeof window.__cfChallengeCallback === 'function') { window.__cfChallengeCallback(` +
 		string(tokenJSON) + `); return true; } } catch (e) {} return false; })()`
-	res, err := (proto.RuntimeEvaluate{Expression: expr, ReturnByValue: true}).Call(page)
-	if err != nil || res == nil || res.Result == nil {
-		return false
+
+	if res, err := (proto.RuntimeEvaluate{Expression: expr, ReturnByValue: true}).Call(page); err == nil &&
+		res != nil && res.Result != nil && res.Result.Value.Bool() {
+		log.Debug().Msg("Delivered token via captured turnstile callback (main frame)")
+		return true
 	}
-	if res.Result.Value.Bool() {
-		log.Debug().Msg("Delivered token via captured turnstile callback")
+	if st.injectCallback(expr) {
+		log.Debug().Msg("Delivered token via captured turnstile callback (OOPIF)")
 		return true
 	}
 	return false
 }
 
-// RemoveTurnstileInterceptor clears interception state for a page. Safe to call
-// on a page that was never instrumented.
+// RemoveTurnstileInterceptor clears interception state for a page and stops its
+// OOPIF event listener. Safe to call on a page that was never instrumented.
 func RemoveTurnstileInterceptor(page *rod.Page) {
-	interceptors.Delete(page.TargetID)
+	if v, ok := interceptors.LoadAndDelete(page.TargetID); ok {
+		if st, _ := v.(*oopifState); st != nil {
+			st.stop()
+		}
+	}
 }

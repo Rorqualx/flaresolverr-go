@@ -274,6 +274,14 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 
 	// 3. Disable features that can leak automation or IP information
 	// WebRtcHideLocalIpsWithMdns: Prevents mDNS from leaking local IPs
+	//
+	// DO NOT add "site-per-process" here. go-rod's default launcher disables it,
+	// but this Set() replaces that default — keeping site isolation ON. Cloudflare
+	// managed challenges render Turnstile in a cross-origin out-of-process iframe
+	// (OOPIF); disabling site isolation collapses that iframe into the parent
+	// process, so its render params (sitekey/action/cData/chlPageData) can no
+	// longer be captured via auto-attach. See internal/captcha/oopif.go and
+	// docs/INVESTIGATION-issue-11-oopif-probes.md.
 	disabledFeatures := "Translate,TranslateUI,BlinkGenPropertyTrees,WebRtcHideLocalIpsWithMdns"
 	l = l.Set("disable-features", disabledFeatures)
 
