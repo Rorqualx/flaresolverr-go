@@ -508,8 +508,10 @@ func startFixtureServers() {
   }, 900);
 </script></body></html>`))
 	})
-	go func() { _ = http.ListenAndServe("127.0.0.1:7000", parent) }()
-	go func() { _ = http.ListenAndServe("0.0.0.0:7001", child) }()
+	parentSrv := &http.Server{Addr: "127.0.0.1:7000", Handler: parent, ReadHeaderTimeout: 5 * time.Second}
+	childSrv := &http.Server{Addr: "0.0.0.0:7001", Handler: child, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = parentSrv.ListenAndServe() }()
+	go func() { _ = childSrv.ListenAndServe() }()
 	time.Sleep(400 * time.Millisecond) // let listeners bind
 }
 
