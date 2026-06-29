@@ -102,14 +102,14 @@ func (p *challengeParams) hasSiteKey() bool { return p != nil && p.SiteKey != ""
 
 // childRecord is one attached target observed during the run.
 type childRecord struct {
-	ChildSessionID     string            `json:"child_session_id"`
-	EnvelopeSessionID  string            `json:"envelope_session_id"` // session the attach event ARRIVED on ("" == root/browser)
-	TargetID           string            `json:"target_id"`
-	Type               string            `json:"type"`
-	URL                string            `json:"url"`
-	WaitingForDebugger bool              `json:"waiting_for_debugger"`
-	SeenAtBrowserLevel bool              `json:"seen_at_browser_level"`
-	SeenAtPageLevel    bool              `json:"seen_at_page_level"`
+	ChildSessionID       string            `json:"child_session_id"`
+	EnvelopeSessionID    string            `json:"envelope_session_id"` // session the attach event ARRIVED on ("" == root/browser)
+	TargetID             string            `json:"target_id"`
+	Type                 string            `json:"type"`
+	URL                  string            `json:"url"`
+	WaitingForDebugger   bool              `json:"waiting_for_debugger"`
+	SeenAtBrowserLevel   bool              `json:"seen_at_browser_level"`
+	SeenAtPageLevel      bool              `json:"seen_at_page_level"`
 	IsCloudflareOOPIF    bool              `json:"is_cloudflare_oopif"`
 	InjectSteps          map[string]string `json:"inject_steps,omitempty"` // step -> "ok" | error
 	InterceptorInstalled bool              `json:"interceptor_installed"`  // proves document_start injection ran IN the child
