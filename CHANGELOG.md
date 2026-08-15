@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-15
+
+### Added
+- **Managed-challenge Turnstile param capture across OOPIF (#11)** - Completes the #11 work begun in v0.8.0. Cloudflare's *managed challenge* renders Turnstile from its own challenge platform into a cross-origin **out-of-process iframe** (OOPIF) nested in a closed shadow root — so `sitekey`, `action`, `cData`, and `chlPageData` exist only inside that separate CDP target and are invisible to `querySelector`, `getFrameTree`, `getTargets`, and the pierced DOM of the main target (the earlier "read the live DOM via `Runtime.evaluate`" approach is a no-op for this case). On installing the `turnstile.render` interceptor, the solver now enables CDP `Target.setAutoAttach{autoAttach, flatten, waitForDebuggerOnStart}` on the page session, listens for child-attach events on the **browser-level** event stream (go-rod's `Page.EachEvent` filters them out), injects the interceptor into each paused OOPIF child via `Page.addScriptToEvaluateOnNewDocument` at `document_start`, then resumes it with `Runtime.runIfWaitingForDebugger`. `ReadCapturedChallengeParams` / `InjectCapturedCallback` now also consult OOPIF children, so all four params are captured and the solved token is injected via the captured callback. Children are processed **synchronously and single-level** by design — a goroutine-per-child/recursive variant flooded CDP and pushed a theverge.com solve from 17s to 98s. The capture mechanism was validated end-to-end on a synthesized OOPIF (a two-origin `Document-Isolation-Policy` fixture; see `docs/INVESTIGATION-issue-11-oopif-probes.md`) and regression-validated live (nowsecure, theverge, example, filecrypt homepage — no hang, no CDP flood). **Known limitation:** even with valid params, a flagged IP/fingerprint can still withhold `cf_clearance` at submit time (the #13 wall) independent of the token — clean egress + the clearance cache remain the dominant levers there.
+  - `pool.go` carries a guard: never add `site-per-process` to `--disable-features`. go-rod's default launcher disables site isolation (`--disable-features=site-per-process` + `--disable-site-isolation-trials`), which collapses cross-origin iframes in-process and silently no-ops OOPIF auto-attach; the pool overrides that default, and re-disabling it would break this feature.
+
+### Changed
+- **Health-check and stats logs demoted to DEBUG (#14)** - Routine per-interval health-check and stats-reporter lines were logged at INFO, spamming logs during normal operation. They are now DEBUG, so default (INFO) logs stay quiet unless something is actually happening. Set `LOG_LEVEL=debug` to restore the previous verbosity.
+
 ## [0.8.0] - 2026-06-19
 
 ### Fixed
