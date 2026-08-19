@@ -2,6 +2,7 @@
 package captcha
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/go-rod/rod"
@@ -45,7 +46,117 @@ func ExtractTurnstileSitekey(page *rod.Page) (string, error) {
 		return sitekey, nil
 	}
 
+	// Method 5: Search OOPIF children's DOMs directly. For managed challenges
+	// (e.g. filecrypt.cc), the Turnstile widget renders inside a cross-origin
+	// out-of-process iframe. The pierce method can't see into OOPIFs (separate
+	// renderer process), but the interceptor's auto-attach tracks child sessions.
+	// Evaluate JS in each child to find the sitekey in its DOM.
+	sitekey, err = extractSitekeyFromOOPIFChildren(page)
+	if err == nil && sitekey != "" {
+		log.Debug().Str("method", "oopif_dom").Msg("Extracted sitekey via OOPIF child DOM search")
+		return sitekey, nil
+	}
+
 	return "", types.ErrCaptchaSitekeyNotFound
+}
+
+// extractSitekeyFromOOPIFChildren searches for the sitekey in the DOM of any
+// OOPIF (out-of-process iframe) child sessions tracked by the interceptor.
+// This handles managed challenges (e.g. filecrypt.cc) where the Turnstile widget
+// renders inside a cross-origin OOPIF invisible to the main frame's DOM methods.
+// The interceptor's auto-attach tracks child sessions; we evaluate JS in each to
+// find the sitekey directly in its DOM.
+func extractSitekeyFromOOPIFChildren(page *rod.Page) (string, error) {
+	st, ok := loadState(page)
+	if !ok || st == nil || st.browser == nil {
+		return "", fmt.Errorf("no OOPIF state available")
+	}
+
+	// Get child sessions from the OOPIF state
+	st.mu.Lock()
+	children := append([]proto.TargetSessionID(nil), st.children...)
+	st.mu.Unlock()
+
+	if len(children) == 0 {
+		return "", fmt.Errorf("no OOPIF children tracked")
+	}
+
+	// JS to extract sitekey from a frame's DOM
+	extractJS := `
+	(function() {
+		// Method 1: Look for data-sitekey attribute
+		var el = document.querySelector('[data-sitekey]');
+		if (el) {
+			var key = el.getAttribute('data-sitekey');
+			if (key && key.length > 10) return key;
+		}
+
+		// Method 2: Look for Turnstile iframe with sitekey in URL
+		var iframes = document.querySelectorAll('iframe');
+		for (var i = 0; i < iframes.length; i++) {
+			var src = iframes[i].src || '';
+			if (src.indexOf('challenges.cloudflare.com') !== -1) {
+				// Try /sitekey/ pattern
+				var match = src.match(/\/sitekey\/([0-9a-zA-Z_-]+)/);
+				if (match && match[1] && match[1].length > 10) return match[1];
+				// Try sitekey= query param
+				match = src.match(/[?&]sitekey=([0-9a-zA-Z_-]+)/);
+				if (match && match[1] && match[1].length > 10) return match[1];
+				// Try bare 0x token in path (managed challenge format)
+				match = src.match(/\/(0x[0-9a-zA-Z]{16,})\//);
+				if (match && match[1]) return match[1];
+			}
+		}
+
+		// Method 3: Check window.__cfChallengeParams (interceptor may have captured)
+		if (window.__cfChallengeParams && window.__cfChallengeParams.sitekey) {
+			return window.__cfChallengeParams.sitekey;
+		}
+
+		return '';
+	})()
+	`
+
+	// Try each child session
+	for _, child := range children {
+		result, err := rawCDP(st.browser, child, "Runtime.evaluate", map[string]any{
+			"expression":    extractJS,
+			"returnByValue": true,
+		})
+		if err != nil {
+			log.Debug().Err(err).Msg("OOPIF DOM search: Runtime.evaluate failed")
+			continue
+		}
+
+		sitekey := extractEvalString(result)
+		if sitekey != "" {
+			log.Debug().Str("sitekey", sitekey[:min(10, len(sitekey))]+"...").Msg("Found sitekey in OOPIF child DOM")
+			return sitekey, nil
+		}
+	}
+
+	return "", fmt.Errorf("no sitekey found in %d OOPIF children", len(children))
+}
+
+// extractEvalString extracts a string value from a CDP Runtime.evaluate response.
+func extractEvalString(raw []byte) string {
+	var out struct {
+		Result struct {
+			Value string `json:"value"`
+			Type  string `json:"type"`
+		} `json:"result"`
+		ExceptionDetails *struct{} `json:"exceptionDetails"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return ""
+	}
+	if out.ExceptionDetails != nil {
+		return ""
+	}
+	if out.Result.Type != "string" {
+		return ""
+	}
+	return out.Result.Value
 }
 
 // extractSitekeyViaPierce walks the entire DOM tree (including closed shadow

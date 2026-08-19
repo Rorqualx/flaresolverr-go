@@ -132,3 +132,51 @@ func TestFindSubstring(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractEvalString(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{
+			name: "valid string result",
+			raw:  []byte(`{"result":{"value":"0x4AAAAAAADnPIDROrmt1Wwj","type":"string"}}`),
+			want: "0x4AAAAAAADnPIDROrmt1Wwj",
+		},
+		{
+			name: "empty string result",
+			raw:  []byte(`{"result":{"value":"","type":"string"}}`),
+			want: "",
+		},
+		{
+			name: "non-string type",
+			raw:  []byte(`{"result":{"value":42,"type":"number"}}`),
+			want: "",
+		},
+		{
+			name: "exception details present",
+			raw:  []byte(`{"result":{"value":"test","type":"string"},"exceptionDetails":{}}`),
+			want: "",
+		},
+		{
+			name: "invalid json",
+			raw:  []byte(`not json`),
+			want: "",
+		},
+		{
+			name: "nil input",
+			raw:  nil,
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractEvalString(tt.raw)
+			if got != tt.want {
+				t.Errorf("extractEvalString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
