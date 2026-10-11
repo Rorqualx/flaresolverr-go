@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-11
+
 ### Fixed
 - **Browsers closed while still in use** - The 30-minute age recycle and the memory-pressure recycle closed every tracked browser, including ones serving a request or held by a session, and left the dead browser queued so its replacement was discarded. Recycling now replaces idle browsers only; a checked-out browser is flagged and replaced when it is released.
 - **Double release of pooled browsers** - `sessions.create` with an existing session ID released the same browser twice, so two requests could share one browser and the first to finish closed the other's page. `Release` now ignores a browser that is not checked out, and closes (never queues) a browser the pool does not own. `Session.Create` no longer releases the browser on error: the caller keeps ownership until it succeeds.
