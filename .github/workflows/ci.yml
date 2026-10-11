@@ -23,7 +23,11 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
         with:
-          version: latest
+          # Pinned v1 release built from source with the job's Go toolchain:
+          # prebuilt v1 binaries are compiled with Go 1.24 and refuse a go.mod
+          # that targets a newer Go. Moving to v2 needs a .golangci.yml migration.
+          version: v1.64.8
+          install-mode: goinstall
           args: --config .golangci.yml
 
   test:

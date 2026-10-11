@@ -254,14 +254,14 @@ func TestNineKwSolver_TransportErrorOmitsAPIKey(t *testing.T) {
 	baseURL := server.URL
 	server.Close() // Connection refused from here on
 
-	const apiKey = "secret-9kw-key-do-not-log"
-	solver := NewNineKwSolver(NineKwConfig{APIKey: apiKey, BaseURL: baseURL})
+	const keyMarker = "ninekw-test-value-0001"
+	solver := NewNineKwSolver(NineKwConfig{APIKey: keyMarker, BaseURL: baseURL})
 
 	_, err := solver.Balance(context.Background())
 	if err == nil {
 		t.Fatal("Balance() error = nil, want transport error")
 	}
-	if strings.Contains(err.Error(), apiKey) || strings.Contains(err.Error(), "apikey=") {
+	if strings.Contains(err.Error(), keyMarker) || strings.Contains(err.Error(), "apikey=") {
 		t.Errorf("error leaks API key or query string: %v", err)
 	}
 }
