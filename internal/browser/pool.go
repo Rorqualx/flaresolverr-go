@@ -6,6 +6,7 @@ package browser
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -75,12 +76,42 @@ type Pool struct {
 	stats PoolStats
 }
 
-// browserEntry tracks metadata for each browser in the pool.
+// entryState describes where a pooled browser currently is.
+type entryState int
+
+const (
+	entryIdle      entryState = iota // queued in Pool.available, ready to acquire
+	entryInUse                       // checked out via Acquire (request or session)
+	entryRecycling                   // being closed and replaced
+	entryDead                        // replacement failed; the health routine retries
+)
+
+// browserEntry tracks one pool slot. The slot outlives the browser in it:
+// recycling replaces entry.browser in place.
 type browserEntry struct {
-	browser   *rod.Browser
-	createdAt time.Time
+	browser   *rod.Browser // nil while recycling or dead; guarded by Pool.mu
+	createdAt time.Time    // guarded by Pool.mu
 	useCount  atomic.Int64
+
+	// state and recycleOnRelease are guarded by Pool.mu.
+	state entryState
+	// recycleOnRelease defers a recycle of an in-use browser until its holder
+	// releases it, so a browser is never closed under a running request.
+	recycleOnRelease bool
 }
+
+// Timeouts for browser lifecycle operations. Every CDP call the pool makes on
+// its own behalf is bounded: go-rod applies no timeout of its own.
+const (
+	browserLaunchTimeout  = 60 * time.Second
+	browserRespawnTimeout = 30 * time.Second
+	browserCloseTimeout   = 5 * time.Second  // Browser.close CDP call
+	browserExitGrace      = 5 * time.Second  // wait for the process to exit after close
+	browserKillGrace      = 5 * time.Second  // wait for the process to exit after kill
+	healthCheckTimeout    = 10 * time.Second // create + navigate + close a blank page
+	releaseCleanupTimeout = 15 * time.Second // close leftover pages on release
+	maxBrowserAge         = 30 * time.Minute // idle browsers older than this are recycled
+)
 
 // GetControlURL returns the WebSocket debugging URL for a browser instance.
 // Used by the solver's disconnect/reconnect bypass to reconnect to a browser
@@ -100,11 +131,34 @@ func (p *Pool) GetBrowserPath() string {
 	return p.config.BrowserPath
 }
 
-// RecycleBrowser forces a browser to be recycled (replaced with a new one)
-// instead of being returned to the pool. Call this when a browser is known
-// to be in a bad state after a long operation.
+// RecycleBrowser marks a checked-out pooled browser for replacement. The
+// recycle happens when the holder calls Release, never while the browser is
+// still in use. Browsers the pool does not own (SpawnWithProxy,
+// SpawnWithOptions) are ignored: their owner tears them down.
 func (p *Pool) RecycleBrowser(browser *rod.Browser) {
-	go p.recycleBrowser(browser)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	entry := p.entryFor(browser)
+	if entry == nil || entry.state != entryInUse {
+		log.Debug().Msg("RecycleBrowser ignored: browser is not a checked-out pool member")
+		return
+	}
+	entry.recycleOnRelease = true
+}
+
+// entryFor returns the pool slot holding browser, or nil if the pool does not
+// own it. Caller must hold p.mu.
+func (p *Pool) entryFor(browser *rod.Browser) *browserEntry {
+	if browser == nil {
+		return nil
+	}
+	for _, entry := range p.browsers {
+		if entry.browser == browser {
+			return entry
+		}
+	}
+	return nil
 }
 
 // PoolStats provides statistics about pool usage.
@@ -366,68 +420,74 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 // This is an internal method - external code should use Acquire/Release.
 // Each call creates a fresh launcher since launchers can only be used once.
 // The context parameter allows for cancellation during shutdown.
-//
-// Fix HIGH: Properly handles Chrome process cleanup on Connect() failure,
-// and adds timeout to Launch() operation to prevent indefinite blocking.
 func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
-	// Check context before starting expensive operation
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-	}
 	log.Debug().Msg("Spawning new browser instance")
 
-	// Create a fresh launcher for this browser instance
-	// (launchers can only launch once, so we need a new one each time)
 	// Pass the default proxy from config (may be empty)
-	l := p.createLauncher(p.config.ProxyURL)
+	browser, err := p.launchAndConnect(ctx, p.createLauncher(p.config.ProxyURL))
+	if err != nil {
+		return nil, err
+	}
 
-	// Fix HIGH: Add timeout to Launch() to prevent indefinite blocking
-	const launchTimeout = 60 * time.Second
-	launchCtx, launchCancel := context.WithTimeout(context.Background(), launchTimeout)
+	log.Debug().Msg("Browser spawned successfully")
+	return browser, nil
+}
+
+// launchAndConnect starts the Chrome process for l and connects to it over CDP.
+// On every failure path the process is killed and its user-data dir removed.
+func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod.Browser, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	launchCtx, launchCancel := context.WithTimeout(ctx, browserLaunchTimeout)
 	defer launchCancel()
 
-	// Launch the browser process with timeout
-	launchDone := make(chan struct{})
-	var url string
-	var launchErr error
+	type launchResult struct {
+		url string
+		err error
+	}
+	launched := make(chan launchResult, 1)
 	go func() {
-		url, launchErr = l.Launch()
-		close(launchDone)
+		url, err := l.Launch()
+		launched <- launchResult{url: url, err: err}
 	}()
 
+	var url string
 	select {
-	case <-launchDone:
-		if launchErr != nil {
-			return nil, fmt.Errorf("failed to launch browser: %w", launchErr)
+	case res := <-launched:
+		if res.err != nil {
+			p.discardLauncher(l)
+			return nil, fmt.Errorf("failed to launch browser: %w", res.err)
 		}
+		url = res.url
 	case <-launchCtx.Done():
-		// Launch timed out - try to kill any orphaned process
-		l.Kill()
-		return nil, fmt.Errorf("browser launch timed out after %v", launchTimeout)
-	case <-ctx.Done():
-		// Parent context canceled
-		l.Kill()
-		return nil, ctx.Err()
+		// Launch is still running. Reap whatever it eventually starts, so a
+		// Chrome that comes up late is not orphaned.
+		p.closeWg.Add(1)
+		go func() {
+			defer p.closeWg.Done()
+			<-launched
+			p.discardLauncher(l)
+		}()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("browser launch timed out after %v", browserLaunchTimeout)
 	}
 
 	// Connect to the browser via CDP
 	browser := rod.New().ControlURL(url)
 	if err := browser.Connect(); err != nil {
-		// Fix HIGH: Chrome process was launched but Connect failed
-		// We must close the browser to clean up the orphaned Chrome process
+		// Chrome is running but unreachable: kill it rather than wait for it.
 		log.Warn().Err(err).Str("url", url).Msg("Failed to connect to browser, cleaning up process")
-		if closeErr := browser.Close(); closeErr != nil {
-			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
-		}
-		l.Cleanup() // remove the /tmp/rod/user-data-<random> dir we just orphaned
+		p.discardLauncher(l)
 		return nil, fmt.Errorf("failed to connect to browser: %w", err)
 	}
 
-	// Configure browser-level settings
 	// Only ignore certificate errors if explicitly configured (security risk)
 	if p.config.IgnoreCertErrors {
 		log.Warn().Msg("Certificate validation disabled - MITM attacks possible")
@@ -436,14 +496,23 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 		}
 	}
 
-	log.Debug().Str("url", url).Msg("Browser spawned successfully")
-
 	// Store control URL for reconnection support
 	p.controlURLs.Store(browser, url)
 	// Retain the launcher so we can clean its user-data dir on close
 	p.launchers.Store(browser, l)
 
 	return browser, nil
+}
+
+// discardLauncher kills the process started by l (if any) and removes its
+// user-data dir. Used when a launch did not produce a usable browser.
+func (p *Pool) discardLauncher(l *launcher.Launcher) {
+	l.Kill() // no-op if the process never started
+	if dir := l.Get(flags.UserDataDir); dir != "" {
+		if err := os.RemoveAll(dir); err != nil {
+			log.Warn().Err(err).Str("dir", dir).Msg("Failed to remove browser user-data dir")
+		}
+	}
 }
 
 // LaunchOptions configures a custom browser spawn with per-session overrides.
@@ -471,22 +540,21 @@ type LaunchOptions struct {
 //	}
 //	defer pool.CleanupBrowser(browser)
 func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.Browser, error) {
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
+	// Fall back to the configured default proxy: a session with custom flags
+	// but no proxy of its own must not bypass PROXY_URL.
+	proxyURL := opts.ProxyURL
+	if proxyURL == "" {
+		proxyURL = p.config.ProxyURL
 	}
 
 	log.Debug().
-		Str("proxy", security.RedactProxyURL(opts.ProxyURL)).
+		Str("proxy", security.RedactProxyURL(proxyURL)).
 		Str("window_size", opts.WindowSize).
 		Str("language", opts.Language).
 		Msg("Spawning browser with custom options")
 
 	// Create launcher with proxy
-	l := p.createLauncher(opts.ProxyURL)
+	l := p.createLauncher(proxyURL)
 
 	// Apply per-session overrides
 	if opts.WindowSize != "" {
@@ -519,52 +587,12 @@ func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.B
 		}
 	}
 
-	// Launch with timeout (same pattern as SpawnWithProxy)
-	const launchTimeout = 60 * time.Second
-	launchCtx, launchCancel := context.WithTimeout(context.Background(), launchTimeout)
-	defer launchCancel()
-
-	launchDone := make(chan struct{})
-	var url string
-	var launchErr error
-	go func() {
-		url, launchErr = l.Launch()
-		close(launchDone)
-	}()
-
-	select {
-	case <-launchDone:
-		if launchErr != nil {
-			return nil, fmt.Errorf("failed to launch browser with custom options: %w", launchErr)
-		}
-	case <-launchCtx.Done():
-		l.Kill()
-		return nil, fmt.Errorf("browser launch timed out after %v", launchTimeout)
-	case <-ctx.Done():
-		l.Kill()
-		return nil, ctx.Err()
+	browser, err := p.launchAndConnect(ctx, l)
+	if err != nil {
+		return nil, fmt.Errorf("custom browser spawn failed: %w", err)
 	}
 
-	browser := rod.New().ControlURL(url)
-	if err := browser.Connect(); err != nil {
-		log.Warn().Err(err).Str("url", url).Msg("Failed to connect to browser, cleaning up process")
-		if closeErr := browser.Close(); closeErr != nil {
-			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
-		}
-		l.Cleanup() // remove the /tmp/rod/user-data-<random> dir we just orphaned
-		return nil, fmt.Errorf("failed to connect to browser: %w", err)
-	}
-
-	if p.config.IgnoreCertErrors {
-		if err := browser.IgnoreCertErrors(true); err != nil {
-			log.Warn().Err(err).Msg("Failed to set IgnoreCertErrors")
-		}
-	}
-
-	p.controlURLs.Store(browser, url)
-	p.launchers.Store(browser, l)
-
-	log.Debug().Str("url", url).Msg("Browser with custom options spawned successfully")
+	log.Debug().Msg("Browser with custom options spawned successfully")
 	return browser, nil
 }
 
@@ -581,79 +609,16 @@ func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.B
 //	    return err
 //	}
 //	defer pool.CleanupBrowser(browser)
-//
-// Fix HIGH: Properly handles Chrome process cleanup on Connect() failure,
-// and adds timeout to Launch() operation to prevent indefinite blocking.
 func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browser, error) {
-	// Check context before starting expensive operation
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-	}
-
 	// Use redacted proxy URL in logs to prevent credential exposure
 	log.Debug().Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Spawning browser with custom proxy")
 
-	// Create launcher with the specified proxy
-	l := p.createLauncher(proxyURL)
-
-	// Fix HIGH: Add timeout to Launch() to prevent indefinite blocking
-	const launchTimeout = 60 * time.Second
-	launchCtx, launchCancel := context.WithTimeout(context.Background(), launchTimeout)
-	defer launchCancel()
-
-	// Launch the browser process with timeout
-	launchDone := make(chan struct{})
-	var url string
-	var launchErr error
-	go func() {
-		url, launchErr = l.Launch()
-		close(launchDone)
-	}()
-
-	select {
-	case <-launchDone:
-		if launchErr != nil {
-			return nil, fmt.Errorf("failed to launch browser with proxy: %w", launchErr)
-		}
-	case <-launchCtx.Done():
-		// Launch timed out - try to kill any orphaned process
-		l.Kill()
-		return nil, fmt.Errorf("browser launch timed out after %v", launchTimeout)
-	case <-ctx.Done():
-		// Parent context canceled
-		l.Kill()
-		return nil, ctx.Err()
+	browser, err := p.launchAndConnect(ctx, p.createLauncher(proxyURL))
+	if err != nil {
+		return nil, fmt.Errorf("proxy browser spawn failed: %w", err)
 	}
 
-	// Connect to the browser via CDP
-	browser := rod.New().ControlURL(url)
-	if err := browser.Connect(); err != nil {
-		// Fix HIGH: Chrome process was launched but Connect failed
-		// We must close the browser to clean up the orphaned Chrome process
-		log.Warn().Err(err).Str("url", url).Msg("Failed to connect to browser, cleaning up process")
-		if closeErr := browser.Close(); closeErr != nil {
-			log.Warn().Err(closeErr).Msg("Failed to close browser after connect failure")
-		}
-		l.Cleanup() // remove the /tmp/rod/user-data-<random> dir we just orphaned
-		return nil, fmt.Errorf("failed to connect to browser: %w", err)
-	}
-
-	// Configure browser-level settings
-	if p.config.IgnoreCertErrors {
-		if err := browser.IgnoreCertErrors(true); err != nil {
-			log.Warn().Err(err).Msg("Failed to set IgnoreCertErrors")
-		}
-	}
-
-	p.controlURLs.Store(browser, url)
-	p.launchers.Store(browser, l)
-
-	// Use redacted proxy URL in logs to prevent credential exposure
-	log.Debug().Str("url", url).Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Browser with proxy spawned successfully")
+	log.Debug().Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Browser with proxy spawned successfully")
 	return browser, nil
 }
 
@@ -690,32 +655,27 @@ func (p *Pool) Acquire(ctx context.Context) (*rod.Browser, error) {
 				p.CleanupBrowser(browser) // safe on nil; also removes user-data dir
 				return nil, types.ErrBrowserPoolClosed
 			}
+			p.availableCount.Add(-1)
 
-			// Got a browser from the pool
+			entry := p.checkOut(browser)
+			if entry == nil {
+				// Token for a browser that is no longer an idle pool member
+				log.Warn().Msg("Dequeued a browser the pool no longer tracks as idle, skipping")
+				continue
+			}
 			p.stats.Acquired.Add(1)
 
 			// Verify browser is healthy before returning
-			// Fix: Only decrement availableCount AFTER health check succeeds
-			// to prevent TOCTOU race where count shows available but all are unhealthy
 			if !p.isHealthy(browser) {
 				log.Warn().Int("retry", retry).Msg("Acquired unhealthy browser, recycling")
 				p.stats.Errors.Add(1)
-				go p.recycleBrowser(browser) // Recycle in background
-				continue                     // Iterate instead of recurse
+				p.mu.Lock()
+				p.startRecycleLocked(entry)
+				p.mu.Unlock()
+				continue // Iterate instead of recurse
 			}
 
-			// Health check passed - now decrement available count
-			p.availableCount.Add(-1)
-
-			// Update use count (requires lock to safely access p.browsers)
-			p.mu.Lock()
-			for _, entry := range p.browsers {
-				if entry.browser == browser {
-					entry.useCount.Add(1)
-					break
-				}
-			}
-			p.mu.Unlock()
+			entry.useCount.Add(1)
 
 			log.Debug().
 				Int64("total_acquired", p.stats.Acquired.Load()).
@@ -737,185 +697,239 @@ func (p *Pool) Acquire(ctx context.Context) (*rod.Browser, error) {
 	return nil, fmt.Errorf("%w: all browsers unhealthy after %d retries", types.ErrBrowserUnhealthy, maxRetries)
 }
 
+// checkOut marks the slot holding browser as in use. It returns nil if the
+// browser is not an idle pool member (the token is stale).
+func (p *Pool) checkOut(browser *rod.Browser) *browserEntry {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	entry := p.entryFor(browser)
+	if entry == nil || entry.state != entryIdle {
+		return nil
+	}
+	entry.state = entryInUse
+	return entry
+}
+
 // Release returns a browser to the pool.
 // This method cleans up any pages and prepares the browser for reuse.
 //
-// It is safe to call Release multiple times or on a nil browser.
-// Fix #1, #2: Uses mutex to prevent TOCTOU race between closed check and channel send.
-// Fix #21: Logs and handles page cleanup failures properly.
+// It is safe to call Release on a nil browser, and a second Release of the
+// same checked-out browser is ignored. A browser the pool does not own is
+// closed rather than queued, so it can never be handed to another request.
 func (p *Pool) Release(browser *rod.Browser) {
 	if browser == nil {
 		return
 	}
 
-	// Acquire lock early to prevent race with Close()
-	// This ensures atomicity of closed check + channel send
 	p.mu.Lock()
-
-	// Check closed flag while holding lock
-	if p.closed.Load() {
+	entry := p.entryFor(browser)
+	closed := p.closed.Load()
+	if entry != nil && entry.state != entryInUse {
 		p.mu.Unlock()
-		// Pool is closed, just close the browser and remove its user-data dir
+		log.Warn().Msg("Ignoring release of a pooled browser that is not checked out (duplicate release)")
+		return
+	}
+	if entry != nil {
+		p.stats.Released.Add(1)
+	}
+	p.mu.Unlock() // Release lock during slow I/O
+
+	if entry == nil {
+		// Not a pool member: a dedicated browser, a browser already replaced by
+		// a recycle, or any browser after Close(). Tear it down.
+		if !closed {
+			log.Warn().Msg("Release called for a browser the pool does not own, closing it")
+		}
 		p.CleanupBrowser(browser)
 		return
 	}
-
-	p.stats.Released.Add(1)
-	p.mu.Unlock() // Release lock during page cleanup (slow I/O)
+	if closed {
+		p.CleanupBrowser(browser)
+		return
+	}
 
 	// Clean up all pages before returning to pool
 	// This prevents memory accumulation across requests
-	// Fix #21: Track cleanup failures and mark browser unhealthy if needed
-	cleanupFailed := false
-	pages, err := browser.Pages()
-	if err != nil {
-		log.Warn().Err(err).Msg("Failed to get pages for cleanup, browser may be unhealthy")
-		cleanupFailed = true
-	} else {
-		for _, page := range pages {
-			if err := page.Navigate("about:blank"); err != nil {
-				log.Warn().Err(err).Msg("Failed to navigate page to blank during cleanup")
-				cleanupFailed = true
-			}
-			if err := page.Close(); err != nil {
-				log.Warn().Err(err).Msg("Failed to close page during cleanup")
-				cleanupFailed = true
-			}
-		}
-	}
+	cleanupFailed := !p.closeAllPages(browser)
 
-	// If cleanup failed, recycle the browser instead of returning to pool
-	if cleanupFailed {
-		log.Warn().Msg("Page cleanup failed, recycling browser instead of returning to pool")
-		go p.recycleBrowser(browser)
-		return
-	}
-
-	// Re-acquire lock for channel send
+	// Re-acquire lock for the state change and channel send
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	// Double-check closed flag (may have changed during page cleanup)
 	if p.closed.Load() {
+		p.mu.Unlock()
 		p.CleanupBrowser(browser)
 		return
 	}
 
-	// Safe to send - we hold the lock and confirmed not closed
+	if cleanupFailed || entry.recycleOnRelease {
+		if cleanupFailed {
+			log.Warn().Msg("Page cleanup failed, recycling browser instead of returning to pool")
+		}
+		p.startRecycleLocked(entry)
+		p.mu.Unlock()
+		return
+	}
+
+	p.enqueueLocked(entry)
+	p.mu.Unlock()
+
+	log.Debug().
+		Int64("total_released", p.stats.Released.Load()).
+		Msg("Browser released to pool")
+}
+
+// closeAllPages navigates every open page to about:blank and closes it.
+// Returns false if any step failed or timed out.
+func (p *Pool) closeAllPages(browser *rod.Browser) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), releaseCleanupTimeout)
+	defer cancel()
+
+	pages, err := browser.Context(ctx).Pages()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get pages for cleanup, browser may be unhealthy")
+		return false
+	}
+
+	ok := true
+	for _, page := range pages {
+		page = page.Context(ctx)
+		if err := page.Navigate("about:blank"); err != nil {
+			log.Warn().Err(err).Msg("Failed to navigate page to blank during cleanup")
+			ok = false
+		}
+		if err := page.Close(); err != nil {
+			log.Warn().Err(err).Msg("Failed to close page during cleanup")
+			ok = false
+		}
+	}
+	return ok
+}
+
+// enqueueLocked marks entry idle and queues its browser. Caller must hold p.mu
+// and must have checked that the pool is not closed.
+func (p *Pool) enqueueLocked(entry *browserEntry) {
+	entry.state = entryIdle
+	entry.recycleOnRelease = false
 	select {
-	case p.available <- browser:
+	case p.available <- entry.browser:
 		p.availableCount.Add(1)
-		log.Debug().
-			Int64("total_released", p.stats.Released.Load()).
-			Msg("Browser released to pool")
 	default:
-		// Pool is full (shouldn't happen with correct usage)
-		log.Warn().Msg("Pool is full, closing excess browser")
-		p.CleanupBrowser(browser)
+		// One token per idle slot and capacity == pool size, so this cannot
+		// happen unless the accounting is broken. Recover by replacing the slot.
+		log.Error().Msg("Pool queue full on enqueue, recycling browser")
+		p.startRecycleLocked(entry)
 	}
 }
 
 // isHealthy checks if a browser is responsive and usable.
-// Fix #5: Uses context properly with Rod operations for proper timeout propagation.
+// Every CDP call is bound to one deadline so a frozen browser fails the check
+// instead of blocking Acquire.
 func (p *Pool) isHealthy(browser *rod.Browser) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
 	defer cancel()
 
-	// Try to create and close a page as a health check
-	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	// Try to create, navigate and close a page as a health check
+	page, err := browser.Context(ctx).Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
 		log.Debug().Err(err).Msg("Browser health check failed: cannot create page")
 		return false
 	}
-	defer page.Close()
+	page = page.Context(ctx)
 
-	// Fix #5: Use page.Context(ctx) to pass timeout context to Rod operations
-	// This ensures the navigate operation respects the context deadline
-	err = page.Context(ctx).Navigate("about:blank")
-	if err != nil {
+	if err := page.Navigate("about:blank"); err != nil {
 		log.Debug().Err(err).Msg("Browser health check failed: cannot navigate")
+		// Ignore error: the browser is being recycled anyway
+		_ = page.Close()
+		return false
+	}
+
+	if err := page.Close(); err != nil {
+		log.Debug().Err(err).Msg("Browser health check failed: cannot close page")
 		return false
 	}
 
 	return true
 }
 
-// recycleBrowser replaces an unhealthy browser with a new one.
-// Uses timeouts to prevent deadlocks during browser close/spawn operations.
-// Fix #4: Added shutdown awareness to abandon recycle during pool shutdown.
-// Fix #20: IMPORTANT - This method must NEVER be called while holding p.mu to avoid deadlock.
-// The call chain recycleBrowser -> closeBrowserWithTimeout -> updateBrowserEntry acquires p.mu,
-// so calling recycleBrowser with p.mu held would cause reentrant lock deadlock.
-func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
-	// Fix: Check if pool is closed before starting recycle to prevent race with Close()
+// startRecycleLocked moves entry to the recycling state and replaces its
+// browser in a tracked background goroutine. Caller must hold p.mu.
+func (p *Pool) startRecycleLocked(entry *browserEntry) {
+	entry.state = entryRecycling
+	entry.recycleOnRelease = false
 	if p.closed.Load() {
-		log.Debug().Msg("Skipping browser recycle - pool is closed")
+		return // Close() tears down every tracked browser
+	}
+
+	// Add under p.mu with the closed check above, so this never races Close()'s Wait.
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.recycleEntry(entry)
+	}()
+}
+
+// recycleEntry closes the browser in a recycling slot and spawns a replacement.
+// If the replacement fails the slot is marked dead and the health routine
+// retries, so a transient launch failure does not shrink the pool for good.
+// Must NOT be called while holding p.mu.
+func (p *Pool) recycleEntry(entry *browserEntry) {
+	// Limit concurrent recycles to avoid launching many browsers at once
+	select {
+	case p.recycleSem <- struct{}{}:
+		defer func() { <-p.recycleSem }()
+	case <-p.stopCh:
 		return
 	}
 
 	p.stats.Recycled.Add(1)
-
 	log.Info().
 		Int64("total_recycled", p.stats.Recycled.Load()).
 		Msg("Recycling browser")
 
-	// Close old browser OUTSIDE lock with timeout
-	// Use closeBrowserWithTimeout helper to properly handle goroutine lifecycle
-	p.closeBrowserWithTimeout(oldBrowser, 10*time.Second)
+	p.mu.Lock()
+	oldBrowser := entry.browser
+	entry.browser = nil
+	p.mu.Unlock()
 
-	// Spawn new browser OUTSIDE lock with timeout
-	var newBrowser *rod.Browser
-	var spawnErr error
+	p.CleanupBrowser(oldBrowser) // bounded; safe on nil
 
-	// Create context with timeout for spawn operation
-	// Fix CRITICAL: Use defer to ensure context is always canceled, preventing leaks
-	// if the function exits unexpectedly (panic, early return, etc.)
-	spawnCtx, spawnCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Spawn the replacement, abandoning the attempt if the pool shuts down
+	spawnCtx, spawnCancel := context.WithTimeout(context.Background(), browserRespawnTimeout)
 	defer spawnCancel()
-
-	spawnDone := make(chan struct{})
 	go func() {
-		defer close(spawnDone)
-		newBrowser, spawnErr = p.spawnBrowser(spawnCtx)
+		select {
+		case <-p.stopCh:
+			spawnCancel()
+		case <-spawnCtx.Done():
+		}
 	}()
 
-	// Fix #4: Add shutdown awareness to spawn timeout
-	select {
-	case <-spawnDone:
-		// Spawn completed (spawnCancel is deferred)
-	case <-p.stopCh:
-		// spawnCancel is deferred, no need to call explicitly
-		log.Warn().Msg("Browser spawn abandoned during pool shutdown")
-		p.removeBrowserEntry(oldBrowser)
-		// Wait briefly for spawning goroutine to notice context cancellation
-		select {
-		case <-spawnDone:
-		case <-time.After(2 * time.Second):
-			log.Warn().Msg("Spawn goroutine did not exit promptly after cancellation")
-		}
+	newBrowser, err := p.spawnBrowser(spawnCtx)
+
+	p.mu.Lock()
+	if err != nil {
+		entry.state = entryDead
+		p.mu.Unlock()
+		log.Error().Err(err).Msg("Failed to spawn replacement browser, will retry on next health check")
+		p.stats.Errors.Add(1)
 		return
-	case <-time.After(30 * time.Second):
-		// spawnCancel is deferred, no need to call explicitly
-		log.Error().Msg("Browser spawn timed out during recycle")
-		p.removeBrowserEntry(oldBrowser)
+	}
+	if p.closed.Load() {
+		p.mu.Unlock()
+		log.Warn().Msg("Pool closed during recycle, closing replacement browser")
+		p.CleanupBrowser(newBrowser)
 		return
 	}
 
-	if spawnErr != nil {
-		log.Error().Err(spawnErr).Msg("Failed to spawn replacement browser")
-		p.removeBrowserEntry(oldBrowser)
-		return
-	}
+	entry.browser = newBrowser
+	entry.createdAt = time.Now()
+	entry.useCount.Store(0)
+	p.enqueueLocked(entry)
+	p.mu.Unlock()
 
-	// Update browser entry
-	newEntry := &browserEntry{
-		browser:   newBrowser,
-		createdAt: time.Now(),
-	}
-	p.updateBrowserEntry(oldBrowser, newEntry)
-
-	// Add new browser to pool with proper synchronization
-	p.addBrowserToPool(newBrowser)
+	log.Info().Msg("Replacement browser added to pool")
 }
 
 // CleanupBrowser closes a browser and removes its on-disk user-data dir.
@@ -928,89 +942,56 @@ func (p *Pool) recycleBrowser(oldBrowser *rod.Browser) {
 // SpawnWithOptions, or session ownership. Pooled browsers from Acquire()
 // continue to use Release(), which routes here on close paths.
 //
+// The call is bounded: the close request has a deadline, and a process that
+// does not exit afterwards is killed. It must not be called while holding p.mu.
+//
 // Safe to call with a nil browser. Errors are logged but not returned because
 // cleanup must not block shutdown paths.
 func (p *Pool) CleanupBrowser(browser *rod.Browser) {
 	if browser == nil {
 		return
 	}
-	if err := browser.Close(); err != nil {
+	if err := browser.Timeout(browserCloseTimeout).Close(); err != nil {
 		log.Warn().Err(err).Msg("Error closing browser")
 	}
 	if v, ok := p.launchers.LoadAndDelete(browser); ok {
 		if l, ok := v.(*launcher.Launcher); ok {
-			l.Cleanup() // waits for process exit, then os.RemoveAll(user-data dir)
+			p.reapLauncher(l)
 		}
 	}
 	p.controlURLs.Delete(browser)
 }
 
-// closeBrowserWithTimeout closes a browser with a timeout and proper goroutine handling.
-// If the close times out, the goroutine is tracked as leaked but we proceed.
-// Returns true if the browser was closed within the timeout.
-// Fix #10: Uses WaitGroup to track close goroutines for proper cleanup on pool shutdown.
-func (p *Pool) closeBrowserWithTimeout(browser *rod.Browser, timeout time.Duration) bool {
-	closeDone := make(chan struct{})
-	closeStarted := time.Now()
-
-	// Fix #10: Track this goroutine in closeWg for proper shutdown
+// reapLauncher waits for the browser process to exit and removes its user-data
+// dir. go-rod's Launcher.Cleanup waits for exit without ever killing, so a
+// process that ignores the close request is killed after browserExitGrace.
+func (p *Pool) reapLauncher(l *launcher.Launcher) {
+	exited := make(chan struct{})
 	p.closeWg.Add(1)
 	go func() {
 		defer p.closeWg.Done()
-		defer close(closeDone)
-		// Use CleanupBrowser so the user-data dir is also removed,
-		// not just the browser process. Without this, /tmp/rod fills up
-		// over time as browsers recycle (GitHub issue #6).
-		p.CleanupBrowser(browser)
+		defer close(exited)
+		l.Cleanup() // waits for process exit, then os.RemoveAll(user-data dir)
 	}()
 
 	select {
-	case <-closeDone:
-		log.Debug().
-			Dur("duration", time.Since(closeStarted)).
-			Msg("Browser closed successfully")
-		return true
-	case <-p.stopCh:
-		// Pool is shutting down, abandon wait
-		// The goroutine is still tracked in closeWg and will be waited on in Close()
-		log.Warn().
-			Dur("elapsed", time.Since(closeStarted)).
-			Msg("Browser close wait abandoned during pool shutdown")
-		return false
-	case <-time.After(timeout):
-		// Track leaked goroutine
-		leaked := p.leakedGoroutines.Add(1)
-		log.Warn().
-			Dur("elapsed", time.Since(closeStarted)).
-			Int32("leaked_count", leaked).
-			Msg("Browser close timed out - goroutine leaked")
-		if leaked > 10 {
-			log.Error().Int32("count", leaked).Msg("High number of leaked goroutines from browser close timeouts")
-		}
-		p.stats.Errors.Add(1)
-		return false
-	}
-}
-
-// addBrowserToPool safely adds a browser to the available pool.
-// Uses proper locking to prevent race conditions with Close().
-func (p *Pool) addBrowserToPool(browser *rod.Browser) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.closed.Load() {
-		log.Warn().Msg("Pool closed, closing browser instead of adding to pool")
-		p.CleanupBrowser(browser)
+	case <-exited:
 		return
+	case <-time.After(browserExitGrace):
 	}
+
+	log.Warn().Int("pid", l.PID()).Msg("Browser process did not exit after close, killing it")
+	l.Kill()
 
 	select {
-	case p.available <- browser:
-		p.availableCount.Add(1)
-		log.Info().Msg("Browser added to pool")
-	default:
-		log.Warn().Msg("Pool is full, closing browser")
-		p.CleanupBrowser(browser)
+	case <-exited:
+	case <-time.After(browserKillGrace):
+		leaked := p.leakedGoroutines.Add(1)
+		p.stats.Errors.Add(1)
+		log.Error().
+			Int("pid", l.PID()).
+			Int32("leaked_count", leaked).
+			Msg("Browser process still running after kill - cleanup goroutine leaked")
 	}
 }
 
@@ -1052,12 +1033,11 @@ func (p *Pool) monitorMemory() {
 	}
 }
 
-// healthCheckRoutine periodically verifies browser health and recycles stale browsers.
+// healthCheckRoutine periodically recycles stale browsers and retries slots
+// whose replacement previously failed.
 func (p *Pool) healthCheckRoutine() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-
-	maxAge := 30 * time.Minute // Recycle browsers older than this
 
 	for {
 		select {
@@ -1069,22 +1049,12 @@ func (p *Pool) healthCheckRoutine() {
 				return
 			}
 
-			p.mu.Lock()
 			now := time.Now()
-			var toRecycle []*rod.Browser
-
-			for _, entry := range p.browsers {
-				// Recycle old browsers proactively
-				if now.Sub(entry.createdAt) > maxAge {
-					toRecycle = append(toRecycle, entry.browser)
-				}
-			}
-			p.mu.Unlock()
-
-			// Recycle outside of lock
-			for _, browser := range toRecycle {
-				log.Info().Msg("Recycling stale browser")
-				p.recycleBrowser(browser)
+			started := p.recycleWhere(func(entry *browserEntry) bool {
+				return now.Sub(entry.createdAt) > maxBrowserAge
+			})
+			if started > 0 {
+				log.Info().Int("count", started).Msg("Recycling stale browsers")
 			}
 		}
 	}
@@ -1092,43 +1062,70 @@ func (p *Pool) healthCheckRoutine() {
 
 // recycleAll recycles all browsers in the pool.
 // This is used when memory pressure is detected.
-// Fix #11: Uses semaphore to limit concurrent recycles and prevent resource exhaustion.
 func (p *Pool) recycleAll() {
+	started := p.recycleWhere(func(*browserEntry) bool { return true })
+	log.Info().Int("count", started).Msg("Recycling browsers due to memory pressure")
+}
+
+// recycleWhere recycles every slot for which shouldRecycle returns true and
+// returns how many recycles it started. Only idle browsers are recycled
+// immediately; a browser that is checked out is flagged and recycled when its
+// holder releases it. Dead slots are always retried.
+func (p *Pool) recycleWhere(shouldRecycle func(*browserEntry) bool) int {
 	p.mu.Lock()
-	toRecycle := make([]*rod.Browser, len(p.browsers))
-	for i, entry := range p.browsers {
-		toRecycle[i] = entry.browser
+	defer p.mu.Unlock()
+
+	if p.closed.Load() {
+		return 0
 	}
-	p.mu.Unlock()
 
-	log.Info().Int("count", len(toRecycle)).Msg("Recycling all browsers due to memory pressure")
-
-	// Fix #11: Use semaphore to limit concurrent recycles
-	var recycleWg sync.WaitGroup
-	for _, browser := range toRecycle {
-		// Check if pool is closed before starting new recycle
-		if p.closed.Load() {
-			log.Debug().Msg("Pool closed during recycleAll, aborting remaining recycles")
-			break
-		}
-
-		recycleWg.Add(1)
-		go func(b *rod.Browser) {
-			defer recycleWg.Done()
-
-			// Acquire semaphore slot
-			select {
-			case p.recycleSem <- struct{}{}:
-				defer func() { <-p.recycleSem }()
-				p.recycleBrowser(b)
-			case <-p.stopCh:
-				log.Debug().Msg("Pool shutdown during recycleAll, skipping recycle")
+	// Take every queued browser out of the channel. All sends happen under
+	// p.mu, so nothing can be queued while we hold it and the refill below
+	// cannot block.
+	queued := make(map[*rod.Browser]struct{}, cap(p.available))
+drain:
+	for {
+		select {
+		case browser, ok := <-p.available:
+			if !ok {
+				return 0 // channel closed: pool is shutting down
 			}
-		}(browser)
+			queued[browser] = struct{}{}
+			p.availableCount.Add(-1)
+		default:
+			break drain
+		}
 	}
 
-	// Wait for all recycles to complete
-	recycleWg.Wait()
+	started := 0
+	for _, entry := range p.browsers {
+		switch entry.state {
+		case entryDead:
+			p.startRecycleLocked(entry)
+			started++
+		case entryIdle:
+			_, isQueued := queued[entry.browser]
+			switch {
+			case !shouldRecycle(entry):
+				if isQueued {
+					p.enqueueLocked(entry)
+				}
+			case isQueued:
+				p.startRecycleLocked(entry)
+				started++
+			default:
+				// Dequeued by an Acquire that has not marked it in use yet
+				entry.recycleOnRelease = true
+			}
+		case entryInUse:
+			if shouldRecycle(entry) {
+				entry.recycleOnRelease = true
+			}
+		case entryRecycling:
+			// already being replaced
+		}
+	}
+	return started
 }
 
 // Size returns the configured pool size.
@@ -1224,8 +1221,12 @@ func (p *Pool) Close() error {
 	}
 
 	p.mu.Lock()
-	browsers := make([]*browserEntry, len(p.browsers))
-	copy(browsers, p.browsers)
+	browsers := make([]*rod.Browser, 0, len(p.browsers))
+	for _, entry := range p.browsers {
+		if entry.browser != nil {
+			browsers = append(browsers, entry.browser)
+		}
+	}
 	p.browsers = nil
 	p.mu.Unlock()
 
@@ -1234,8 +1235,7 @@ func (p *Pool) Close() error {
 	eg := new(errgroup.Group)
 	eg.SetLimit(4) // Close up to 4 browsers concurrently
 
-	for _, entry := range browsers {
-		browser := entry.browser // Capture for closure
+	for _, browser := range browsers {
 		eg.Go(func() error {
 			// CleanupBrowser closes the browser AND removes its user-data dir.
 			// Errors are already logged inside; returning nil keeps the parallel
@@ -1273,40 +1273,6 @@ func (p *Pool) Close() error {
 		Msg("Browser pool closed")
 
 	return closeErr
-}
-
-// removeBrowserEntry removes a browser from the tracking slice.
-// Bug 5: Uses defer for safe unlock to prevent lock being held on panic.
-// Uses swap-with-last for O(1) removal instead of O(n) slice append.
-func (p *Pool) removeBrowserEntry(oldBrowser *rod.Browser) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for i, entry := range p.browsers {
-		if entry.browser == oldBrowser {
-			// Swap with last element and truncate (O(1) removal)
-			last := len(p.browsers) - 1
-			if i != last {
-				p.browsers[i] = p.browsers[last]
-			}
-			p.browsers = p.browsers[:last]
-			return
-		}
-	}
-}
-
-// updateBrowserEntry replaces an old browser entry with a new one.
-// Bug 5: Uses defer for safe unlock to prevent lock being held on panic.
-// Returns true if the entry was found and updated.
-func (p *Pool) updateBrowserEntry(oldBrowser *rod.Browser, newEntry *browserEntry) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for i, entry := range p.browsers {
-		if entry.browser == oldBrowser {
-			p.browsers[i] = newEntry
-			return true
-		}
-	}
-	return false
 }
 
 // isARM returns true if running on ARM architecture.

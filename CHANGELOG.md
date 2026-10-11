@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Browsers closed while still in use** - The 30-minute age recycle and the memory-pressure recycle closed every tracked browser, including ones serving a request or held by a session, and left the dead browser queued so its replacement was discarded. Recycling now replaces idle browsers only; a checked-out browser is flagged and replaced when it is released.
+- **Double release of pooled browsers** - `sessions.create` with an existing session ID released the same browser twice, so two requests could share one browser and the first to finish closed the other's page. `Release` now ignores a browser that is not checked out, and closes (never queues) a browser the pool does not own. `Session.Create` no longer releases the browser on error: the caller keeps ownership until it succeeds.
+- **Unbounded browser teardown** - `CleanupBrowser` waited indefinitely for Chrome to exit and never killed it, in places while holding the pool lock. The close request now has a deadline, a process that does not exit is killed, and no teardown runs under the lock. Failed and timed-out launches kill the process and remove its user-data dir.
+- **Pool shrinking after a failed respawn** - A replacement browser that failed to launch removed its pool slot permanently. The slot is now kept and retried on each health check.
+- **Session teardown races** - Concurrent `sessions.destroy` calls (or a destroy racing the TTL cleanup) could each release the session's browser. Exactly one teardown now wins. A destroy that times out because the session is busy leaves the session usable instead of stranding it, and the TTL cleanup no longer closes a session's page while a request is using it.
+- **Default proxy bypass for custom-flag sessions** - `sessions.create` with `browserFlags` and no proxy launched Chrome without the configured `PROXY_URL`.
+- **Unbounded health-check and release calls** - The pool's own health check and page cleanup now run under a deadline, so a frozen browser is recycled instead of blocking `Acquire` or `Release`.
+
 ## [0.8.2] - 2026-10-11
 
 ### Security
