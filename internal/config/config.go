@@ -559,7 +559,7 @@ func (c *Config) Validate() {
 		const maxAPIKeyLength = 256
 		switch {
 		case c.APIKey == "":
-			log.Error().Msg("API_KEY_ENABLED is true but API_KEY is empty - authentication will always fail")
+			log.Error().Msg("API_KEY_ENABLED is true but API_KEY is empty - all API requests will be rejected")
 		case len(c.APIKey) < minAPIKeyLength:
 			log.Error().
 				Int("length", len(c.APIKey)).

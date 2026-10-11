@@ -278,3 +278,112 @@ func TestValidateProxyURLSpecialCharacterPasswords(t *testing.T) {
 		})
 	}
 }
+
+// TestParseIPWithNormalization_BrowserParity verifies numeric hosts are read the
+// way the WHATWG URL parser (and therefore Chrome) reads them. A mismatch lets a
+// host validate as public while the browser connects to a private address.
+func TestParseIPWithNormalization_BrowserParity(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want string // empty means "not an IP literal"
+	}{
+		{name: "dotted decimal", host: "192.168.1.1", want: "192.168.1.1"},
+		{name: "single decimal", host: "2130706433", want: "127.0.0.1"},
+		{name: "single octal 10.0.0.1", host: "01200000001", want: "10.0.0.1"},
+		{name: "single octal 10.99.0.2", host: "01230600002", want: "10.99.0.2"},
+		{name: "single octal loopback", host: "017700000001", want: "127.0.0.1"},
+		{name: "single hex", host: "0x7f000001", want: "127.0.0.1"},
+		{name: "dotted octal", host: "010.0.0.1", want: "8.0.0.1"},
+		{name: "two part", host: "127.1", want: "127.0.0.1"},
+		{name: "trailing dot", host: "127.0.0.1.", want: "127.0.0.1"},
+		{name: "octal trailing dot", host: "01200000001.", want: "10.0.0.1"},
+		{name: "invalid octal digits", host: "089", want: ""},
+		{name: "number too large", host: "4294967296", want: ""},
+		{name: "hostname", host: "example.com", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseIPWithNormalization(tt.host)
+			if tt.want == "" {
+				if got != nil {
+					t.Errorf("parseIPWithNormalization(%q) = %v, want nil", tt.host, got)
+				}
+				return
+			}
+			if got == nil || !got.Equal(net.ParseIP(tt.want)) {
+				t.Errorf("parseIPWithNormalization(%q) = %v, want %s", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateURL_NumericHostBypass(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "octal 10.0.0.1", url: "http://01200000001/"},
+		{name: "octal 10.99.0.2", url: "http://01230600002/"},
+		{name: "octal loopback", url: "http://017700000001/"},
+		{name: "hex loopback", url: "http://0x7f000001/"},
+		{name: "loopback trailing dot", url: "http://127.0.0.1./"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateURL(tt.url); err == nil {
+				t.Errorf("ValidateURL(%q) = nil, want error", tt.url)
+			}
+		})
+	}
+}
+
+func TestValidateIP_SpecialPurposeRanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		ip      string
+		blocked bool
+	}{
+		{name: "public v4", ip: "93.184.216.34", blocked: false},
+		{name: "public v6", ip: "2606:4700:4700::1111", blocked: false},
+		{name: "this network", ip: "0.1.2.3", blocked: true},
+		{name: "cgnat", ip: "100.64.0.1", blocked: true},
+		{name: "cgnat upper", ip: "100.127.255.254", blocked: true},
+		{name: "just below cgnat", ip: "100.63.255.255", blocked: false},
+		{name: "ietf protocol", ip: "192.0.0.8", blocked: true},
+		{name: "test-net-1", ip: "192.0.2.1", blocked: true},
+		{name: "benchmarking", ip: "198.18.0.1", blocked: true},
+		{name: "test-net-2", ip: "198.51.100.1", blocked: true},
+		{name: "test-net-3", ip: "203.0.113.1", blocked: true},
+		{name: "multicast", ip: "224.0.0.1", blocked: true},
+		{name: "reserved", ip: "240.0.0.1", blocked: true},
+		{name: "broadcast", ip: "255.255.255.255", blocked: true},
+		{name: "v4-mapped cgnat", ip: "::ffff:100.64.0.1", blocked: true},
+		{name: "v4-compatible", ip: "::10.0.0.1", blocked: true},
+		{name: "nat64 private", ip: "64:ff9b::a00:1", blocked: true},
+		{name: "nat64 loopback", ip: "64:ff9b::7f00:1", blocked: true},
+		{name: "nat64 public", ip: "64:ff9b::5db8:d822", blocked: false},
+		{name: "nat64 local-use", ip: "64:ff9b:1::1", blocked: true},
+		{name: "6to4 private", ip: "2002:0a00:0001::1", blocked: true},
+		{name: "6to4 public", ip: "2002:5db8:d822::1", blocked: false},
+		{name: "teredo", ip: "2001:0:4136:e378::1", blocked: true},
+		{name: "documentation v6", ip: "2001:db8::1", blocked: true},
+		{name: "site-local", ip: "fec0::1", blocked: true},
+		{name: "multicast v6", ip: "ff02::1", blocked: true},
+		{name: "discard", ip: "100::1", blocked: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateIP(net.ParseIP(tt.ip))
+			if tt.blocked && err == nil {
+				t.Errorf("validateIP(%s) = nil, want blocked", tt.ip)
+			}
+			if !tt.blocked && err != nil {
+				t.Errorf("validateIP(%s) = %v, want allowed", tt.ip, err)
+			}
+		})
+	}
+}

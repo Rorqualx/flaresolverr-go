@@ -20,6 +20,7 @@ package captcha
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -316,6 +317,12 @@ func (s *NineKwSolver) doRequest(ctx context.Context, params url.Values) ([]byte
 
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
+		// SECURITY: *url.Error embeds the full request URL, which carries the
+		// API key as a query parameter. Keep only the underlying cause.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()

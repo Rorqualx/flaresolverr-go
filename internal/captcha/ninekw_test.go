@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -243,5 +244,24 @@ func TestNineKwSolver_Balance_NotConfigured(t *testing.T) {
 	solver := NewNineKwSolver(NineKwConfig{})
 	if _, err := solver.Balance(context.Background()); err == nil {
 		t.Error("expected error for unconfigured solver")
+	}
+}
+
+// TestNineKwSolver_TransportErrorOmitsAPIKey verifies a transport failure does
+// not surface the request URL, which carries the API key as a query parameter.
+func TestNineKwSolver_TransportErrorOmitsAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	baseURL := server.URL
+	server.Close() // Connection refused from here on
+
+	const keyMarker = "ninekw-test-value-0001"
+	solver := NewNineKwSolver(NineKwConfig{APIKey: keyMarker, BaseURL: baseURL})
+
+	_, err := solver.Balance(context.Background())
+	if err == nil {
+		t.Fatal("Balance() error = nil, want transport error")
+	}
+	if strings.Contains(err.Error(), keyMarker) || strings.Contains(err.Error(), "apikey=") {
+		t.Errorf("error leaks API key or query string: %v", err)
 	}
 }

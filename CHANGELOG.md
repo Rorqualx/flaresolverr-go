@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-11
+
+### Security
+- **SSRF read via `returnRawHtml`** - The raw-HTML path returned the page body before the post-navigation URL check ran, so a public URL that redirected to an internal host could be read back. The check now runs on that path too. Reproduced and re-probed live.
+- **Octal host bypass of the SSRF validator** - An all-digit host with a leading zero (`http://01200000001/`) was parsed as a decimal, public address while Chrome reads it as octal (`10.0.0.1`). Single-number hosts are now parsed with the same `0` / `0x` rules as the WHATWG URL parser, and a single trailing dot is ignored. Reproduced and re-probed live.
+- **Special-purpose IP ranges** - The validator now also blocks CGNAT (`100.64.0.0/10`), benchmarking, TEST-NET, multicast, reserved, Teredo, site-local and discard ranges, and validates the IPv4 address embedded in NAT64 and 6to4 addresses.
+- **Unvalidated proxy on `sessions.create`** - With `browserFlags`, the proxy URL was passed to Chrome without the proxy SSRF check that `request.get`/`request.post` apply.
+- **API key authentication failed open** - `API_KEY_ENABLED=true` with an empty `API_KEY` accepted every request, because a missing header matched the empty key. All requests are now rejected in that configuration.
+- **Proxy credentials sent to origin servers** - Proxy credentials were supplied to every browser auth challenge, including a target site's `401`. They are now provided only for challenges from the proxy, once per request; other challenges are cancelled.
+- **9kw API key in logs** - Transport errors from the 9kw client included the request URL and its `apikey` parameter.
+- **Dependencies** - `golang.org/x/net` v0.55.0 and `golang.org/x/text` v0.39.0 for GO-2026-5026 and GO-2026-5970, both reachable from URL validation.
+
+### Changed
+- **Go 1.26** - The dependency updates require Go 1.25+, and Go 1.24 is out of support. `go.mod`, CI and the Docker images now build with Go 1.26.
+- **Proxy authentication retries** - A proxy that rejects its credentials now gets one attempt before the request is cancelled.
+
+### Known limitations
+- A public URL that redirects to a private host is rejected in the response, but the browser still sends the request to that host. Closing this needs per-hop interception or an egress proxy.
+
 ## [0.8.1] - 2026-08-15
 
 ### Added

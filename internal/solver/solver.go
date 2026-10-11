@@ -716,6 +716,11 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	// Return raw HTML before JS rendering if requested
 	if opts.ReturnRawHtml {
+		// SECURITY: this path returns before solveLoop/buildResult, so the
+		// post-navigation SSRF check must run here too (redirects to internal hosts).
+		if err := s.validateResponseURL(page, opts.ExpectedIP, opts.SkipResponseValidation); err != nil {
+			return nil, err
+		}
 		rawHTML, htmlErr := page.HTML()
 		if htmlErr != nil {
 			log.Warn().Err(htmlErr).Msg("Failed to get raw HTML")
