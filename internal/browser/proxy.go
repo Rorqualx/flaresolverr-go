@@ -93,22 +93,33 @@ func SetPageProxy(ctx context.Context, page *rod.Page, proxy *ProxyConfig) (clea
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Requests already answered with credentials. Chrome re-issues the
+			// challenge when the proxy rejects them; a second attempt is canceled.
+			answered := make(map[proto.FetchRequestID]struct{})
+
 			pageWithCtx.EachEvent(func(e *proto.FetchAuthRequired) bool {
 				select {
 				case <-listenerCtx.Done():
 					return true // Stop listening
 				default:
 				}
-				log.Debug().Msg("Proxy authentication required, providing credentials")
+
+				_, retried := answered[e.RequestID]
+				response := authChallengeResponse(e.AuthChallenge, proxy, retried)
+				if response.Response == proto.FetchAuthChallengeResponseResponseProvideCredentials {
+					if len(answered) >= maxTrackedAuthRequests {
+						clear(answered)
+					}
+					answered[e.RequestID] = struct{}{}
+					log.Debug().Msg("Proxy authentication required, providing credentials")
+				} else {
+					log.Debug().Bool("retried", retried).Msg("Canceling auth challenge not answerable with proxy credentials")
+				}
 
 				// Ignore error: request may have been canceled or timed out
 				_ = proto.FetchContinueWithAuth{
-					RequestID: e.RequestID,
-					AuthChallengeResponse: &proto.FetchAuthChallengeResponse{
-						Response: proto.FetchAuthChallengeResponseResponseProvideCredentials,
-						Username: proxy.Username,
-						Password: proxy.Password,
-					},
+					RequestID:             e.RequestID,
+					AuthChallengeResponse: response,
 				}.Call(page)
 				return false // Continue listening
 			})()
@@ -148,4 +159,26 @@ func GetProxyArg(proxyURL string) string {
 		return ""
 	}
 	return proxyURL
+}
+
+// maxTrackedAuthRequests bounds the per-page set of request IDs already
+// answered with proxy credentials.
+const maxTrackedAuthRequests = 1024
+
+// authChallengeResponse decides how to answer a Fetch.authRequired event.
+// SECURITY: Chrome raises this event for origin-server 401s as well as proxy
+// 407s and applies whatever credentials it is given, so the proxy credentials
+// must only be provided when the challenge comes from the proxy. Anything else,
+// and any repeat challenge for a request already answered, is canceled.
+func authChallengeResponse(challenge *proto.FetchAuthChallenge, proxy *ProxyConfig, retried bool) *proto.FetchAuthChallengeResponse {
+	if challenge == nil || challenge.Source != proto.FetchAuthChallengeSourceProxy || retried {
+		return &proto.FetchAuthChallengeResponse{
+			Response: proto.FetchAuthChallengeResponseResponseCancelAuth,
+		}
+	}
+	return &proto.FetchAuthChallengeResponse{
+		Response: proto.FetchAuthChallengeResponseResponseProvideCredentials,
+		Username: proxy.Username,
+		Password: proxy.Password,
+	}
 }

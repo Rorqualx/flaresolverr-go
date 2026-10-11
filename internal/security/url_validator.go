@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -223,14 +225,22 @@ func ValidateURLWithContext(ctx context.Context, rawURL string) error {
 // - Hex encoding (0xC0.0xA8.0x01.0x01 for 192.168.1.1)
 // - Mixed encodings
 func parseIPWithNormalization(hostname string) net.IP {
+	// Browsers ignore a single trailing dot on IPv4 hosts (127.0.0.1. == 127.0.0.1)
+	hostname = strings.TrimSuffix(hostname, ".")
+
 	// First try standard parsing (handles most cases including IPv6)
 	if ip := net.ParseIP(hostname); ip != nil {
 		return ip
 	}
 
-	// Try parsing as a single decimal number (e.g., 2130706433 for 127.0.0.1)
-	if num, err := strconv.ParseUint(hostname, 10, 32); err == nil {
-		return net.IPv4(byte(num>>24), byte(num>>16), byte(num>>8), byte(num))
+	// Try parsing as a single number (e.g., 2130706433 for 127.0.0.1).
+	// SECURITY: must honor the 0 (octal) and 0x (hex) prefixes exactly as the
+	// WHATWG URL parser does. Chrome reads 01200000001 as octal (10.0.0.1);
+	// parsing it as decimal would yield a public address and bypass the check.
+	if !strings.Contains(hostname, ".") {
+		if num, err := parseIntWithBase(hostname); err == nil && num <= math.MaxUint32 {
+			return net.IPv4(byte(num>>24), byte(num>>16), byte(num>>8), byte(num))
+		}
 	}
 
 	// Try parsing with octal/hex components (e.g., 0177.0.0.1 or 0x7f.0.0.1)
@@ -422,6 +432,82 @@ func validateIP(ip net.IP) error {
 		return ErrPrivateIPBlocked
 	}
 
+	// Block the remaining IANA special-purpose ranges (CGNAT, benchmarking,
+	// multicast, reserved, transition prefixes) that the net.IP helpers miss.
+	if isSpecialPurposeIP(ip) {
+		return ErrPrivateIPBlocked
+	}
+
+	// Transition addresses embed an IPv4 address that the network will route to;
+	// validate the embedded address as if it had been given directly.
+	if embedded := embeddedIPv4(ip); embedded != nil {
+		return validateIP(embedded)
+	}
+
+	return nil
+}
+
+// specialPurposePrefixes lists non-globally-routable ranges from the IANA IPv4 and
+// IPv6 Special-Purpose Address Registries that are not already covered by the
+// loopback/private/link-local checks in validateIP.
+var specialPurposePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT shared address space (RFC 6598)
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1
+	netip.MustParsePrefix("192.88.99.0/24"),  // deprecated 6to4 relay anycast
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3
+	netip.MustParsePrefix("224.0.0.0/4"),     // multicast
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, includes limited broadcast
+	netip.MustParsePrefix("::/96"),           // deprecated IPv4-compatible IPv6
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64 (RFC 8215)
+	netip.MustParsePrefix("100::/64"),        // discard-only
+	netip.MustParsePrefix("2001::/32"),       // Teredo
+	netip.MustParsePrefix("2001:db8::/32"),   // documentation
+	netip.MustParsePrefix("fec0::/10"),       // deprecated site-local
+	netip.MustParsePrefix("ff00::/8"),        // multicast
+}
+
+// isSpecialPurposeIP reports whether ip falls in one of specialPurposePrefixes.
+func isSpecialPurposeIP(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true // Unparseable address: fail closed
+	}
+	addr = addr.Unmap().WithZone("")
+	for _, prefix := range specialPurposePrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	nat64Prefix  = netip.MustParsePrefix("64:ff9b::/96") // well-known NAT64 (RFC 6052)
+	sixToFourNet = netip.MustParsePrefix("2002::/16")    // 6to4 (RFC 3056)
+)
+
+// embeddedIPv4 returns the IPv4 address embedded in a NAT64 or 6to4 IPv6 address,
+// or nil if ip is not such an address.
+func embeddedIPv4(ip net.IP) net.IP {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return nil
+	}
+	addr = addr.Unmap().WithZone("")
+	if !addr.Is6() {
+		return nil
+	}
+	raw := addr.As16()
+	switch {
+	case nat64Prefix.Contains(addr):
+		return net.IPv4(raw[12], raw[13], raw[14], raw[15])
+	case sixToFourNet.Contains(addr):
+		return net.IPv4(raw[2], raw[3], raw[4], raw[5])
+	}
 	return nil
 }
 

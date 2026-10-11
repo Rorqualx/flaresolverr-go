@@ -931,7 +931,13 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 			DisableGPU: req.BrowserFlags.DisableGPU,
 			ExtraArgs:  req.BrowserFlags.ExtraArgs,
 		}
-		if req.Proxy != nil {
+		if req.Proxy != nil && req.Proxy.URL != "" {
+			// SECURITY: same proxy SSRF check as request.get/post
+			if err := security.ValidateProxyURL(req.Proxy.URL, h.config.AllowLocalProxies); err != nil {
+				log.Warn().Err(err).Msg("Session proxy URL validation failed")
+				h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
+				return
+			}
 			opts.ProxyURL = req.Proxy.URL
 		}
 

@@ -44,6 +44,12 @@ func APIKey(cfg *config.Config) func(http.Handler) http.Handler {
 			// Query parameters appear in access logs, browser history, and referrer headers
 			apiKey := r.Header.Get("X-API-Key")
 
+			// Fail closed: an empty configured key must never match an absent header
+			if cfg.APIKey == "" || apiKey == "" {
+				writeErrorResponse(w, http.StatusUnauthorized, "Invalid or missing API key", time.Now())
+				return
+			}
+
 			// Hash the provided key and compare using constant-time comparison.
 			// This prevents timing attacks by:
 			// 1. Always comparing fixed-size hashes (32 bytes)

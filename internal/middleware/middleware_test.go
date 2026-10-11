@@ -575,31 +575,45 @@ func TestAPIKeyMiddlewareHeaderPrefersOverQuery(t *testing.T) {
 }
 
 func TestAPIKeyMiddlewareEmptyConfigKey(t *testing.T) {
-	// When APIKeyEnabled is true but APIKey is empty,
-	// all requests should fail authentication
+	// When APIKeyEnabled is true but APIKey is empty, authentication must fail
+	// closed: an absent or empty header must never match the empty key.
 	cfg := &config.Config{
 		APIKeyEnabled: true,
 		APIKey:        "", // Empty key
 	}
 
-	called := false
-	innerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
+	tests := []struct {
+		name      string
+		setHeader bool
+		header    string
+	}{
+		{name: "no header", setHeader: false},
+		{name: "empty header", setHeader: true, header: ""},
+		{name: "arbitrary key", setHeader: true, header: "anything"},
+	}
 
-	handler := APIKey(cfg)(innerHandler)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			innerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+			})
+			handler := APIKey(cfg)(innerHandler)
 
-	// Even with empty key in request, should fail
-	req := httptest.NewRequest("POST", "/v1", nil)
-	req.Header.Set("X-API-Key", "")
-	w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/v1", nil)
+			if tt.setHeader {
+				req.Header.Set("X-API-Key", tt.header)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
 
-	handler.ServeHTTP(w, req)
-
-	// With empty config key and empty provided key, they "match"
-	// but this is expected - the Validate() function should warn about this
-	if !called {
-		t.Error("Empty key comparison should match (both empty)")
+			if called {
+				t.Error("request reached handler with an empty configured API key")
+			}
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+		})
 	}
 }
 
