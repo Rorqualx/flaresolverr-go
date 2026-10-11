@@ -3,6 +3,7 @@
 package session
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,9 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
+
+// sessionPageCloseTimeout bounds closing a session's page during teardown.
+const sessionPageCloseTimeout = 10 * time.Second
 
 // Maximum number of concurrent page references allowed per session.
 // This prevents unbounded growth from bugs or malicious usage.
@@ -97,37 +101,32 @@ func NewManager(cfg *config.Config, pool *browser.Pool) *Manager {
 
 // Create creates a new session with the given ID.
 // Returns an error if the session already exists or max sessions is reached.
-// The browser is returned to the pool on any error.
+//
+// Ownership: the session takes over brow only when Create succeeds. On any
+// error the caller still owns the browser and must release it (pooled) or
+// clean it up (dedicated). Create never releases it itself, because it cannot
+// know which kind it was given.
 func (m *Manager) Create(id string, brow *rod.Browser, ttl time.Duration) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Check if session already exists
 	if _, exists := m.sessions[id]; exists {
-		// Return browser since we didn't use it
-		if m.pool != nil {
-			m.pool.Release(brow)
-		}
 		return nil, types.ErrSessionAlreadyExists
 	}
 
 	// Check max sessions limit
 	if len(m.sessions) >= m.config.MaxSessions {
-		// Return browser since we can't create session
-		if m.pool != nil {
-			m.pool.Release(brow)
-		}
 		return nil, types.ErrTooManySessions
 	}
 
-	// Create a new page for this session
+	// Create a new page for this session. The page must be created on the
+	// browser's own context: go-rod binds the page's event stream to the
+	// context it was created with, so a timeout context here would kill the
+	// session page's events when it expired.
 	page, err := brow.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
-		// CRITICAL: Return browser on page creation failure
-		if m.pool != nil {
-			m.pool.Release(brow)
-		}
-		return nil, err
+		return nil, fmt.Errorf("failed to create session page: %w", err)
 	}
 
 	now := time.Now()
@@ -185,33 +184,32 @@ func (m *Manager) Get(id string) (*Session, error) {
 func (m *Manager) Destroy(id string) error {
 	m.mu.Lock()
 	session, exists := m.sessions[id]
-	if exists {
-		// Mark session as closing BEFORE removing from map
-		// This prevents new AcquirePage calls from succeeding
-		session.closing.Store(true)
-		// NOTE: Keep session in map while waiting for references to drain.
-		// This prevents a race where another goroutine could create a new session
-		// with the same ID while we're waiting.
-	}
+	// Mark session as closing BEFORE removing from map. This prevents new
+	// AcquirePage calls from succeeding, and the compare-and-swap makes exactly
+	// one of several concurrent teardowns the owner of the session's resources.
+	// NOTE: The session stays in the map while references drain, so another
+	// goroutine cannot create a session with the same ID in the meantime.
+	won := exists && session.closing.CompareAndSwap(false, true)
 	m.mu.Unlock()
 
 	if !exists {
 		return types.ErrSessionNotFound
 	}
+	if !won {
+		// Another Destroy, the TTL cleanup, or Close is already tearing it down
+		return types.ErrSessionInUse
+	}
 
 	// Wait for any in-flight page operations to complete (up to 5 seconds)
 	if !session.waitForReferences(5 * time.Second) {
-		// Fix #12: Keep closing=true on timeout to prevent new operations
-		// from starting. The session will be cleaned up by the next cleanup
-		// cycle. DON'T reset closing flag - this prevents a race where
-		// new operations start while we're still trying to destroy.
+		// The session is still in use, so the destroy did not happen. Reopen it:
+		// leaving closing=true would strand a session that Get reports as missing
+		// but that still holds its browser and blocks re-creating the ID.
+		session.closing.Store(false)
 		log.Warn().
 			Str("session_id", id).
 			Int32("ref_count", session.refCount.Load()).
-			Msg("Session destroy: timed out waiting for page references, session marked for cleanup")
-
-		// Note: We intentionally keep closing=true here. The cleanup routine
-		// will eventually clean up this session when references are released.
+			Msg("Session destroy: timed out waiting for page references, session left active")
 		return types.ErrSessionInUse
 	}
 
@@ -220,32 +218,7 @@ func (m *Manager) Destroy(id string) error {
 	delete(m.sessions, id)
 	m.mu.Unlock()
 
-	// Close the page - now safe since all references are released
-	session.mu.Lock()
-	page := session.Page
-	session.Page = nil // Clear reference to prevent double-close
-	session.mu.Unlock()
-
-	if page != nil {
-		if err := page.Close(); err != nil {
-			log.Warn().Err(err).Str("session_id", id).Msg("Error closing session page during destroy")
-		}
-	}
-
-	// CRITICAL: Return browser to pool, or fully tear down if session owns it.
-	// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
-	if session.Browser != nil {
-		switch {
-		case session.OwnsBrowser && m.pool != nil:
-			m.pool.CleanupBrowser(session.Browser)
-		case session.OwnsBrowser:
-			if err := session.Browser.Close(); err != nil {
-				log.Warn().Err(err).Str("session_id", id).Msg("Error closing session-owned browser")
-			}
-		case m.pool != nil:
-			m.pool.Release(session.Browser)
-		}
-	}
+	m.teardown(session)
 
 	log.Info().
 		Str("session_id", id).
@@ -253,6 +226,41 @@ func (m *Manager) Destroy(id string) error {
 		Msg("Session destroyed")
 
 	return nil
+}
+
+// teardown closes a session's page and hands its browser back: dedicated
+// browsers are cleaned up, pooled ones released. The caller must have won the
+// session's closing flag and removed it from the map, so teardown runs exactly
+// once per session.
+func (m *Manager) teardown(session *Session) {
+	// Safely extract and clear page reference under lock to prevent double-close
+	session.mu.Lock()
+	page := session.Page
+	session.Page = nil
+	session.mu.Unlock()
+
+	// Close page outside lock (slow I/O)
+	if page != nil {
+		if err := page.Timeout(sessionPageCloseTimeout).Close(); err != nil {
+			log.Warn().Err(err).Str("session_id", session.ID).Msg("Error closing session page")
+		}
+	}
+
+	// CRITICAL: Return browser to pool, or fully tear down if session owns it.
+	// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
+	if session.Browser == nil {
+		return
+	}
+	switch {
+	case session.OwnsBrowser && m.pool != nil:
+		m.pool.CleanupBrowser(session.Browser)
+	case session.OwnsBrowser:
+		if err := session.Browser.Close(); err != nil {
+			log.Warn().Err(err).Str("session_id", session.ID).Msg("Error closing session-owned browser")
+		}
+	case m.pool != nil:
+		m.pool.Release(session.Browser)
+	}
 }
 
 // List returns all active session IDs.
@@ -320,9 +328,20 @@ func (m *Manager) cleanupExpired() {
 		lastUsed := session.LastUsedTime()
 
 		if now.Sub(lastUsed) > session.EffectiveTTL(m.config.SessionTTL) {
-			// Mark session as closing BEFORE removing from map
-			// This prevents new AcquirePage calls from succeeding
-			session.closing.Store(true)
+			// Mark session as closing BEFORE removing from map. This prevents
+			// new AcquirePage calls from succeeding. Losing the swap means a
+			// Destroy already owns the teardown.
+			if !session.closing.CompareAndSwap(false, true) {
+				continue
+			}
+			// A session with a request in flight is not idle, whatever its
+			// last-used time says: a solve can outlast a short TTL. Leave it
+			// for a later cycle instead of closing the page mid-solve.
+			if session.refCount.Load() > 0 {
+				session.closing.Store(false)
+				session.Touch()
+				continue
+			}
 			expiredSessions = append(expiredSessions, session)
 			delete(m.sessions, id)
 		}
@@ -350,33 +369,7 @@ func (m *Manager) cleanupExpired() {
 					Msg("Cleanup: references still held, proceeding with cleanup anyway")
 			}
 
-			// Fix #13: Safely extract and clear page reference under lock to prevent double-free
-			sess.mu.Lock()
-			page := sess.Page
-			sess.Page = nil // Clear reference atomically under lock
-			sess.mu.Unlock()
-
-			// Close page outside lock (slow I/O)
-			if page != nil {
-				if err := page.Close(); err != nil {
-					log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing expired session page")
-				}
-			}
-
-			// CRITICAL: Return browser to pool, or fully tear down if session owns it.
-			// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
-			if sess.Browser != nil {
-				switch {
-				case sess.OwnsBrowser && m.pool != nil:
-					m.pool.CleanupBrowser(sess.Browser)
-				case sess.OwnsBrowser:
-					if err := sess.Browser.Close(); err != nil {
-						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during cleanup")
-					}
-				case m.pool != nil:
-					m.pool.Release(sess.Browser)
-				}
-			}
+			m.teardown(sess)
 
 			log.Info().
 				Str("session_id", sess.ID).
@@ -419,9 +412,11 @@ func (m *Manager) Close() error {
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, session := range m.sessions {
 		// Fix HIGH: Mark session as closing BEFORE removing from map
-		// This prevents new AcquirePage calls from succeeding
-		session.closing.Store(true)
-		sessions = append(sessions, session)
+		// This prevents new AcquirePage calls from succeeding. A session whose
+		// flag is already set is being torn down by an in-flight Destroy.
+		if session.closing.CompareAndSwap(false, true) {
+			sessions = append(sessions, session)
+		}
 	}
 	// Fix 3.8: Use empty map instead of nil to avoid nil pointer panics on concurrent access
 	m.sessions = make(map[string]*Session)
@@ -451,32 +446,7 @@ func (m *Manager) Close() error {
 					Msg("Close: references still held, proceeding with cleanup anyway")
 			}
 
-			// Safely extract and clear page reference under lock to prevent races
-			sess.mu.Lock()
-			page := sess.Page
-			sess.Page = nil
-			sess.mu.Unlock()
-
-			// Close page outside lock (slow I/O)
-			if page != nil {
-				if err := page.Close(); err != nil {
-					log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session page during shutdown")
-				}
-			}
-			// CRITICAL: Return browser to pool, or fully tear down if session owns it.
-			// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
-			if sess.Browser != nil {
-				switch {
-				case sess.OwnsBrowser && m.pool != nil:
-					m.pool.CleanupBrowser(sess.Browser)
-				case sess.OwnsBrowser:
-					if err := sess.Browser.Close(); err != nil {
-						log.Warn().Err(err).Str("session_id", sess.ID).Msg("Error closing session-owned browser during shutdown")
-					}
-				case m.pool != nil:
-					m.pool.Release(sess.Browser)
-				}
-			}
+			m.teardown(sess)
 			log.Debug().Str("session_id", sess.ID).Msg("Session closed during shutdown")
 			return nil
 		})

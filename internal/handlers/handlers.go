@@ -963,18 +963,19 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		sessionTTL = time.Duration(req.SessionTTL) * time.Minute
 	}
 
-	// Create session (note: this transfers browser ownership to session)
-	// On error, Create() already releases the browser back to pool, so don't release here
+	// Create session. Ownership of the browser transfers to the session only on
+	// success; on any error it is still ours to hand back.
 	sess, err := h.sessions.Create(sessionID, browserInstance, sessionTTL)
 	if err != nil {
+		if ownsBrowser {
+			h.pool.CleanupBrowser(browserInstance) // closes browser + removes user-data dir
+		} else {
+			h.pool.Release(browserInstance)
+		}
+
 		// Idempotent behavior: if session already exists, return success
 		// (matches Python FlareSolverr behavior)
 		if errors.Is(err, types.ErrSessionAlreadyExists) {
-			if ownsBrowser {
-				h.pool.CleanupBrowser(browserInstance) // closes browser + removes user-data dir
-			} else {
-				h.pool.Release(browserInstance)
-			}
 			h.writeJSONResponse(w, http.StatusOK, types.Response{
 				Status:    types.StatusOK,
 				Message:   "Session already exists.",
@@ -984,7 +985,6 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 			})
 			return
 		}
-		// Note: Do NOT release browser here - session.Create() handles it on all error paths
 		h.writeError(w, fmt.Sprintf("Failed to create session: %v", err), startTime)
 		return
 	}
