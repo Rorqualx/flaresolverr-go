@@ -465,11 +465,14 @@ func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod
 		}
 		url = res.url
 	case <-launchCtx.Done():
-		// Launch is still running. Reap whatever it eventually starts, so a
-		// Chrome that comes up late is not orphaned.
+		// Launch is still blocked waiting for Chrome to report its debugging
+		// URL. Kill the process now: that is what unblocks Launch, and a hung
+		// Chrome left alive starves every later launch. Then reap again once
+		// Launch returns, in case the process only started after the first kill.
 		p.closeWg.Add(1)
 		go func() {
 			defer p.closeWg.Done()
+			l.Kill() // no-op if the process has not started yet
 			<-launched
 			p.discardLauncher(l)
 		}()
