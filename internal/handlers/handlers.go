@@ -219,7 +219,7 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 			if factory == nil {
 				continue
 			}
-			provider := factory(apiKey, cfg.CaptchaSolverTimeout)
+			provider := factory(captcha.ProviderOptions{APIKey: apiKey, Timeout: cfg.CaptchaSolverTimeout})
 			if provider.IsConfigured() {
 				providers = append(providers, provider)
 				log.Debug().Str("provider", name).Msg("CAPTCHA provider registered")

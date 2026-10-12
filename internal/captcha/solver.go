@@ -56,6 +56,7 @@ type CaptchaResult = TurnstileResult
 // TurnstileResult contains the solution from a CAPTCHA solver.
 type TurnstileResult struct {
 	Token     string        // The solution token to inject
+	UserAgent string        // The User-Agent the provider's worker solved with, if it reported one
 	SolveTime time.Duration // How long the solve took
 	Cost      float64       // Cost in USD for this solve
 	Provider  string        // Which provider solved it

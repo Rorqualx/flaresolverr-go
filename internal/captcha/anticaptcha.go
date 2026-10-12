@@ -18,25 +18,26 @@ type AntiCaptchaSolver struct {
 }
 
 func init() {
-	Register("anticaptcha", func(apiKey string, timeout time.Duration) CaptchaSolver {
-		return NewAntiCaptchaSolver(AntiCaptchaConfig{APIKey: apiKey, Timeout: timeout})
+	Register("anticaptcha", func(opts ProviderOptions) CaptchaSolver {
+		return NewAntiCaptchaSolver(AntiCaptchaConfig(opts))
 	})
 }
 
 // AntiCaptchaConfig contains configuration for anti-captcha.com solver.
 type AntiCaptchaConfig struct {
-	APIKey  string
-	Timeout time.Duration
+	APIKey       string
+	Timeout      time.Duration
+	BaseURL      string        // Override for testing and self-hosted gateways
+	PollInterval time.Duration // Override for testing
 }
 
 // NewAntiCaptchaSolver creates a new anti-captcha.com solver instance.
 func NewAntiCaptchaSolver(cfg AntiCaptchaConfig) *AntiCaptchaSolver {
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = antiCaptchaBaseURL
+	}
 	return &AntiCaptchaSolver{
-		TwoCaptchaSolver: NewTwoCaptchaSolver(TwoCaptchaConfig{
-			APIKey:  cfg.APIKey,
-			Timeout: cfg.Timeout,
-			BaseURL: antiCaptchaBaseURL,
-		}),
+		TwoCaptchaSolver: NewTwoCaptchaSolver(TwoCaptchaConfig(cfg)),
 	}
 }
 
