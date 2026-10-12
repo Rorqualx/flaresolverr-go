@@ -1,6 +1,10 @@
 package handlers
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/rs/zerolog/log"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/captcha"
@@ -68,4 +72,26 @@ func newCaptchaChain(cfg *config.Config) *captcha.SolverChain {
 		ProviderTimeout:   cfg.CaptchaSolverTimeout,
 		BaseURLs:          baseURLs,
 	})
+}
+
+// writeCaptchaMetrics appends per-provider external captcha solver metrics.
+// Provider names come from the provider registry, so the label set is bounded.
+func (h *Handler) writeCaptchaMetrics(b *strings.Builder) {
+	stats := h.solver.CaptchaStats()
+	names := make([]string, 0, len(stats))
+	for name := range stats {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		ps := stats[name]
+		labels := fmt.Sprintf(`provider="%s"`, escapeProm(name)) //nolint:gocritic // Prometheus label format requires literal quotes, not %q
+		writeCounterLabeled(b, "flaresolverr_captcha_attempts_total", "External captcha solve attempts per provider", labels, float64(ps.Attempts))
+		writeCounterLabeled(b, "flaresolverr_captcha_tasks_total", "Billable tasks created per provider", labels, float64(ps.Tasks))
+		writeCounterLabeled(b, "flaresolverr_captcha_successes_total", "Successful external captcha solves per provider", labels, float64(ps.Successes))
+		writeCounterLabeled(b, "flaresolverr_captcha_failures_total", "Failed external captcha solves per provider", labels, float64(ps.Failures))
+		writeCounterLabeled(b, "flaresolverr_captcha_cost_usd_total", "Reported cost of external captcha solves per provider in USD", labels, ps.TotalCost)
+		writeCounterLabeled(b, "flaresolverr_captcha_solve_seconds_total", "Time spent waiting on external captcha solves per provider", labels, float64(ps.TotalTimeMs)/1000)
+	}
 }

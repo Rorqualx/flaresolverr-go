@@ -13,6 +13,7 @@ import (
 
 	"github.com/Rorqualx/flaresolverr-go/internal/captcha"
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/solver"
 )
 
 // keyRecorder is a fake createTask-style provider that records the clientKey of
@@ -205,5 +206,58 @@ func TestNewCaptchaChain_BaseURLOverrides(t *testing.T) {
 		if len(seen) != 1 || seen[0] != want.key {
 			t.Errorf("%s override received keys %v, want exactly [%s]", name, seen, want.key)
 		}
+	}
+}
+
+// TestWriteCaptchaMetrics: per-provider usage is exposed on /metrics.
+func TestWriteCaptchaMetrics(t *testing.T) {
+	chain := newCaptchaChain(&config.Config{CaptchaMaxExternalSolves: 1})
+	solverInstance := solver.New(nil, "test-agent")
+	solverInstance.SetSolverChain(chain)
+	h := &Handler{solver: solverInstance}
+
+	t.Run("nothing before the first solve", func(t *testing.T) {
+		var b strings.Builder
+		h.writeCaptchaMetrics(&b)
+		if b.Len() != 0 {
+			t.Errorf("unexpected captcha metrics: %s", b.String())
+		}
+	})
+
+	t.Run("no chain at all", func(t *testing.T) {
+		var b strings.Builder
+		(&Handler{solver: solver.New(nil, "test-agent")}).writeCaptchaMetrics(&b)
+		if b.Len() != 0 {
+			t.Errorf("unexpected captcha metrics: %s", b.String())
+		}
+	})
+
+	metrics := chain.Metrics()
+	metrics.RecordAttempt("2captcha", true, 0.002, 1500*time.Millisecond)
+	metrics.RecordTask("2captcha")
+	metrics.RecordAttempt("capsolver", false, 0, 250*time.Millisecond)
+
+	var b strings.Builder
+	h.writeCaptchaMetrics(&b)
+	out := b.String()
+
+	for _, want := range []string{
+		`flaresolverr_captcha_attempts_total{provider="2captcha"} 1`,
+		`flaresolverr_captcha_tasks_total{provider="2captcha"} 1`,
+		`flaresolverr_captcha_successes_total{provider="2captcha"} 1`,
+		`flaresolverr_captcha_failures_total{provider="2captcha"} 0`,
+		`flaresolverr_captcha_cost_usd_total{provider="2captcha"} 0.002`,
+		`flaresolverr_captcha_solve_seconds_total{provider="2captcha"} 1.5`,
+		`flaresolverr_captcha_attempts_total{provider="capsolver"} 1`,
+		`flaresolverr_captcha_tasks_total{provider="capsolver"} 0`,
+		`flaresolverr_captcha_failures_total{provider="capsolver"} 1`,
+		`# TYPE flaresolverr_captcha_tasks_total counter`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metrics output is missing %q\n%s", want, out)
+		}
+	}
+	if strings.Index(out, `provider="2captcha"`) > strings.Index(out, `provider="capsolver"`) {
+		t.Error("providers are not written in a stable, sorted order")
 	}
 }
