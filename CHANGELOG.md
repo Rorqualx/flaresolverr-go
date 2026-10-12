@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI hardening** - All GitHub Actions are pinned to commit SHAs, workflows run with read-only permissions unless a job needs more, and Dependabot tracks actions, Go modules and Docker base images. The lint job now fails the build instead of being advisory.
 - **Repository layout** - `CLAUDE.md`'s directory structure and file-placement table now describe the real tree. The two old audit reports moved to `docs/audits/` (marked historical), the October 2026 review research is filed under `docs/research/`, and a `SECURITY.md` describes how to report a vulnerability and what the no-sandbox default means.
 
+### Fixed (container)
+- **Container would not restart after being killed** - A container stopped with `docker kill` (or by an OOM kill or power loss) kept the previous Xvfb's lock file, and on the next start Xvfb refused to run with "Server is already active for display 99", so the container crash-looped until it was recreated. The entrypoint now removes the stale lock and socket before starting Xvfb. Reproduced before the fix; ten kill/start cycles in a row come up healthy after it.
+- **Xvfb was not supervised** - If Xvfb died while the server was running, browsers lost their display and nothing recovered. The container now exits (code 137) so the restart policy replaces it. Startup also waits for the X socket instead of sleeping one second.
+- **A failed Chromium install could produce a working build** - The Dockerfile's `|| true`, meant for optional packages, also covered the required install, so a missing `chromium` package would have shipped an image with no browser. Required and optional packages are installed separately, optional ones one at a time with a visible message when skipped, and the build runs `chromium-browser --version`. The set of installed packages is unchanged.
+- **Health check ignored `PORT` and could use IPv6** - The health check in the image and in `docker-compose.yml` hardcoded port 8191 and `localhost`. It now uses `127.0.0.1` and the configured `PORT`, with a 5-second timeout.
+- **`make docker` targets** - They pointed at a `deployments/` directory that does not exist.
+
+### Added (container)
+- **`BROWSER_SANDBOX`** - Set to `true` to run Chromium with its own sandbox instead of `--no-sandbox`. Off by default, so nothing changes unless you set it: the default Docker runtime blocks the user namespaces the sandbox needs, and the server then fails at startup with "No usable sandbox!". It needs a seccomp profile that allows user namespaces or `--cap-add SYS_ADMIN`; see "Chromium sandbox" in the README.
+- **`cap_drop: ALL` in `docker-compose.yml`** - The container runs correctly with no Linux capabilities.
+
 ## [0.8.5] - 2026-10-11
 
 ### Fixed

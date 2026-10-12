@@ -498,6 +498,20 @@ All configuration is done via environment variables.
 | `DNS_REBINDING_PROTECTION` | `true` | Pin response URL to the request-time IP. Set `false` for sites serving identical content across multiple TLDs/CDN IPs (SSRF protection stays on) |
 | `API_KEY_ENABLED` | `false` | Enable API key authentication |
 | `API_KEY` | (none) | Required API key (use 16+ chars) |
+| `BROWSER_SANDBOX` | `false` | Run Chromium with its own sandbox instead of `--no-sandbox`. Needs extra container permissions; see below |
+
+### Chromium sandbox
+
+By default Chromium runs with `--no-sandbox`, because the default Docker runtime does not allow what the sandbox needs. That means a browser exploit in a page you ask FlareSolverr to load is contained only by the container itself, so keep the container unprivileged (the bundled `docker-compose.yml` drops all capabilities and sets `no-new-privileges`) and do not point it at URLs from untrusted callers without `API_KEY_ENABLED`.
+
+`BROWSER_SANDBOX=true` turns Chromium's sandbox back on. It uses unprivileged user namespaces, which Docker's default seccomp profile blocks, so with the default runtime the server exits at startup with `No usable sandbox!`. One of these must also be set:
+
+| Docker option | Effect |
+|---|---|
+| `--security-opt seccomp=<profile>.json` | A seccomp profile that allows user namespaces. `seccomp=unconfined` also works but removes all syscall filtering |
+| `--cap-add SYS_ADMIN` | Works, but grants a broad capability; prefer a seccomp profile |
+
+Whether user namespaces are available also depends on the host (kernel settings and AppArmor), so test on the machine that will run it. Leave the setting off if the container does not start.
 
 ### API Key Authentication
 
@@ -629,6 +643,10 @@ services:
       - BROWSER_POOL_SIZE=3
       - MAX_TIMEOUT=300s
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 ```
 
 ## Migration from Python FlareSolverr

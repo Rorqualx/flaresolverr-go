@@ -5,7 +5,7 @@ services:
     build:
       context: .
       args:
-        VERSION: "3.0.0-go"
+        VERSION: "${VERSION:-dev}"
     image: flaresolverr:latest
     container_name: flaresolverr
     ports:
@@ -57,6 +57,12 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    # The container needs no Linux capabilities: it runs as a non-root user and
+    # Chromium runs with --no-sandbox by default. (BROWSER_SANDBOX=true needs
+    # more than this file grants; see "Chromium sandbox" in the README.)
+    cap_drop:
+      - ALL
+
     # NOTE: Do NOT mount a tmpfs at /tmp or /tmp/rod (GitHub issue #10).
     # tmpfs defaults to noexec, which breaks Chromium launch, and a nested
     # tmpfs at /tmp/rod breaks Chrome's process-singleton lock (the failure
@@ -70,7 +76,8 @@ services:
     #     - /home/flaresolverr/.cache:exec,size=256M
 
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8191/health"]
+      # 127.0.0.1 (localhost may resolve to ::1 first) and the configured PORT
+      test: ["CMD-SHELL", "wget -q -T 5 --spider http://127.0.0.1:$${PORT:-8191}/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

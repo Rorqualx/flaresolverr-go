@@ -1109,12 +1109,12 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	phase1Args := []string{
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--no-sandbox",
 		"--user-data-dir=" + userDataDir,
 		"--window-size=1920,1080",
 		"--force-device-scale-factor=1.25",     // Realistic DPI (Xvfb defaults to 1.0)
 		"--load-extension=" + stealthExt.Dir(), // Stealth patches without CDP
 	}
+	phase1Args = append(phase1Args, sandboxArgs(s.pool.SandboxEnabled())...)
 	if proxyServer != "" {
 		phase1Args = append(phase1Args, "--proxy-server="+proxyServer)
 	}
@@ -1176,11 +1176,11 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	phase2Args := []string{
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--no-sandbox",
 		"--user-data-dir=" + userDataDir,
 		"--remote-debugging-port=" + fmt.Sprintf("%d", debugPort),
 		"--window-size=1920,1080",
 	}
+	phase2Args = append(phase2Args, sandboxArgs(s.pool.SandboxEnabled())...)
 	if proxyServer != "" {
 		phase2Args = append(phase2Args, "--proxy-server="+proxyServer)
 	}
