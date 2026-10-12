@@ -273,6 +273,7 @@ func startIsolatedBrowser(t *testing.T) *rod.Browser {
 	t.Helper()
 	l := launcher.New().
 		Headless(true).
+		NoSandbox(true). // CI runners and containers have no usable Chromium sandbox
 		Delete("disable-site-isolation-trials").
 		Set("disable-features", "TranslateUI").
 		Set("site-per-process")
