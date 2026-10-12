@@ -31,7 +31,14 @@ type Dashboard struct {
 	events   *EventBuffer
 	stopOnce sync.Once
 	wg       sync.WaitGroup
-	origLog  zerolog.Logger
+
+	// Logging while the TUI owns the terminal
+	origLog     zerolog.Logger
+	fileLog     io.Writer // receives logs while the TUI is up; nil means none
+	restoreOnce sync.Once
+
+	// done is closed when the TUI has exited, for any reason
+	done chan struct{}
 }
 
 // New creates a Dashboard wired to the application's live data sources.
@@ -49,7 +56,22 @@ func New(
 	return &Dashboard{
 		program: program,
 		events:  events,
+		done:    make(chan struct{}),
 	}
+}
+
+// SetFileLog sets the writer that keeps receiving log output while the TUI is
+// running (normally the LOG_FILE handle). Call it before Start. Without it,
+// logs are discarded while the TUI is up, since writing them to the terminal
+// would corrupt the display.
+func (d *Dashboard) SetFileLog(w io.Writer) {
+	d.fileLog = w
+}
+
+// Done returns a channel that is closed when the TUI has exited, whether the
+// user quit it, it failed, or Stop was called.
+func (d *Dashboard) Done() <-chan struct{} {
+	return d.done
 }
 
 // Events returns the event buffer for use by the recording middleware.
@@ -58,22 +80,35 @@ func (d *Dashboard) Events() *EventBuffer {
 }
 
 // Start begins the TUI in a tracked goroutine.
-// Logging is suppressed while the dashboard is active.
+// Console logging is redirected while the dashboard is active; see SetFileLog.
 func (d *Dashboard) Start() {
-	// Save current logger and suppress logging to prevent TUI corruption
-	d.origLog = log.Logger
-	log.Logger = log.Output(io.Discard)
-	zerolog.SetGlobalLevel(zerolog.Disabled)
+	d.redirectLogging()
 
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		if _, err := d.program.Run(); err != nil {
-			// Restore logging before reporting error
-			d.restoreLogging()
+		defer close(d.done)
+
+		_, err := d.program.Run()
+		// The terminal is ours again: restore console logging before anything
+		// else is logged, including the shutdown this exit triggers.
+		d.restoreLogging()
+		if err != nil {
 			log.Error().Err(err).Msg("Dashboard exited with error")
 		}
 	}()
+}
+
+// redirectLogging keeps log output off the terminal while the TUI draws on it.
+// Only the destination changes: the global log level is left alone, so file
+// logging and the level the operator configured both keep working.
+func (d *Dashboard) redirectLogging() {
+	d.origLog = log.Logger
+	if d.fileLog != nil {
+		log.Logger = log.Output(d.fileLog)
+		return
+	}
+	log.Logger = log.Output(io.Discard)
 }
 
 // Stop gracefully shuts down the dashboard.
@@ -97,16 +132,12 @@ func (d *Dashboard) Stop() {
 	})
 }
 
+// restoreLogging puts back the logger that was active before Start. It runs
+// once, from whichever of the TUI goroutine and Stop gets there first.
 func (d *Dashboard) restoreLogging() {
-	log.Logger = d.origLog
-	if log.Logger.GetLevel() == zerolog.Disabled {
-		// Fallback: restore a reasonable default
-		log.Logger = log.Output(zerolog.ConsoleWriter{
-			Out:        os.Stdout,
-			TimeFormat: time.RFC3339,
-		})
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	}
+	d.restoreOnce.Do(func() {
+		log.Logger = d.origLog
+	})
 }
 
 // recordingWriter wraps http.ResponseWriter to capture the status code.

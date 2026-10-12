@@ -223,3 +223,29 @@ func TestInvalidEnvValues(t *testing.T) {
 		t.Errorf("Expected default pool timeout for invalid value, got %v", cfg.BrowserPoolTimeout)
 	}
 }
+
+// TestValidate_LogLevelCaseInsensitive verifies LOG_LEVEL is normalised, so
+// LOG_LEVEL=DEBUG is debug rather than silently falling back to info.
+func TestValidate_LogLevelCaseInsensitive(t *testing.T) {
+	tests := []struct {
+		env  string
+		want string
+	}{
+		{env: "DEBUG", want: "debug"},
+		{env: "Warn", want: "warn"},
+		{env: " error ", want: "error"},
+		{env: "fatal", want: "fatal"},
+		{env: "verbose", want: "info"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			t.Setenv("LOG_LEVEL", tt.env)
+			cfg := Load()
+			cfg.Validate()
+			if cfg.LogLevel != tt.want {
+				t.Errorf("LogLevel = %q for LOG_LEVEL=%q, want %q", cfg.LogLevel, tt.env, tt.want)
+			}
+		})
+	}
+}

@@ -3,13 +3,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	_ "net/http/pprof" // Import for side effects - registers pprof handlers
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,23 +40,46 @@ func main() {
 		return
 	}
 
+	os.Exit(run())
+}
+
+// run starts the server and blocks until it shuts down. It returns the process
+// exit code. Nothing in here may call log.Fatal once the browser pool exists:
+// an abrupt exit would orphan every Chrome process the pool launched.
+func run() int {
 	// Load configuration
 	cfg := config.Load()
 
 	// Setup logging first so validation warnings are visible
-	setupLogging(cfg.LogLevel, cfg.LogFile)
+	fileLog := setupLogging(cfg.LogLevel, cfg.LogFile)
 
 	// Validate configuration (Bug 12: config bounds validation)
 	cfg.Validate()
 
+	// Validate may have replaced an invalid level; apply the final value
+	zerolog.SetGlobalLevel(parseLogLevel(cfg.LogLevel))
+
 	// Print banner
 	printBanner()
+
+	// Claim the listen address before launching any browser. A port that is
+	// already in use is the most common startup failure, and it must be found
+	// while there is nothing to clean up yet.
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Error().Err(err).Str("address", addr).Msg("Failed to bind listen address")
+		return 1
+	}
 
 	// Initialize browser pool
 	log.Info().Msg("Initializing browser pool...")
 	pool, err := browser.NewPool(cfg)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize browser pool")
+		log.Error().Err(err).Msg("Failed to initialize browser pool")
+		// Ignore error: exiting anyway
+		_ = listener.Close()
+		return 1
 	}
 
 	// Initialize session manager with pool reference for browser cleanup
@@ -96,6 +122,8 @@ func main() {
 	if cfg.DashboardEnabled {
 		if dashboard.IsTTY() {
 			dash = dashboard.New(pool, sessionMgr, handler.DomainStats(), time.Now())
+			// The TUI owns the terminal, but LOG_FILE must keep receiving logs
+			dash.SetFileLog(fileLog)
 		} else {
 			logReporter = dashboard.NewLogReporter(pool, sessionMgr, handler.DomainStats(), time.Now(), 30*time.Second)
 		}
@@ -146,7 +174,6 @@ func main() {
 	finalHandler = middleware.Recovery(finalHandler)
 
 	// Create HTTP server
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	server := &http.Server{
 		Addr:        addr,
 		Handler:     finalHandler,
@@ -183,7 +210,9 @@ func main() {
 		}()
 	}
 
-	// Start main server in goroutine
+	// Start main server in goroutine. A serve failure is reported on serverErr
+	// so shutdown still closes the pool.
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Info().
 			Str("address", addr).
@@ -202,8 +231,8 @@ func main() {
 			}
 		}()
 
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("Server failed")
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
 		}
 	}()
 
@@ -214,13 +243,34 @@ func main() {
 		logReporter.Start()
 	}
 
-	// Wait for interrupt signal
+	// Wait for an interrupt signal, a server failure, or the dashboard being
+	// quit. The TUI swallows ctrl+c in raw mode, so quitting it is the user's
+	// way of stopping the server; leaving the process running with no UI and
+	// no console logs helped nobody.
+	var dashDone <-chan struct{}
+	if dash != nil {
+		dashDone = dash.Done()
+	}
+
+	exitCode := 0
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	select {
+	case <-quit:
+	case <-dashDone:
+		log.Info().Msg("Dashboard closed")
+	case err := <-serverErr:
+		log.Error().Err(err).Msg("Server failed")
+		exitCode = 1
+	}
 
 	// Stop receiving signals to prevent double-shutdown
 	signal.Stop(quit)
+
+	// Give the terminal back before logging the shutdown
+	if dash != nil {
+		dash.Stop()
+	}
 
 	log.Info().Msg("Shutting down...")
 
@@ -245,10 +295,7 @@ func main() {
 		rateLimiter.Close()
 	}
 
-	// Stop dashboard / log reporter
-	if dash != nil {
-		dash.Stop()
-	}
+	// Stop log reporter (the dashboard was stopped above)
 	if logReporter != nil {
 		logReporter.Stop()
 	}
@@ -271,41 +318,54 @@ func main() {
 	}
 
 	log.Info().Msg("Shutdown complete")
+	return exitCode
 }
 
-// setupLogging configures zerolog based on the log level.
-func setupLogging(level, logFile string) {
+// setupLogging configures zerolog to write to the console and, if logFile is
+// set, to that file as well. It returns the file writer (nil if there is none)
+// so the dashboard can keep the file fed while it owns the terminal.
+func setupLogging(level, logFile string) io.Writer {
 	var output io.Writer = zerolog.ConsoleWriter{
 		Out:        os.Stdout,
 		TimeFormat: time.RFC3339,
 	}
 
 	// Add file logging if LOG_FILE is set
+	var fileLog io.Writer
 	if logFile != "" {
 		f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: Failed to open log file %s: %v\n", logFile, err)
 		} else {
+			fileLog = f
 			output = io.MultiWriter(output, f)
 			fmt.Printf("Logging to file: %s\n", logFile)
 		}
 	}
 
 	log.Logger = log.Output(output)
+	zerolog.SetGlobalLevel(parseLogLevel(level))
+	return fileLog
+}
 
-	switch level {
+// parseLogLevel maps a LOG_LEVEL value to a zerolog level, ignoring case and
+// surrounding space. Unknown values fall back to info.
+func parseLogLevel(level string) zerolog.Level {
+	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "trace":
-		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+		return zerolog.TraceLevel
 	case "debug":
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+		return zerolog.DebugLevel
 	case "info":
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	case "warn":
-		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+		return zerolog.InfoLevel
+	case "warn", "warning":
+		return zerolog.WarnLevel
 	case "error":
-		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+		return zerolog.ErrorLevel
+	case "fatal":
+		return zerolog.FatalLevel
 	default:
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		return zerolog.InfoLevel
 	}
 }
 
