@@ -202,7 +202,7 @@ func TestTurnstile_ShadowDOMDirect(t *testing.T) {
 
 	// Test shadow DOM traversal
 	t.Log("Testing shadow DOM traversal...")
-	traverser := solver.NewShadowRootTraverser(page)
+	traverser := solver.NewShadowRootTraverser(page, nil)
 
 	// Try to find the Turnstile checkbox
 	checkbox, err := traverser.FindTurnstileCheckbox(ctx)

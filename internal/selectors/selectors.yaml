@@ -85,3 +85,60 @@ shadow_inner_selectors:
   - "[aria-checked]"
   - "label input[type='checkbox']"
   - "input[type='checkbox']"
+
+# Page titles that mean a challenge is still in progress.
+# Matched case-insensitively as substrings of the page title.
+challenge_titles:
+  - "just a moment"
+  - "checking your browser"
+  - "ddos-guard"
+  - "please wait"
+  - "attention required"
+
+# CSS selectors that mean a challenge is still in progress.
+# Checked in order; the first one present is reported.
+challenge_selectors:
+  - "#cf-challenge-running"
+  - ".ray_id"
+  - "#turnstile-wrapper"
+  - ".cf-turnstile"
+  - "#cf-wrapper"
+  - "#challenge-running"
+  - "#challenge-stage"
+  - "#cf-spinner-please-wait"
+  - "#cf-spinner-redirecting"
+  - "iframe[src*='challenges.cloudflare.com']"
+
+# The challenge selectors that should start Turnstile solving. Broader than the
+# widget itself: it includes interstitial pages that embed Turnstile in an iframe.
+turnstile_trigger_selectors:
+  - "#turnstile-wrapper"
+  - ".cf-turnstile"
+  - "iframe[src*='challenges.cloudflare.com']"
+  - "#cf-challenge-running"
+  - "#challenge-stage"
+
+# Selectors for the Turnstile widget on the page. While any of them is present
+# the widget is still there. The first is the widget element whose state
+# (success class, response token) is inspected.
+turnstile_widget_selectors:
+  - ".cf-turnstile"
+  - "#turnstile-wrapper"
+
+# Elements to click when clicking the widget directly, in order of preference.
+# The iframe comes first: it is the most likely to contain the checkbox.
+turnstile_click_selectors:
+  - ".cf-turnstile iframe"
+  - "[data-sitekey] iframe"
+  - ".cf-turnstile"
+  - "[data-sitekey]"
+
+# Containers whose position is used for a positional click when no shadow host
+# gives one.
+turnstile_container_selectors:
+  - "#turnstile-wrapper"
+  - ".cf-turnstile"
+  - "[data-sitekey]"
+
+# The hidden input Turnstile writes its token to. Its parent holds the widget.
+turnstile_landmark_selector: "input[name='cf-turnstile-response']"

@@ -450,6 +450,12 @@ func (s *Selectors) Validate() error {
 		{"turnstile_selectors", s.TurnstileSelectors},
 		{"shadow_hosts", s.ShadowHosts},
 		{"shadow_inner_selectors", s.ShadowInnerSelectors},
+		{"challenge_titles", s.ChallengeTitles},
+		{"challenge_selectors", s.ChallengeSelectors},
+		{"turnstile_trigger_selectors", s.TurnstileTriggerSelectors},
+		{"turnstile_widget_selectors", s.TurnstileWidgetSelectors},
+		{"turnstile_click_selectors", s.TurnstileClickSelectors},
+		{"turnstile_container_selectors", s.TurnstileContainerSelectors},
 	}
 	for _, list := range lists {
 		for i, pattern := range list.patterns {
@@ -515,7 +521,28 @@ func (m *Manager) mergeWithEmbedded(external *Selectors) *Selectors {
 		merged.ShadowInnerSelectors = m.embedded.ShadowInnerSelectors
 	}
 
+	merged.ChallengeTitles = firstNonEmpty(external.ChallengeTitles, m.embedded.ChallengeTitles)
+	merged.ChallengeSelectors = firstNonEmpty(external.ChallengeSelectors, m.embedded.ChallengeSelectors)
+	merged.TurnstileTriggerSelectors = firstNonEmpty(external.TurnstileTriggerSelectors, m.embedded.TurnstileTriggerSelectors)
+	merged.TurnstileWidgetSelectors = firstNonEmpty(external.TurnstileWidgetSelectors, m.embedded.TurnstileWidgetSelectors)
+	merged.TurnstileClickSelectors = firstNonEmpty(external.TurnstileClickSelectors, m.embedded.TurnstileClickSelectors)
+	merged.TurnstileContainerSelectors = firstNonEmpty(external.TurnstileContainerSelectors, m.embedded.TurnstileContainerSelectors)
+
+	if external.TurnstileLandmarkSelector != "" {
+		merged.TurnstileLandmarkSelector = external.TurnstileLandmarkSelector
+	} else {
+		merged.TurnstileLandmarkSelector = m.embedded.TurnstileLandmarkSelector
+	}
+
 	return merged
+}
+
+// firstNonEmpty returns external when it has entries, otherwise embedded.
+func firstNonEmpty(external, embedded []string) []string {
+	if len(external) > 0 {
+		return external
+	}
+	return embedded
 }
 
 // startWatcher starts the file watcher for hot-reload.

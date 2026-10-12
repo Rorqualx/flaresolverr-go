@@ -29,15 +29,23 @@ var (
 // using CDP-native access. This bypasses JavaScript's closed shadow root
 // restrictions by using debugger-level DOM access.
 type ShadowRootTraverser struct {
-	page    *rod.Page
-	timeout time.Duration
+	page      *rod.Page
+	timeout   time.Duration
+	selectors *selectors.Selectors
 }
 
-// NewShadowRootTraverser creates a new traverser for the given page.
-func NewShadowRootTraverser(page *rod.Page) *ShadowRootTraverser {
+// NewShadowRootTraverser creates a new traverser for the given page. It uses
+// the selectors it is given, so a traverser made by a Solver sees the same
+// (possibly hot-reloaded) selectors as the rest of that solve. A nil value
+// means the embedded defaults.
+func NewShadowRootTraverser(page *rod.Page, sel *selectors.Selectors) *ShadowRootTraverser {
+	if sel == nil {
+		sel = selectors.Get()
+	}
 	return &ShadowRootTraverser{
-		page:    page,
-		timeout: 5 * time.Second,
+		page:      page,
+		timeout:   5 * time.Second,
+		selectors: sel,
 	}
 }
 
@@ -56,7 +64,7 @@ func (t *ShadowRootTraverser) WithTimeout(timeout time.Duration) *ShadowRootTrav
 // 2. Shadow host -> shadow root -> iframe -> shadow root -> checkbox (nested)
 // 3. Fallback to iframe-based checkbox location
 func (t *ShadowRootTraverser) FindTurnstileCheckbox(ctx context.Context) (*rod.Element, error) {
-	sel := selectors.Get()
+	sel := t.selectors
 
 	// Try each shadow host selector
 	for _, hostSelector := range sel.ShadowHosts {
@@ -158,7 +166,7 @@ func (t *ShadowRootTraverser) findCheckboxViaHost(ctx context.Context, hostSelec
 	}
 
 	// Search for checkbox within shadow root
-	sel := selectors.Get()
+	sel := t.selectors
 	for _, checkboxSelector := range sel.ShadowInnerSelectors {
 		checkbox, err := shadowRoot.Element(checkboxSelector)
 		if err == nil && checkbox != nil {
@@ -207,7 +215,7 @@ func (t *ShadowRootTraverser) findCheckboxViaHost(ctx context.Context, hostSelec
 // This input is structurally required by Cloudflare for form submission, making it
 // one of the most stable anchors for locating the Turnstile widget.
 func (t *ShadowRootTraverser) findCheckboxViaLandmark(ctx context.Context) (*rod.Element, error) {
-	const landmarkSelector = "input[name='cf-turnstile-response']"
+	landmarkSelector := t.selectors.TurnstileLandmarkSelector
 
 	has, _, _ := t.page.Has(landmarkSelector)
 	if !has {
@@ -258,7 +266,7 @@ func (t *ShadowRootTraverser) findCheckboxViaLandmark(ctx context.Context) (*rod
 	}
 
 	// Search for checkbox within the shadow root
-	sel := selectors.Get()
+	sel := t.selectors
 	for _, checkboxSelector := range sel.ShadowInnerSelectors {
 		checkbox, err := shadowRoot.Element(checkboxSelector)
 		if err == nil && checkbox != nil {
@@ -304,7 +312,7 @@ func (t *ShadowRootTraverser) findCheckboxViaLandmark(ctx context.Context) (*rod
 // findCheckboxInNestedShadow searches for checkbox in nested shadow roots within a frame.
 // Includes a maximum depth limit to prevent infinite recursion in deeply nested shadow roots.
 func (t *ShadowRootTraverser) findCheckboxInNestedShadow(ctx context.Context, frame *rod.Page) (*rod.Element, error) {
-	sel := selectors.Get()
+	sel := t.selectors
 
 	// Look for shadow hosts within the frame
 	for _, hostSelector := range sel.ShadowHosts {
@@ -357,7 +365,7 @@ func (t *ShadowRootTraverser) findCheckboxInNestedShadow(ctx context.Context, fr
 func (t *ShadowRootTraverser) findCheckboxInTurnstileIframes(ctx context.Context) (*rod.Element, error) {
 	const maxIframesToCheck = 20
 
-	sel := selectors.Get()
+	sel := t.selectors
 
 	iframes, err := t.page.Elements("iframe")
 	if err != nil {
@@ -731,7 +739,7 @@ func (t *ShadowRootTraverser) ClickCheckbox(ctx context.Context) (err error) {
 // GetTurnstileContainerBounds returns the bounding box of the Turnstile container.
 // Used for positional click fallback when the checkbox cannot be directly accessed.
 func (t *ShadowRootTraverser) GetTurnstileContainerBounds(ctx context.Context) (*proto.DOMRect, error) {
-	sel := selectors.Get()
+	sel := t.selectors
 
 	// Try each shadow host selector as container
 	for _, hostSelector := range sel.ShadowHosts {
@@ -771,13 +779,7 @@ func (t *ShadowRootTraverser) GetTurnstileContainerBounds(ctx context.Context) (
 	}
 
 	// Fallback: try standard Turnstile selectors
-	turnstileSelectors := []string{
-		"#turnstile-wrapper",
-		".cf-turnstile",
-		"[data-sitekey]",
-	}
-
-	for _, selector := range turnstileSelectors {
+	for _, selector := range sel.TurnstileContainerSelectors {
 		has, _, _ := t.page.Has(selector)
 		if !has {
 			continue

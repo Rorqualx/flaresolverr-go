@@ -1531,38 +1531,46 @@ func (s *Solver) setCustomHeaders(page *rod.Page, headers map[string]string) err
 	return nil
 }
 
-// Challenge titles that indicate a challenge is in progress
-var challengeTitles = []string{
-	"just a moment",
-	"checking your browser",
-	"ddos-guard",
-	"please wait",
-	"attention required",
+// titleHasChallenge reports whether a page title contains one of the
+// challenge titles. The comparison ignores the title's case; the patterns are
+// lowercase.
+func titleHasChallenge(title string, challengeTitles []string) bool {
+	titleLower := strings.ToLower(title)
+	for _, pattern := range challengeTitles {
+		if strings.Contains(titleLower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
-// Challenge selectors that indicate a challenge is in progress
-var challengeSelectors = []string{
-	"#cf-challenge-running",
-	".ray_id",
-	"#turnstile-wrapper",
-	".cf-turnstile", // Turnstile widget class (used by nowsecure.nl and others)
-	"#cf-wrapper",
-	"#challenge-running",
-	"#challenge-stage",
-	"#cf-spinner-please-wait",
-	"#cf-spinner-redirecting",
-	"iframe[src*='challenges.cloudflare.com']", // Turnstile embedded in CF interstitial iframe
+// selectorListed reports whether list contains exactly this selector.
+func selectorListed(list []string, selector string) bool {
+	for _, item := range list {
+		if item == selector {
+			return true
+		}
+	}
+	return false
 }
 
-// turnstileTriggerSelectors are selectors that should trigger Turnstile solving.
-// This is broader than just .cf-turnstile — it includes CF interstitial page indicators
-// where Turnstile is embedded inside iframes.
-var turnstileTriggerSelectors = map[string]bool{
-	"#turnstile-wrapper":                       true,
-	".cf-turnstile":                            true,
-	"iframe[src*='challenges.cloudflare.com']": true,
-	"#cf-challenge-running":                    true,
-	"#challenge-stage":                         true,
+// firstString returns the first entry of list, or "" when it is empty.
+func firstString(list []string) string {
+	if len(list) == 0 {
+		return ""
+	}
+	return list[0]
+}
+
+// hasAnySelector reports whether any of the selectors matches an element on
+// the page. It does not wait for one to appear.
+func hasAnySelector(page *rod.Page, selectorList []string) bool {
+	for _, selector := range selectorList {
+		if has, _, _ := page.Has(selector); has {
+			return true
+		}
+	}
+	return false
 }
 
 // solveParams carries the per-request settings the solve loop and the result
@@ -1695,14 +1703,7 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) 
 		}
 
 		// Check if title indicates a challenge
-		titleLower := strings.ToLower(title)
-		challengeInTitle := false
-		for _, t := range challengeTitles {
-			if strings.Contains(titleLower, t) {
-				challengeInTitle = true
-				break
-			}
-		}
+		challengeInTitle := titleHasChallenge(title, s.getSelectors().ChallengeTitles)
 
 		// Check if any challenge selector is present
 		challengeSelector := s.findChallengeSelector(page)
@@ -1760,7 +1761,7 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) 
 		// If Turnstile is present, try to solve it.
 		// Trigger on known Turnstile selectors OR when HTML analysis detects Turnstile
 		// (e.g., embedded in CF interstitial iframe where .cf-turnstile isn't on the main page).
-		shouldSolveTurnstile := turnstileTriggerSelectors[challengeSelector]
+		shouldSolveTurnstile := selectorListed(s.getSelectors().TurnstileTriggerSelectors, challengeSelector)
 		if !shouldSolveTurnstile && html != "" {
 			htmlChallenge := s.detectChallenge(html)
 			shouldSolveTurnstile = htmlChallenge == ChallengeTurnstile
@@ -1848,6 +1849,8 @@ func (s *Solver) getPageTitle(page *rod.Page) (string, error) {
 // Uses shared timeout budget across all selector checks to prevent stacked timeouts.
 // Fix: Share timeout budget across selectors instead of giving each one a full 2 seconds.
 func (s *Solver) findChallengeSelector(page *rod.Page) string {
+	challengeSelectors := s.getSelectors().ChallengeSelectors
+
 	// Calculate timeout budget: use page's context deadline if available, otherwise default
 	ctx := page.GetContext()
 	totalTimeout := 5 * time.Second // Default total budget for all selectors
@@ -2054,16 +2057,11 @@ func (s *Solver) solveTurnstileWait(ctx context.Context, page *rod.Page) error {
 		}
 
 		// Check if Turnstile widget disappeared (page redirected after success)
-		has, _, _ := page.Has(".cf-turnstile")
-		if !has {
-			// Also check for #turnstile-wrapper
-			has2, _, _ := page.Has("#turnstile-wrapper")
-			if !has2 {
-				log.Debug().
-					Int("iteration", i+1).
-					Msg("Turnstile widget disappeared during wait")
-				return nil
-			}
+		if !hasAnySelector(page, s.getSelectors().TurnstileWidgetSelectors) {
+			log.Debug().
+				Int("iteration", i+1).
+				Msg("Turnstile widget disappeared during wait")
+			return nil
 		}
 
 		log.Debug().
@@ -2203,11 +2201,18 @@ func (s *Solver) isTurnstileSolved(page *rod.Page) bool {
 		return true
 	}
 
+	// The widget whose state is inspected is the first widget selector. It is
+	// passed to the script as a JSON string, so no selector can break out of it.
+	widgetSelector, err := json.Marshal(firstString(s.getSelectors().TurnstileWidgetSelectors))
+	if err != nil {
+		return false
+	}
+
 	// Check for success indicators via JavaScript
 	result, err := proto.RuntimeEvaluate{
-		Expression: `(function() {
+		Expression: `(function(widgetSelector) {
 			// Check if Turnstile widget still exists
-			var widget = document.querySelector('.cf-turnstile');
+			var widget = widgetSelector ? document.querySelector(widgetSelector) : null;
 			if (!widget) {
 				// Widget disappeared - check if page actually changed
 				return document.title !== 'Just a moment...' && !document.querySelector('#challenge-running');
@@ -2246,7 +2251,7 @@ func (s *Solver) isTurnstileSolved(page *rod.Page) bool {
 			}
 
 			return false;
-		})()`,
+		})(` + string(widgetSelector) + `)`,
 		ReturnByValue: true,
 	}.Call(page)
 
@@ -2269,7 +2274,7 @@ func (s *Solver) solveTurnstileShadow(ctx context.Context, page *rod.Page) error
 	log.Debug().Msg("Trying CDP-native shadow DOM traversal for Turnstile")
 
 	// Use shorter timeout for shadow traverser
-	traverser := NewShadowRootTraverser(page).WithTimeout(2 * time.Second)
+	traverser := NewShadowRootTraverser(page, s.getSelectors()).WithTimeout(2 * time.Second)
 
 	// Try to find and click the checkbox via shadow DOM
 	if err := traverser.ClickCheckbox(ctx); err != nil {
@@ -2297,7 +2302,7 @@ func (s *Solver) solveTurnstilePositional(ctx context.Context, page *rod.Page) e
 	log.Debug().Msg("Trying positional click for Turnstile with humanized movement")
 
 	// OPTIMIZATION: Use shorter timeout for traverser
-	traverser := NewShadowRootTraverser(page).WithTimeout(1 * time.Second)
+	traverser := NewShadowRootTraverser(page, s.getSelectors()).WithTimeout(1 * time.Second)
 
 	// Get the Turnstile container bounds
 	bounds, err := traverser.GetTurnstileContainerBounds(ctx)
@@ -2398,16 +2403,9 @@ func (s *Solver) solveTurnstileWidget(ctx context.Context, page *rod.Page) error
 	mouse := humanize.NewMouse(page)
 	scroller := humanize.NewScroller(page)
 
-	// Try clicking on .cf-turnstile widget or its checkbox
-	// Prioritized selectors - iframe first as it's more likely to contain the checkbox
-	widgetSelectors := []string{
-		".cf-turnstile iframe",
-		"[data-sitekey] iframe",
-		".cf-turnstile",
-		"[data-sitekey]",
-	}
-
-	for _, selector := range widgetSelectors {
+	// Try clicking on the widget or its checkbox. The selectors are in order
+	// of preference - iframe first as it's more likely to contain the checkbox
+	for _, selector := range s.getSelectors().TurnstileClickSelectors {
 		// Check context at each iteration
 		if ctx.Err() != nil {
 			return ctx.Err()
