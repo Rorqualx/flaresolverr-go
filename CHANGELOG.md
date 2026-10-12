@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-12
+
+### Changed (may need action on upgrade)
+- **Chromium 149 (Alpine 3.23)** - The image moves from Alpine 3.21 (end of support 2026-11-01) to Alpine 3.23, and the browser from Chromium 136 to 149. The reported user agent, the `Sec-CH-UA` brand list and the full version change with it; if you pin the user agent that goes with a stored `cf_clearance`, solve again after upgrading. Measured on the test host against the previous image: the same TLS (JA4) and HTTP/2 fingerprint, all 31 bot.sannysoft.com checks passing on stateless and session requests, 20 of 20 nowsecure.nl solves with the same median time. Chromium 149 reports the machine's memory in `navigator.deviceMemory` up to 32 (136 stopped at 8), and refuses on its own a public page's request to `127.0.0.1` or a private address. Alpine 3.24 was not used: its Chromium 152 package never finishes loading some pages, bot.sannysoft.com among them, also when started by hand outside FlareSolverr.
+
+### Fixed
+- **Leftover reconnect-bypass profile** - Removing the temporary browser profile of the reconnect bypass could fail with "directory not empty" while the browser that had just been stopped was still writing to it, leaving the profile in the temp directory until the container restarted. The removal is now retried for up to a second.
+
+### Internal
+- Dependabot no longer proposes Alpine minor upgrades for the image: the base image decides the Chromium version and so the browser fingerprint, and is moved by hand after a probe run.
+
 ## [0.10.1] - 2026-10-12
 
 ### Fixed

@@ -274,7 +274,7 @@ func testBrowserStartup(pool *browser.Pool, testURL string) {
 // preventing detection by Cloudflare which checks for version mismatches.
 func getActualUserAgent(pool *browser.Pool) string {
 	// Fallback user agent in case we can't get the real one
-	fallbackUA := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+	fallbackUA := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
 	// Acquire a browser to get the real user agent
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

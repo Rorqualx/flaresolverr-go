@@ -26,9 +26,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     ./cmd/flaresolverr
 
 # Final stage
-# Use Alpine 3.21 for newer Chromium (136 vs 124 in 3.19)
-# This provides better compatibility with anti-bot detection
-FROM alpine:3.21
+# Alpine 3.23 ships Chromium 149. Do not move to 3.24 without re-testing: its
+# Chromium 152 package never finishes loading some pages (bot.sannysoft.com is
+# one), also when started by hand with no flags from this project. A browser
+# upgrade changes the fingerprint, so re-run the probe suite before any bump.
+FROM alpine:3.23
 
 # Install Chromium, xvfb, and required dependencies
 # mesa-* packages provide OpenGL/WebGL software rendering via SwiftShader/llvmpipe
