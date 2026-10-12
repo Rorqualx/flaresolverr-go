@@ -13,6 +13,18 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
+const (
+	// DefaultMaxExternalSolves is how many paid tasks one request may create
+	// when the operator enabled the fallback and did not say otherwise.
+	DefaultMaxExternalSolves = 1
+
+	// MaxExternalSolvesLimit is the hard ceiling for the per-request budget.
+	MaxExternalSolvesLimit = 3
+
+	defaultNativeAttempts = 3
+	maxNativeAttempts     = 10
+)
+
 // CaptchaSolver defines the interface for external CAPTCHA solving providers.
 type CaptchaSolver interface {
 	// Name returns the provider name (e.g., "2captcha", "capsolver").
@@ -62,13 +74,18 @@ type TurnstileResult struct {
 	Provider  string        // Which provider solved it
 }
 
-// SolverChain orchestrates native and external CAPTCHA solving.
-// It tracks attempts and determines when to fall back to external solvers.
+// SolverChain holds the server-wide external solving configuration. It buys
+// nothing itself: every request gets its own RequestSolver (NewRequest), which
+// carries that request's providers and budget.
 type SolverChain struct {
-	nativeAttempts int             // Number of native attempts before fallback
-	providers      []CaptchaSolver // External solver providers in order of preference
-	metrics        *Metrics        // Usage metrics tracking
-	enabled        bool            // Whether external fallback is enabled
+	nativeAttempts  int               // Number of native attempts before fallback
+	providers       []CaptchaSolver   // External solver providers in order of preference
+	metrics         *Metrics          // Usage metrics tracking
+	enabled         bool              // Whether external fallback is enabled
+	maxSolves       int               // Paid tasks one request may create
+	providerTimeout time.Duration     // Solve timeout for providers built from a per-request key
+	baseURLs        map[string]string // Provider base URL overrides, by provider name
+	pollInterval    time.Duration     // Poll interval override for per-request providers (testing)
 }
 
 // SolverChainConfig contains configuration for the SolverChain.
@@ -77,53 +94,99 @@ type SolverChainConfig struct {
 	Providers       []CaptchaSolver // External providers in priority order
 	Metrics         *Metrics        // Metrics tracker (optional)
 	FallbackEnabled bool            // Whether external fallback is enabled
+
+	// MaxExternalSolves is how many paid tasks one request may create with the
+	// server's own keys. Zero buys nothing; values above MaxExternalSolvesLimit
+	// are clamped.
+	MaxExternalSolves int
+
+	// Settings for providers built on the fly from a per-request API key.
+	ProviderTimeout time.Duration     // Solve timeout (zero selects each provider's default)
+	BaseURLs        map[string]string // Base URL overrides by provider name
+	PollInterval    time.Duration     // Poll interval override (testing)
 }
 
 // NewSolverChain creates a new SolverChain with the given configuration.
 func NewSolverChain(cfg SolverChainConfig) *SolverChain {
 	nativeAttempts := cfg.NativeAttempts
 	if nativeAttempts < 1 {
-		nativeAttempts = 3
+		nativeAttempts = defaultNativeAttempts
 	}
-	if nativeAttempts > 10 {
-		nativeAttempts = 10
+	if nativeAttempts > maxNativeAttempts {
+		nativeAttempts = maxNativeAttempts
+	}
+
+	baseURLs := make(map[string]string, len(cfg.BaseURLs))
+	for name, baseURL := range cfg.BaseURLs {
+		if baseURL != "" {
+			baseURLs[name] = baseURL
+		}
 	}
 
 	return &SolverChain{
-		nativeAttempts: nativeAttempts,
-		providers:      cfg.Providers,
-		metrics:        cfg.Metrics,
-		enabled:        cfg.FallbackEnabled,
+		nativeAttempts:  nativeAttempts,
+		providers:       cfg.Providers,
+		metrics:         cfg.Metrics,
+		enabled:         cfg.FallbackEnabled,
+		maxSolves:       ClampMaxExternalSolves(cfg.MaxExternalSolves),
+		providerTimeout: cfg.ProviderTimeout,
+		baseURLs:        baseURLs,
+		pollInterval:    cfg.PollInterval,
 	}
 }
 
-// ShouldFallback returns true if native solving has been exhausted
-// and external solving should be attempted.
+// ClampMaxExternalSolves bounds a per-request budget to [0, MaxExternalSolvesLimit].
+func ClampMaxExternalSolves(n int) int {
+	if n < 0 {
+		return 0
+	}
+	if n > MaxExternalSolvesLimit {
+		return MaxExternalSolvesLimit
+	}
+	return n
+}
+
+// ShouldFallback reports whether the server-wide configuration would hand a
+// Turnstile to an external solver after this many native attempts. It knows
+// nothing about any one request's budget or policy; the solve loop asks the
+// request's RequestSolver instead.
 func (c *SolverChain) ShouldFallback(attempts int) bool {
-	if !c.enabled {
-		return false
-	}
-	return attempts >= c.nativeAttempts
+	return c.IsEnabled() && attempts >= c.nativeAttempts
 }
 
-// IsEnabled returns true if external CAPTCHA solving is enabled.
+// IsEnabled returns true if external CAPTCHA solving with the server's own keys
+// is enabled.
 func (c *SolverChain) IsEnabled() bool {
-	return c.enabled
+	return c != nil && c.enabled
 }
 
 // NativeAttempts returns the configured number of native attempts.
 func (c *SolverChain) NativeAttempts() int {
+	if c == nil {
+		return defaultNativeAttempts
+	}
 	return c.nativeAttempts
+}
+
+// MaxExternalSolves returns the per-request budget for the server's own keys.
+func (c *SolverChain) MaxExternalSolves() int {
+	if c == nil {
+		return 0
+	}
+	return c.maxSolves
 }
 
 // GetProviders returns the list of configured CAPTCHA solver providers.
 func (c *SolverChain) GetProviders() []CaptchaSolver {
+	if c == nil {
+		return nil
+	}
 	return c.providers
 }
 
 // HasProviders returns true if at least one provider is configured.
 func (c *SolverChain) HasProviders() bool {
-	for _, p := range c.providers {
+	for _, p := range c.GetProviders() {
 		if p.IsConfigured() {
 			return true
 		}
@@ -138,6 +201,22 @@ type SolveResult struct {
 	SolveTime time.Duration // How long the solve took
 	Cost      float64       // Cost in USD (0 for native)
 	Injected  bool          // Whether the token was successfully injected
+}
+
+// Metrics returns the usage metrics tracker, or nil if none was configured.
+func (c *SolverChain) Metrics() *Metrics {
+	if c == nil {
+		return nil
+	}
+	return c.metrics
+}
+
+// GetMetrics returns the current metrics for all providers.
+func (c *SolverChain) GetMetrics() map[string]interface{} {
+	if c == nil || c.metrics == nil {
+		return nil
+	}
+	return c.metrics.ToJSON()
 }
 
 // Solve attempts to solve the Turnstile challenge using external providers.
@@ -337,12 +416,4 @@ func (c *SolverChain) SolveHCaptcha(ctx context.Context, page *rod.Page, pageURL
 	}
 
 	return nil, types.ErrCaptchaNoProviders
-}
-
-// GetMetrics returns the current metrics for all providers.
-func (c *SolverChain) GetMetrics() map[string]interface{} {
-	if c.metrics == nil {
-		return nil
-	}
-	return c.metrics.ToJSON()
 }

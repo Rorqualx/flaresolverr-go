@@ -49,7 +49,7 @@ type Request struct {
 	TabsTillVerify     int                `json:"tabsTillVerify,omitempty"`     // Number of Tab presses to reach Turnstile checkbox (default: 10)
 	Download           bool               `json:"download,omitempty"`           // Download URL as binary and return base64 in response
 	FollowRedirects    *bool              `json:"followRedirects,omitempty"`    // Follow HTTP redirects (default: true)
-	CaptchaSolver      string             `json:"captchaSolver,omitempty"`      // Per-request captcha provider: "2captcha", "capsolver", or "none"
+	CaptchaSolver      string             `json:"captchaSolver,omitempty"`      // Per-request captcha provider ("2captcha", "capsolver", "anticaptcha", "9kw"), or "none" to forbid external solving
 	CaptchaApiKey      string             `json:"captchaApiKey,omitempty"`      //nolint:revive,stylecheck // JSON API compatibility
 	UserAgent          string             `json:"userAgent,omitempty"`          // Override User-Agent for this request
 	ReturnRawHtml      bool               `json:"returnRawHtml,omitempty"`      //nolint:revive,stylecheck // JSON API compatibility
@@ -189,6 +189,18 @@ func (r *Request) Validate() error {
 	if r.CaptchaSolver != "" {
 		if !isValidCaptchaSolver(r.CaptchaSolver) {
 			return fmt.Errorf("captchaSolver %q is not a registered provider", r.CaptchaSolver)
+		}
+	}
+	// A per-request key only means something together with the provider it
+	// belongs to. SECURITY: never include the key itself in an error.
+	if r.CaptchaApiKey != "" {
+		switch {
+		case r.CaptchaSolver == "":
+			return fmt.Errorf("captchaApiKey requires captchaSolver to name the provider it belongs to")
+		case r.CaptchaSolver == CaptchaSolverNone:
+			return fmt.Errorf("captchaApiKey cannot be combined with captchaSolver %q", CaptchaSolverNone)
+		case len(r.CaptchaApiKey) > MaxCaptchaAPIKeyLength:
+			return fmt.Errorf("captchaApiKey exceeds maximum length of %d", MaxCaptchaAPIKeyLength)
 		}
 	}
 
@@ -426,9 +438,18 @@ type FingerprintConfig struct {
 // dynamically against the registry. Falls back to a hardcoded list if not set.
 var CaptchaSolverValidator func(name string) bool
 
+const (
+	// CaptchaSolverNone is the captchaSolver value that turns external solving
+	// off for one request.
+	CaptchaSolverNone = "none"
+
+	// MaxCaptchaAPIKeyLength bounds the per-request captchaApiKey.
+	MaxCaptchaAPIKeyLength = 256
+)
+
 // isValidCaptchaSolver checks if a captcha solver name is valid.
 func isValidCaptchaSolver(name string) bool {
-	if name == "none" {
+	if name == CaptchaSolverNone {
 		return true
 	}
 	if CaptchaSolverValidator != nil {
@@ -436,7 +457,7 @@ func isValidCaptchaSolver(name string) bool {
 	}
 	// Fallback: hardcoded list for when registry isn't initialized
 	switch name {
-	case "2captcha", "capsolver", "anticaptcha":
+	case "2captcha", "capsolver", "anticaptcha", "9kw":
 		return true
 	}
 	return false
