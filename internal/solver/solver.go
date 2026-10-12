@@ -21,7 +21,6 @@ import (
 	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/go-rod/stealth"
 	"github.com/rs/zerolog/log"
 	"github.com/ysmood/gson"
 
@@ -505,26 +504,14 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	var page *rod.Page
 
-	// For POST requests, we need a special approach because stealth scripts
-	// conflict with form creation JavaScript. We use a regular page and
-	// apply stealth manually after the POST navigation.
+	// POST request path. The page is prepared exactly as for a GET; only the
+	// navigation differs (a submitted form or a fetch instead of Navigate).
 	if opts.IsPost && opts.PostData != "" {
-		// Fix 2.10: Use stealth.Page for POST requests too - apply stealth before navigation
-		// The previous concern about conflicts was resolved by proper ordering
-		page, err = stealth.Page(requestBrowser)
+		page, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create stealth page for POST: %w", err)
+			return nil, fmt.Errorf("failed to create page for POST: %w", err)
 		}
 		defer page.Close()
-
-		// Layer our custom stealth over go-rod/stealth. go-rod/stealth alone
-		// reports a macOS WebGL renderer on Linux and leaves screen at the
-		// headless 800x600 default — both bot tells. ApplyStealthToPage fixes the
-		// WebGL/OS consistency and screen geometry (registered after go-rod/stealth
-		// so it wins). See docs/INVESTIGATION-fingerprint-gate2.md.
-		if err := browser.ApplyGate2Corrections(page); err != nil {
-			log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (POST)")
-		}
 
 		// Install the turnstile.render interceptor before navigation so managed
 		// challenges expose their sitekey/action/cData/chlPageData to the external
@@ -532,24 +519,6 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		if s.externalSolver(opts).Active() {
 			captcha.InstallTurnstileInterceptor(solveCtx, page)
 			defer captcha.RemoveTurnstileInterceptor(page)
-		}
-
-		if tz := resolveTimezone(opts); tz != "" {
-			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
-				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
-			}
-		}
-
-		// Set user agent — per-request override takes priority
-		if ua := s.effectiveUserAgent(opts); ua != "" {
-			if err := browser.SetUserAgent(page, ua); err != nil {
-				log.Warn().Err(err).Msg("Failed to set user agent")
-			}
-		}
-
-		// Set viewport
-		if err := browser.SetViewport(page, 1920, 1080); err != nil {
-			log.Warn().Err(err).Msg("Failed to set viewport")
 		}
 
 		// Set up media blocking if requested
@@ -613,21 +582,11 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// GET request path
-	// For GET requests, use stealth page
-	page, err = stealth.Page(requestBrowser)
+	page, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stealth page: %w", err)
+		return nil, fmt.Errorf("failed to create page: %w", err)
 	}
 	defer page.Close()
-
-	// Layer our custom stealth over go-rod/stealth. go-rod/stealth alone reports a
-	// macOS WebGL renderer on Linux and leaves screen at the headless 800x600
-	// default — both bot tells. ApplyStealthToPage fixes WebGL/OS consistency and
-	// screen geometry (registered after go-rod/stealth so it wins).
-	// See docs/INVESTIGATION-fingerprint-gate2.md.
-	if err := browser.ApplyGate2Corrections(page); err != nil {
-		log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (GET)")
-	}
 
 	// Install the turnstile.render interceptor before navigation so managed
 	// challenges expose their sitekey/action/cData/chlPageData to the external
@@ -635,28 +594,6 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	if s.externalSolver(opts).Active() {
 		captcha.InstallTurnstileInterceptor(solveCtx, page)
 		defer captcha.RemoveTurnstileInterceptor(page)
-	}
-
-	if tz := resolveTimezone(opts); tz != "" {
-		if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
-			log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
-		}
-	}
-
-	// Set user agent — per-request override takes priority
-	ua := s.effectiveUserAgent(opts)
-	if opts.UserAgent != "" {
-		log.Debug().Str("user_agent", ua).Msg("Using per-request User-Agent override")
-	}
-	if ua != "" {
-		if err := browser.SetUserAgent(page, ua); err != nil {
-			log.Warn().Err(err).Msg("Failed to set user agent")
-		}
-	}
-
-	// Set viewport
-	if err := browser.SetViewport(page, 1920, 1080); err != nil {
-		log.Warn().Err(err).Msg("Failed to set viewport")
 	}
 
 	// Set up media blocking if requested
@@ -760,7 +697,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 			StatusCode:      fetchData.Status,
 			HTML:            fetchData.Body,
 			URL:             opts.URL,
-			UserAgent:       ua,
+			UserAgent:       s.effectiveUserAgent(opts),
 			ResponseHeaders: fetchData.Headers,
 		}, nil
 	}
@@ -804,7 +741,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 				StatusCode: 200,
 				HTML:       rawHTML,
 				URL:        opts.URL,
-				UserAgent:  ua,
+				UserAgent:  s.effectiveUserAgent(opts),
 			}, nil
 		}
 	}
@@ -3208,6 +3145,39 @@ func (s *Solver) captureScreenshot(page *rod.Page) ([]byte, error) {
 	return screenshot, nil
 }
 
+// pageSetup returns the page setup for a request. Every request path uses it,
+// so stateless and session pages present the same browser.
+func (s *Solver) pageSetup(opts *SolveOptions) browser.PageSetup {
+	if opts.UserAgent != "" {
+		log.Debug().Str("user_agent", opts.UserAgent).Msg("Using per-request User-Agent override")
+	}
+	return browser.PageSetup{
+		UserAgent: s.effectiveUserAgent(opts),
+		Timezone:  resolveTimezone(opts),
+	}
+}
+
+// newPreparedPage opens a page in the given browser context and applies the
+// shared page setup. The caller owns the returned page and must close it.
+//
+// Opening the page is bounded by ctx: a browser that has stopped answering
+// fails the request at its deadline instead of holding it forever. The page
+// itself is returned on the browser's own context, so closing it still works
+// after ctx has ended.
+func (s *Solver) newPreparedPage(ctx context.Context, b *rod.Browser, opts *SolveOptions) (*rod.Page, error) {
+	page, err := b.Context(ctx).Page(proto.TargetCreateTarget{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open page: %w", err)
+	}
+	page = page.Context(b.GetContext())
+	if err := browser.PreparePage(page, s.pageSetup(opts)); err != nil {
+		// Ignore error: the setup failure is the one worth reporting
+		_ = page.Close()
+		return nil, err
+	}
+	return page, nil
+}
+
 // SolveWithPage solves a challenge using an existing page (for session support).
 func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveOptions) (*Result, error) {
 	log.Info().
@@ -3216,41 +3186,13 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve with existing page")
 
-	// Apply stealth patches only to fresh/blank pages
-	// On session reuse, the page already has content and stealth was already applied
-	// Trying to re-apply stealth to a loaded page causes errors due to stale JS context
+	// Prepare only a fresh, blank page. A reused session page was prepared on
+	// its first request, and the registered scripts and CDP overrides persist
+	// for the life of the page.
 	pageInfo, _ := page.Info()
 	if pageInfo == nil || pageInfo.URL == "" || pageInfo.URL == "about:blank" {
-		if opts.Fingerprint != nil {
-			profile := browser.ResolveProfile(opts.Fingerprint.Profile, opts.Fingerprint.Overrides, opts.Fingerprint.DisablePatches)
-			if err := browser.ApplyStealthToPageWithProfile(page, profile); err != nil {
-				log.Warn().Err(err).Msg("Failed to apply stealth patches with fingerprint profile")
-			}
-		} else {
-			if err := browser.ApplyStealthToPage(page); err != nil {
-				log.Warn().Err(err).Msg("Failed to apply stealth patches")
-			}
-		}
-		// Screen/window geometry coherence (the full stealthScript already sets a
-		// Linux-correct WebGL renderer, but not screen geometry).
-		if err := browser.ApplyGate2Corrections(page); err != nil {
-			log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (session)")
-		}
-		if tz := resolveTimezone(opts); tz != "" {
-			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
-				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
-			}
-		}
-		// The stateless paths set these; without them a session page kept
-		// go-rod's default device emulation (a macOS Chrome 114 User-Agent and
-		// a 1280x800 viewport) while the result reported the server's UA.
-		if ua := s.effectiveUserAgent(opts); ua != "" {
-			if err := browser.SetUserAgent(page, ua); err != nil {
-				log.Warn().Err(err).Msg("Failed to set user agent (session)")
-			}
-		}
-		if err := browser.SetViewport(page, 1920, 1080); err != nil {
-			log.Warn().Err(err).Msg("Failed to set viewport (session)")
+		if err := browser.PreparePage(page, s.pageSetup(opts)); err != nil {
+			return nil, fmt.Errorf("failed to prepare session page: %w", err)
 		}
 	} else {
 		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping stealth on reused session page")
