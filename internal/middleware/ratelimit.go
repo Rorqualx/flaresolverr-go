@@ -1,8 +1,8 @@
 package middleware
 
 import (
-	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -16,15 +16,15 @@ const maxClients = 10000
 
 // RateLimiter implements a token bucket rate limiter per IP.
 type RateLimiter struct {
-	mu         sync.Mutex
-	clients    map[string]*client
-	rate       int           // requests per window
-	window     time.Duration // time window
-	cleanup    time.Duration // cleanup interval for stale entries
-	trustProxy bool          // whether to trust X-Forwarded-For headers
-	stopCh     chan struct{}
-	wg         sync.WaitGroup // Track background goroutines for clean shutdown
-	closeOnce  sync.Once      // Fix #28: Ensure Close is idempotent
+	mu        sync.Mutex
+	clients   map[string]*client
+	rate      int           // requests per window
+	window    time.Duration // time window
+	cleanup   time.Duration // cleanup interval for stale entries
+	trust     ProxyTrust    // which peers may report the client address in headers
+	stopCh    chan struct{}
+	wg        sync.WaitGroup // Track background goroutines for clean shutdown
+	closeOnce sync.Once      // Fix #28: Ensure Close is idempotent
 }
 
 type client struct {
@@ -37,13 +37,36 @@ type client struct {
 // window: time window for rate limiting
 // trustProxy: whether to trust X-Forwarded-For and X-Real-IP headers
 func NewRateLimiter(rate int, window time.Duration, trustProxy bool) *RateLimiter {
+	return NewRateLimiterWithTrust(rate, window, ProxyTrust{Enabled: trustProxy})
+}
+
+// ProxyTrust says whose word is taken for a request's client address.
+//
+// X-Forwarded-For is written by whoever sent the request, so it is only
+// meaningful when the request came from a reverse proxy the operator runs.
+type ProxyTrust struct {
+	// Enabled turns on use of X-Forwarded-For / X-Real-IP (TRUST_PROXY).
+	Enabled bool
+
+	// Proxies lists the reverse proxies' addresses (TRUSTED_PROXIES). When set,
+	// the headers are used only for requests arriving from one of them, and
+	// X-Forwarded-For is read from the right, skipping trusted hops, so a
+	// client cannot choose its own key by prepending addresses.
+	//
+	// When empty (with Enabled), the leftmost X-Forwarded-For entry is believed
+	// from any peer: the legacy behavior, which a client can spoof.
+	Proxies []netip.Prefix
+}
+
+// NewRateLimiterWithTrust creates a new rate limiter with explicit proxy trust.
+func NewRateLimiterWithTrust(rate int, window time.Duration, trust ProxyTrust) *RateLimiter {
 	rl := &RateLimiter{
-		clients:    make(map[string]*client),
-		rate:       rate,
-		window:     window,
-		cleanup:    5 * time.Minute,
-		trustProxy: trustProxy,
-		stopCh:     make(chan struct{}),
+		clients: make(map[string]*client),
+		rate:    rate,
+		window:  window,
+		cleanup: 5 * time.Minute,
+		trust:   trust,
+		stopCh:  make(chan struct{}),
 	}
 
 	// Start cleanup routine with WaitGroup tracking for clean shutdown
@@ -159,7 +182,7 @@ func (rl *RateLimiter) Close() {
 
 // GetClientIP extracts the client IP from the request.
 func (rl *RateLimiter) GetClientIP(r *http.Request) string {
-	return getClientIP(r, rl.trustProxy)
+	return clientKey(r, rl.trust)
 }
 
 // RateLimit returns middleware that limits requests per IP.
@@ -237,8 +260,8 @@ func RateLimitWithTrust(requestsPerMinute int, trustProxy bool) func(http.Handle
 
 // NewRateLimitMiddleware creates a rate limiter middleware with cleanup support.
 // Call Close() on the returned middleware during shutdown to prevent goroutine leaks.
-func NewRateLimitMiddleware(requestsPerMinute int, trustProxy bool) *RateLimiterMiddleware {
-	limiter := NewRateLimiter(requestsPerMinute, time.Minute, trustProxy)
+func NewRateLimitMiddleware(requestsPerMinute int, trust ProxyTrust) *RateLimiterMiddleware {
+	limiter := NewRateLimiterWithTrust(requestsPerMinute, time.Minute, trust)
 
 	m := &RateLimiterMiddleware{
 		limiter: limiter,
@@ -262,66 +285,110 @@ func NewRateLimitMiddleware(requestsPerMinute int, trustProxy bool) *RateLimiter
 	return m
 }
 
-// normalizeIP validates and normalizes an IP address string.
-// Returns a canonical IP string or the original string if invalid.
-// This prevents bypass attempts using IPv6 variations.
-func normalizeIP(ipStr string) string {
-	ipStr = strings.TrimSpace(ipStr)
-	if ipStr == "" {
-		return ""
-	}
+// ipv6ClientPrefixBits is the prefix an IPv6 client is keyed by. A single
+// subscriber is normally handed a /64 or larger, so limiting per address would
+// let one client use 2^64 keys.
+const ipv6ClientPrefixBits = 64
 
-	// Parse and normalize the IP
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		// Invalid IP - return as-is for logging but may cause issues
-		return ipStr
+// parseClientAddr parses an address from a header or RemoteAddr host part.
+// It accepts a bare address or address:port, and normalises IPv4-mapped IPv6.
+func parseClientAddr(value string) (netip.Addr, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return netip.Addr{}, false
 	}
-
-	// Normalize IPv4-mapped IPv6 addresses to IPv4
-	if ip4 := ip.To4(); ip4 != nil {
-		return ip4.String()
+	if addr, err := netip.ParseAddr(value); err == nil {
+		return addr.Unmap().WithZone(""), true
 	}
-
-	// Return canonical IPv6 form
-	return ip.String()
+	if addrPort, err := netip.ParseAddrPort(value); err == nil {
+		return addrPort.Addr().Unmap().WithZone(""), true
+	}
+	return netip.Addr{}, false
 }
 
-// getClientIP extracts the client IP from the request.
-// When trustProxy is false (default), only RemoteAddr is used to prevent IP spoofing.
-// When trustProxy is true, X-Forwarded-For and X-Real-IP headers are checked first.
-// Fix: Validates and normalizes IP addresses to prevent bypasses.
-func getClientIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		// Check X-Forwarded-For header (may contain multiple IPs)
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Take the first IP (leftmost = original client)
-			var ipStr string
-			if idx := strings.Index(xff, ","); idx > 0 {
-				ipStr = xff[:idx]
-			} else {
-				ipStr = xff
-			}
-			// Validate and normalize the extracted IP
-			normalized := normalizeIP(ipStr)
-			if normalized != "" {
-				return normalized
-			}
-		}
-
-		// Check X-Real-IP header
-		if xri := r.Header.Get("X-Real-IP"); xri != "" {
-			normalized := normalizeIP(xri)
-			if normalized != "" {
-				return normalized
-			}
+// rateKey turns a client address into a rate-limit key: the address itself
+// for IPv4, the /64 it belongs to for IPv6.
+func rateKey(addr netip.Addr) string {
+	if addr.Is6() {
+		if prefix, err := addr.Prefix(ipv6ClientPrefixBits); err == nil {
+			return prefix.String()
 		}
 	}
+	return addr.String()
+}
 
-	// Use RemoteAddr (always trusted as it's from the TCP connection)
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+// trusted reports whether addr is one of the operator's reverse proxies.
+func (t ProxyTrust) trusted(addr netip.Addr) bool {
+	for _, prefix := range t.Proxies {
+		if prefix.Contains(addr) {
+			return true
+		}
 	}
-	return normalizeIP(ip)
+	return false
+}
+
+// clientKey returns the rate-limit key for a request.
+//
+// The peer address of the TCP connection is the only thing a client cannot
+// forge, so it is the answer unless the operator has said forwarding headers
+// may be believed. A header value that is not an IP address is never used as a
+// key: it would let a client mint unlimited keys of arbitrary size.
+func clientKey(r *http.Request, trust ProxyTrust) string {
+	remote, remoteOK := parseClientAddr(r.RemoteAddr)
+	fallback := r.RemoteAddr
+	if remoteOK {
+		fallback = rateKey(remote)
+	}
+
+	if !trust.Enabled {
+		return fallback
+	}
+
+	if len(trust.Proxies) == 0 {
+		// Legacy mode: believe the leftmost X-Forwarded-For entry from anyone
+		if first, _, _ := strings.Cut(r.Header.Get("X-Forwarded-For"), ","); first != "" {
+			if addr, ok := parseClientAddr(first); ok {
+				return rateKey(addr)
+			}
+			return fallback
+		}
+		if addr, ok := parseClientAddr(r.Header.Get("X-Real-IP")); ok {
+			return rateKey(addr)
+		}
+		return fallback
+	}
+
+	// Headers only count when the request really came from a trusted proxy
+	if !remoteOK || !trust.trusted(remote) {
+		return fallback
+	}
+
+	// Walk X-Forwarded-For from the right. Each trusted proxy appended the
+	// address it received from; the first address that is not one of ours is
+	// the client as seen by our outermost proxy. Anything to its left was
+	// supplied by the client and is ignored.
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+	client, found := netip.Addr{}, false
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		if hop == "" {
+			continue
+		}
+		addr, ok := parseClientAddr(hop)
+		if !ok {
+			return fallback // malformed chain: do not guess
+		}
+		client, found = addr, true
+		if !trust.trusted(addr) {
+			break
+		}
+	}
+	if found {
+		return rateKey(client)
+	}
+
+	if addr, ok := parseClientAddr(r.Header.Get("X-Real-IP")); ok {
+		return rateKey(addr)
+	}
+	return fallback
 }

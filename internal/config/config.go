@@ -2,6 +2,8 @@
 package config
 
 import (
+	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -91,8 +93,22 @@ type Config struct {
 	RateLimitRPM       int      // Requests per minute per IP
 	TrustProxy         bool     // Trust X-Forwarded-For headers (only enable behind a reverse proxy)
 	IgnoreCertErrors   bool     // Ignore TLS certificate errors (required for some proxies)
-	CORSAllowedOrigins []string // Allowed CORS origins (empty = allow all with warning)
-	AllowLocalProxies  bool     // Allow localhost/private IP proxies (default: true for backward compatibility)
+	CORSAllowedOrigins []string // Origins allowed to call the API from a browser (empty = none; any other Origin is rejected)
+	AllowLocalProxies  bool     // Allow localhost/private IP proxies in requests (default: false)
+
+	// TrustedProxies lists the reverse proxies (CIDRs) whose X-Forwarded-For is
+	// believed when TrustProxy is on (TRUSTED_PROXIES). Empty keeps the legacy
+	// behavior of believing the header from any peer.
+	TrustedProxies []netip.Prefix
+
+	// AllowedHosts lists extra hostnames accepted in the Host header
+	// (ALLOWED_HOSTS). IP literals, localhost, this machine's hostname and
+	// single-label names are always accepted; "*" disables the check.
+	AllowedHosts []string
+
+	// StrictContentType requires Content-Type: application/json on API requests
+	// (STRICT_CONTENT_TYPE, default true).
+	StrictContentType bool
 
 	// DNSRebindingProtection pins the response URL to the IP resolved at request
 	// time. Disable (DNS_REBINDING_PROTECTION=false) for sites that legitimately
@@ -185,6 +201,9 @@ func Load() *Config {
 		IgnoreCertErrors:   getEnvBool("IGNORE_CERT_ERRORS", false),
 		CORSAllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", nil),
 		AllowLocalProxies:  getEnvBool("ALLOW_LOCAL_PROXIES", false), // Default false for security
+		TrustedProxies:     getEnvPrefixes("TRUSTED_PROXIES"),
+		AllowedHosts:       getEnvStringSlice("ALLOWED_HOSTS", nil),
+		StrictContentType:  getEnvBool("STRICT_CONTENT_TYPE", true),
 
 		DNSRebindingProtection: getEnvBool("DNS_REBINDING_PROTECTION", true), // Default true for security
 
@@ -416,9 +435,12 @@ func (c *Config) Validate() {
 			Msg("WARNING: pprof exposed on non-localhost address - this is a security risk")
 	}
 
-	// CORS security warning
+	// Forwarded-header trust warning
+	if c.TrustProxy && len(c.TrustedProxies) == 0 {
+		log.Warn().Msg("TRUST_PROXY is on without TRUSTED_PROXIES - X-Forwarded-For is believed from any client, so rate limiting can be bypassed by sending the header; set TRUSTED_PROXIES to your reverse proxy's address")
+	}
 	if len(c.CORSAllowedOrigins) == 0 {
-		log.Warn().Msg("CORS_ALLOWED_ORIGINS not set - allowing all origins (potential CSRF risk)")
+		log.Debug().Msg("CORS_ALLOWED_ORIGINS not set - requests from web pages (any Origin header) are rejected")
 	}
 
 	// Certificate validation warning
@@ -729,6 +751,43 @@ func getEnvStringSlice(key string, defaultValue []string) []string {
 		}
 	}
 	return defaultValue
+}
+
+// getEnvPrefixes reads a comma-separated list of CIDRs (or bare IP addresses,
+// taken as a single-address prefix) from the environment. Invalid entries are
+// logged and skipped.
+func getEnvPrefixes(key string) []netip.Prefix {
+	var prefixes []netip.Prefix
+	for _, entry := range getEnvStringSlice(key, nil) {
+		prefix, err := parsePrefix(entry)
+		if err != nil {
+			log.Warn().Str("key", key).Str("value", entry).Msg("Invalid CIDR in environment variable, ignoring")
+			continue
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
+}
+
+// parsePrefix parses a CIDR, or a bare IP address as a one-address prefix.
+// IPv4-mapped IPv6 input is normalised to IPv4.
+func parsePrefix(entry string) (netip.Prefix, error) {
+	if prefix, err := netip.ParsePrefix(entry); err == nil {
+		if addr := prefix.Addr(); addr.Is4In6() {
+			bits := prefix.Bits() - 96
+			if bits < 0 {
+				return netip.Prefix{}, fmt.Errorf("prefix %q is too wide for an IPv4-mapped address", entry)
+			}
+			return netip.PrefixFrom(addr.Unmap(), bits).Masked(), nil
+		}
+		return prefix.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(entry)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("%q is not a CIDR or IP address", entry)
+	}
+	addr = addr.Unmap().WithZone("")
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
 // validateCaptchaConfig validates CAPTCHA solver configuration.

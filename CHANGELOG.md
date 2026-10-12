@@ -44,6 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Selector hot-reload survives editors that save by rename** - Saving the selectors file with vim, or replacing it atomically, no longer stops hot-reload.
 - **Data races** - Fixed races on a session's TTL, on the selectors reload timer, and on the maps returned by the stats endpoint.
 
+### Changed (may need action on upgrade)
+- **Requests by hostname may be refused** - The `Host` header must now be an IP address, `localhost`, the machine's own hostname, a single-label name (such as the Compose service name in `http://flaresolverr:8191`), or a name listed in the new `ALLOWED_HOSTS`. Other names get `403`. This affects anyone reaching FlareSolverr through a dotted name: a reverse proxy at `solver.example.com`, or a Kubernetes name like `flaresolverr.default.svc`. The log line for a rejected request gives the exact `ALLOWED_HOSTS=...` setting to add. `ALLOWED_HOSTS=*` turns the check off.
+- **`POST` requests must send `Content-Type: application/json`** - Anything else gets `415`. Prowlarr, Jackett and the usual client libraries already send it; a hand-written `curl -d` needs `-H "Content-Type: application/json"`. `STRICT_CONTENT_TYPE=false` restores the old behaviour.
+- **Requests from web pages are refused** - A request carrying an `Origin` header that is not listed in `CORS_ALLOWED_ORIGINS` gets `403`, including preflights. Previously the request ran and only the CORS response headers were withheld.
+- **`/health` no longer includes `domainStats`, `defaults` or `selectorsStats`** - They moved to the new `GET /stats`, which requires the API key when one is enabled. `/health` stays open for health checks and now reports only status, version, user agent and pool counters.
+- **A session request's `maxTimeout` now includes time spent queued** - Requests on one session run one at a time. A request waiting for the session used to wait indefinitely and then get its full timeout; it now fails with "Session is busy" once its own `maxTimeout` has passed, and time spent waiting is deducted from the solve.
+- **`PROXY_URL` is validated at startup, not per request** - The server refuses to start if it is malformed or points at a cloud metadata address. A private or Docker-network `PROXY_URL` now works without `ALLOW_LOCAL_PROXIES=true`; before, it made every request fail with "Invalid proxy URL".
+
+### Security
+- **The API could be driven through a visitor's browser** - With the default setup (no API key, listening locally), any web page open on the same machine or network could `POST` to the API as `text/plain` with no preflight, and a DNS-rebinding page could also read the responses. The Host, Origin and Content-Type checks above close both.
+- **Rate limiting could be bypassed with `X-Forwarded-For`** - With `TRUST_PROXY=true` the limiter keyed on the leftmost header entry, which the client writes, and accepted arbitrary non-IP strings as keys. Set the new `TRUSTED_PROXIES` (CIDRs of your reverse proxies): the header is then believed only from those addresses and read right to left. Without it the old behaviour remains and a warning is logged at startup. Header values that are not IP addresses are never used as keys, and IPv6 clients are limited per /64 instead of per address.
+- **Credentials in logged URLs** - `user:password@` in a target URL was written to the log on every request.
+
+### Fixed
+- **Requests had no overall deadline** - The handler ran on a context with no deadline. Each request now has one (its timeout, plus the reconnect bypass budget and the browser pool wait), kept just under the server's write timeout so the client always gets an answer. `sessions.create` is bounded at 90 seconds.
+
 ## [0.8.5] - 2026-10-11
 
 ### Fixed
