@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.9.0] - 2026-10-12
+
+This release changes defaults that can affect existing setups. Read "Changed (may need action on upgrade)" first.
+
+### Changed (build and release)
 - **Releases are gated on tests** - The GitHub release and the Docker image are now two jobs of one `Release` workflow, and both wait for the CI workflow (lint, tests, build) to pass on the tagged commit. They used to start on the tag without running any tests. The separate `Docker` workflow is gone.
 - **`latest` only moves for full releases** - A pre-release tag such as `v0.9.0-rc.1` now publishes only its own version tag; before, every tag moved `latest`. The bare major image tag (`0`) is no longer published while the project is 0.x; `0.8`-style and exact version tags are unchanged.
 - **Release assets are signed and attested** - After a release is published, a follow-up job attests the build provenance of the archives, signs `checksums.txt` with cosign (keyless; the bundle is uploaded as `checksums.txt.sigstore.json`) and uploads an SPDX SBOM per archive. The job only adds files and cannot fail a release. Verify with `gh attestation verify <archive> --repo Rorqualx/flaresolverr-go` or `cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-regexp '^https://github.com/Rorqualx/flaresolverr-go/' --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt`.
@@ -25,15 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`BROWSER_SANDBOX`** - Set to `true` to run Chromium with its own sandbox instead of `--no-sandbox`. Off by default, so nothing changes unless you set it: the default Docker runtime blocks the user namespaces the sandbox needs, and the server then fails at startup with "No usable sandbox!". It needs a seccomp profile that allows user namespaces or `--cap-add SYS_ADMIN`; see "Chromium sandbox" in the README.
 - **`cap_drop: ALL` in `docker-compose.yml`** - The container runs correctly with no Linux capabilities.
 
-
+### Changed (application)
 - **`MAX_MEMORY_MB` now measures the whole service** - The memory monitor used to compare the limit against the Go heap, which is a few megabytes and never reached it. It now reads the container's cgroup working set (v2, then v1), or the resident memory of the process tree outside a container. When usage is over the limit, idle browsers are recycled at most once every 5 minutes; browsers in use are replaced when released. The default stays 2048. On non-Linux hosts the monitor is disabled.
 - **Quitting the dashboard stops the server** - Pressing `q` or `ctrl+c` in the TUI now shuts the service down cleanly.
 - **Generic rate-limit phrases only count on error responses** - Body text such as "rate limit", "too many requests", "access denied" or "blocked" is only reported as a rate limit when the page's HTTP status is 400 or above. Cloudflare error codes (1015 and the others) are still reported at any status. Pages that merely mention these phrases no longer come back with `rateLimited: true`.
 - **Remote selectors must use https** - `SELECTORS_REMOTE_URL` with a plain `http://` address is refused with an error (loopback addresses excepted) and the built-in selectors are used.
 - **Removed the unused `configs/selectors.yaml`** - The selectors the service loads are embedded from `internal/selectors/selectors.yaml`; override them with `SELECTORS_PATH`.
 
-### Fixed
-
+### Fixed (application)
 - **Canvas reads are stable** - Reading a canvas with `toDataURL`, `toBlob` or `getImageData` no longer changes the canvas. Two reads of an untouched canvas now return the same result, and a canvas read before `getContext('webgl')` can still get a WebGL context.
 - **Port conflicts are reported before any browser starts** - The listen port is bound first, so a port that is already in use fails immediately and leaves no Chrome processes behind. A server failure after startup now closes the browser pool before exiting.
 - **`LOG_LEVEL` is case-insensitive** - `DEBUG`, `Debug` and `debug` all work, and `warning` is accepted for `warn`.
@@ -57,16 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Rate limiting could be bypassed with `X-Forwarded-For`** - With `TRUST_PROXY=true` the limiter keyed on the leftmost header entry, which the client writes, and accepted arbitrary non-IP strings as keys. Set the new `TRUSTED_PROXIES` (CIDRs of your reverse proxies): the header is then believed only from those addresses and read right to left. Without it the old behaviour remains and a warning is logged at startup. Header values that are not IP addresses are never used as keys, and IPv6 clients are limited per /64 instead of per address.
 - **Credentials in logged URLs** - `user:password@` in a target URL was written to the log on every request.
 
-### Fixed
+### Fixed (API)
 - **Requests had no overall deadline** - The handler ran on a context with no deadline. Each request now has one (its timeout, plus the reconnect bypass budget and the browser pool wait), kept just under the server's write timeout so the client always gets an answer. `sessions.create` is bounded at 90 seconds.
 
-### Added
+### Added (captcha)
 - **Per-request cap on paid captcha solves** - `CAPTCHA_MAX_EXTERNAL_SOLVES` (default `1`, maximum `3`, `0` buys nothing) limits how many tasks one request may create at external providers, counted across Turnstile and hCaptcha and across every pass of the solve loop.
 - **Per-request captcha provider and key** - `captchaSolver` and `captchaApiKey` were accepted and validated but never used. `captchaSolver: "none"` now forbids external solving for the request, a provider name selects among the server's providers, and `captchaSolver` with `captchaApiKey` uses the caller's own key for that request only, for at most one solve, even when the server-side fallback is disabled. `captchaApiKey` without `captchaSolver` is a validation error. The key is never logged, stored, or echoed.
 - **Captcha provider base URL overrides** - `TWOCAPTCHA_BASE_URL`, `CAPSOLVER_BASE_URL`, `ANTICAPTCHA_BASE_URL` and `NINEKW_BASE_URL`, for testing and self-hosted gateways. A malformed override disables the server-side fallback rather than falling back to the provider's real API.
 - **Captcha provider metrics** - `/metrics` exposes per-provider attempts, billable tasks, successes, failures, reported cost and solve time. The tracker existed but was never wired up.
 
-### Fixed
+### Fixed (captcha)
 - **Repeated paid solves for one request** - When a bought token did not clear the challenge, every later pass of the solve loop bought another one, from every configured provider, until the request timed out; hCaptcha was bought on every pass from the first. A request now buys at most its budget, a paid task that times out ends external solving for that request instead of moving on to the next provider, and no task is created in the last 10 seconds before the request's deadline, when its solution could no longer be collected.
 - **Paid tasks abandoned on one bad poll** - A single failed result poll (HTTP 502/429, an HTML error page, a dropped connection) abandoned a task that had already been paid for, and HTTP status codes were not checked at all. Polling now retries transient failures with backoff and gives up only after several in a row. Provider responses are read through a size limit.
 - **CapSolver billed for unsolvable managed challenges** - CapSolver was sent Cloudflare managed challenges without the challenge-page data it has no field for, so it returned (and charged for) a token the interstitial rejects. It now refuses a managed challenge before any request is made and the next provider is tried.
@@ -78,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **First result poll delayed by two intervals** - The first poll happened after 10s/6s/20s instead of 5s/3s/10s.
 - **Out-of-process iframe capture lifecycle** - The raw CDP calls ignored the request's context, child sessions were never forgotten when their frame went away, and the listener goroutine was untracked. Auto-attach is now switched off again when capture ends, so a session page reused afterwards cannot hang on a paused cross-origin iframe.
 
-### Changed
+### Changed (captcha)
 - `CAPTCHA_FALLBACK_ENABLED` remains `false` by default: no provider is contacted unless the fallback is enabled or a request supplies its own key.
 - With a budget of one, a request whose first provider fails after accepting the task no longer falls through to the next provider. Set `CAPTCHA_MAX_EXTERNAL_SOLVES=2` or `3` to keep that behaviour.
 
