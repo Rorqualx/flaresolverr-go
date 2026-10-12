@@ -45,8 +45,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.BrowserPoolTimeout != 30*time.Second {
 		t.Errorf("Expected default pool timeout 30s, got %v", cfg.BrowserPoolTimeout)
 	}
-	if cfg.MaxMemoryMB != 2048 {
-		t.Errorf("Expected default max memory 2048MB, got %d", cfg.MaxMemoryMB)
+	if cfg.MaxMemoryMB != 4096 {
+		t.Errorf("Expected default max memory 4096MB, got %d", cfg.MaxMemoryMB)
 	}
 
 	// Session defaults

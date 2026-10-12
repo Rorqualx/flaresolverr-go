@@ -8,3 +8,9 @@ package browser
 func systemMemoryReader() (memorySample, bool) {
 	return memorySample{}, false
 }
+
+// containerMemoryLimit reports no limit: only Linux containers have one that
+// can be read.
+func containerMemoryLimit() (limitBytes uint64, ok bool) {
+	return 0, false
+}

@@ -8,6 +8,10 @@ updates:
       interval: weekly
     commit-message:
       prefix: ci
+    ignore:
+      # Newer majors of this action need golangci-lint v2; the project pins v1.
+      - dependency-name: golangci/golangci-lint-action
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: gomod
     directory: /

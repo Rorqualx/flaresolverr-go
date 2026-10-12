@@ -425,7 +425,7 @@ All configuration is done via environment variables.
 | `BROWSER_PATH` | (auto) | Path to Chrome/Chromium executable |
 | `BROWSER_POOL_SIZE` | `3` | Number of browser instances in pool |
 | `BROWSER_POOL_TIMEOUT` | `30s` | Timeout for acquiring a browser |
-| `MAX_MEMORY_MB` | `2048` | Memory limit before recycling browsers |
+| `MAX_MEMORY_MB` | `4096` | Memory used by the whole container before idle browsers are recycled. If the container has a memory limit below this, 90% of that limit is used instead |
 
 ### Session Settings
 

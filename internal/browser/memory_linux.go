@@ -15,7 +15,24 @@ const (
 	cgroupV2Stat  = "/sys/fs/cgroup/memory.stat"
 	cgroupV1Usage = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
 	cgroupV1Stat  = "/sys/fs/cgroup/memory/memory.stat"
+	cgroupV2Limit = "/sys/fs/cgroup/memory.max"
+	cgroupV1Limit = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 )
+
+// containerMemoryLimit returns the memory limit set on this container. ok is
+// false when there is none (or this is not a container).
+func containerMemoryLimit() (limitBytes uint64, ok bool) {
+	for _, path := range []string{cgroupV2Limit, cgroupV1Limit} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if limit, ok := parseCgroupLimit(data); ok {
+			return limit, true
+		}
+	}
+	return 0, false
+}
 
 // systemMemoryReader measures the memory used by this service on Linux.
 //

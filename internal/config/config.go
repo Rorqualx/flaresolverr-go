@@ -27,9 +27,12 @@ const (
 	defaultMaxSessions      = 20
 	sessionMemoryEstimateMB = 150
 	maxMaxMemoryMB          = 16384
-	maxTimeout              = 10 * time.Minute
-	maxRateLimitRPM         = 10000 // Maximum requests per minute per IP
-	minAPIKeyLength         = 16    // Minimum API key length for security
+	// defaultMaxMemoryMB fits the default pool (3 browsers) and the default
+	// MAX_SESSIONS (20 sessions at about 150MB each) with room to spare.
+	defaultMaxMemoryMB = 4096
+	maxTimeout         = 10 * time.Minute
+	maxRateLimitRPM    = 10000 // Maximum requests per minute per IP
+	minAPIKeyLength    = 16    // Minimum API key length for security
 
 	// Paid external captcha solves one request may buy with the server's keys.
 	defaultCaptchaMaxExternalSolves = 1
@@ -179,7 +182,7 @@ func Load() *Config {
 		// Pool - These defaults are tuned for memory efficiency
 		BrowserPoolSize:    getEnvInt("BROWSER_POOL_SIZE", 3),
 		BrowserPoolTimeout: getEnvDuration("BROWSER_POOL_TIMEOUT", 30*time.Second),
-		MaxMemoryMB:        getEnvInt("MAX_MEMORY_MB", 2048),
+		MaxMemoryMB:        getEnvInt("MAX_MEMORY_MB", defaultMaxMemoryMB),
 
 		// Sessions
 		SessionTTL:             getEnvDuration("SESSION_TTL", 30*time.Minute),
@@ -312,8 +315,8 @@ func (c *Config) Validate() {
 
 	// Memory validation with upper bound
 	if c.MaxMemoryMB < 256 {
-		log.Warn().Int("mb", c.MaxMemoryMB).Msg("Memory limit too low, using default 2048")
-		c.MaxMemoryMB = 2048
+		log.Warn().Int("mb", c.MaxMemoryMB).Int("default", defaultMaxMemoryMB).Msg("Memory limit too low, using default")
+		c.MaxMemoryMB = defaultMaxMemoryMB
 	} else if c.MaxMemoryMB > maxMaxMemoryMB {
 		log.Warn().
 			Int("mb", c.MaxMemoryMB).

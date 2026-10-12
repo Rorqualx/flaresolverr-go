@@ -77,6 +77,11 @@ type Pool struct {
 	// Replaceable in tests.
 	readMemory memoryReader
 
+	// memoryLimitMB is the threshold the memory monitor acts on: MAX_MEMORY_MB,
+	// or less when the container's own limit is lower. Zero means "use the
+	// configured value" (pools built directly in tests).
+	memoryLimitMB uint64
+
 	// Egress guard (EGRESS_GUARD). guard is nil when it is disabled.
 	// defaultRoute is the listener every pooled browser is launched with;
 	// routes holds the listener of each browser launched outside the pool,
@@ -222,6 +227,8 @@ func newPool(cfg *config.Config, guardOptions guardproxy.Options) (*Pool, error)
 		stopCh:     make(chan struct{}),
 		recycleSem: make(chan struct{}, 4), // Issue #11: Limit concurrent recycles to 4
 		readMemory: systemMemoryReader,
+
+		memoryLimitMB: resolveMemoryLimit(cfg.MaxMemoryMB),
 	}
 
 	if cfg.EgressGuard {

@@ -84,7 +84,7 @@ func TestConfigValidate_MemoryBoundaries(t *testing.T) {
 		memoryMB       int
 		expectedMemory int
 	}{
-		{"memory_too_low", 100, 2048},
+		{"memory_too_low", 100, 4096},
 		{"memory_at_threshold", 256, 256},
 		{"memory_valid", 512, 512},
 		{"memory_default", 2048, 2048},
