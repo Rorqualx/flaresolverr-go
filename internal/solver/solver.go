@@ -3241,6 +3241,17 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
 			}
 		}
+		// The stateless paths set these; without them a session page kept
+		// go-rod's default device emulation (a macOS Chrome 114 User-Agent and
+		// a 1280x800 viewport) while the result reported the server's UA.
+		if ua := s.effectiveUserAgent(opts); ua != "" {
+			if err := browser.SetUserAgent(page, ua); err != nil {
+				log.Warn().Err(err).Msg("Failed to set user agent (session)")
+			}
+		}
+		if err := browser.SetViewport(page, 1920, 1080); err != nil {
+			log.Warn().Err(err).Msg("Failed to set viewport (session)")
+		}
 	} else {
 		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping stealth on reused session page")
 	}
