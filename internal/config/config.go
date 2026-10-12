@@ -123,6 +123,13 @@ type Config struct {
 	// (blocking private/internal/metadata IPs) stays active either way.
 	DNSRebindingProtection bool
 
+	// EgressGuard routes every browser and browser context through an
+	// in-process proxy that validates each connection's destination
+	// (EGRESS_GUARD, default false). It closes the gaps URL validation cannot:
+	// redirects, subresources, WebSockets and DNS rebinding to private
+	// addresses.
+	EgressGuard bool
+
 	// API Key Authentication
 	APIKeyEnabled bool   // Enable API key authentication
 	APIKey        string // Required API key for requests (only used if APIKeyEnabled is true)
@@ -221,6 +228,7 @@ func Load() *Config {
 		StrictContentType:  getEnvBool("STRICT_CONTENT_TYPE", true),
 
 		DNSRebindingProtection: getEnvBool("DNS_REBINDING_PROTECTION", true), // Default true for security
+		EgressGuard:            getEnvBool("EGRESS_GUARD", false),
 
 		// API Key Authentication
 		APIKeyEnabled: getEnvBool("API_KEY_ENABLED", false),
@@ -476,6 +484,10 @@ func (c *Config) Validate() {
 	// DNS rebinding protection warning
 	if !c.DNSRebindingProtection {
 		log.Warn().Msg("DNS_REBINDING_PROTECTION disabled - response URL IP pinning is off (SSRF protection against private/internal IPs remains active)")
+	}
+
+	if c.EgressGuard {
+		log.Info().Msg("EGRESS_GUARD enabled - every browser connection is validated by the in-process egress guard (HTTP/3 is not used through it)")
 	}
 
 	// Fix #17: Proxy URL and credential validation

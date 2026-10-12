@@ -175,6 +175,28 @@ func TestHasDefaultProxy(t *testing.T) {
 	}
 }
 
+func TestEgressGuard(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset is off", value: "", want: false},
+		{name: "true", value: "true", want: true},
+		{name: "false", value: "false", want: false},
+		{name: "garbage is off", value: "maybe", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("EGRESS_GUARD", tt.value)
+			cfg := Load()
+			if cfg.EgressGuard != tt.want {
+				t.Errorf("EgressGuard = %v, want %v", cfg.EgressGuard, tt.want)
+			}
+		})
+	}
+}
+
 func TestBrowserTimezone(t *testing.T) {
 	tests := []struct {
 		name string

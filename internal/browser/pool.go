@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
+	"github.com/Rorqualx/flaresolverr-go/internal/guardproxy"
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
@@ -75,6 +76,17 @@ type Pool struct {
 	// readMemory samples the service's memory usage for monitorMemory.
 	// Replaceable in tests.
 	readMemory memoryReader
+
+	// Egress guard (EGRESS_GUARD). guard is nil when it is disabled.
+	// defaultRoute is the listener every pooled browser is launched with;
+	// routes holds the listener of each browser launched outside the pool,
+	// released when that browser is cleaned up.
+	guard        *guardproxy.Manager
+	defaultRoute *EgressRoute
+	// operatorProxies holds the proxy URLs from PROXY_URL and PROXY_LIST,
+	// which the guard may reach at private addresses.
+	operatorProxies map[string]bool
+	routes          sync.Map // map[*rod.Browser]*EgressRoute
 
 	// Statistics for monitoring
 	stats PoolStats
@@ -191,6 +203,12 @@ type PoolStats struct {
 // This function blocks until all browsers are ready or an error occurs.
 // If any browser fails to launch, the pool is cleaned up and an error is returned.
 func NewPool(cfg *config.Config) (*Pool, error) {
+	return newPool(cfg, guardproxy.Options{})
+}
+
+// newPool is NewPool with the egress guard's options, which tests replace to
+// stand in for the network.
+func newPool(cfg *config.Config, guardOptions guardproxy.Options) (*Pool, error) {
 	log.Info().
 		Int("pool_size", cfg.BrowserPoolSize).
 		Bool("headless", cfg.Headless).
@@ -204,6 +222,12 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 		stopCh:     make(chan struct{}),
 		recycleSem: make(chan struct{}, 4), // Issue #11: Limit concurrent recycles to 4
 		readMemory: systemMemoryReader,
+	}
+
+	if cfg.EgressGuard {
+		if err := pool.startEgressGuard(guardOptions); err != nil {
+			return nil, err
+		}
 	}
 
 	// Pre-warm the pool by launching all browsers
@@ -249,6 +273,48 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 		Msg("Browser pool initialized successfully")
 
 	return pool, nil
+}
+
+// startEgressGuard starts the egress guard and takes the route every pooled
+// browser is launched with.
+func (p *Pool) startEgressGuard(options guardproxy.Options) error {
+	guard, err := guardproxy.NewManager(options)
+	if err != nil {
+		return fmt.Errorf("failed to start the egress guard: %w", err)
+	}
+	p.guard = guard
+	p.operatorProxies = operatorProxyURLs(p.config)
+
+	route, err := p.GuardRoute(nil)
+	if err != nil {
+		p.stopEgressGuard()
+		return fmt.Errorf("failed to start the egress guard: %w", err)
+	}
+	p.defaultRoute = route
+
+	log.Info().Str("listener", route.ProxyServer).Msg("Egress guard started")
+	return nil
+}
+
+// stopEgressGuard releases the default route and closes the guard. It is a
+// no-op when the guard is disabled.
+func (p *Pool) stopEgressGuard() {
+	if p.guard == nil {
+		return
+	}
+	p.defaultRoute.Release()
+	if err := p.guard.Close(); err != nil {
+		log.Warn().Err(err).Msg("Failed to close the egress guard")
+	}
+}
+
+// launchProxy returns the proxy a browser launch asked for, or nil when it
+// asked for none.
+func launchProxy(proxyURL, username, password string) *types.Proxy {
+	if proxyURL == "" {
+		return nil
+	}
+	return &types.Proxy{URL: proxyURL, Username: username, Password: password}
 }
 
 // createLauncher creates a configured Rod launcher with optimal settings.
@@ -322,6 +388,11 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 		l = l.Set("proxy-server", proxyURL)
 		// Use redacted proxy URL in logs to prevent credential exposure
 		log.Debug().Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Browser proxy configured")
+	}
+	if p.guard != nil {
+		// With the guard every proxyURL is a guard listener; loopback
+		// destinations must go through it too.
+		l = l.Set("proxy-bypass-list", guardBypassList)
 	}
 
 	// ========================================
@@ -450,8 +521,13 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	log.Debug().Msg("Spawning new browser instance")
 
-	// Pass the default proxy from config (may be empty)
-	browser, err := p.launchAndConnect(ctx, p.createLauncher(p.config.ProxyURL))
+	// Pass the default proxy from config (may be empty), or the guard
+	// listener that stands in front of it
+	proxyURL := p.config.ProxyURL
+	if p.guard != nil {
+		proxyURL = p.defaultRoute.ProxyServer
+	}
+	browser, err := p.launchAndConnect(ctx, p.createLauncher(proxyURL))
 	if err != nil {
 		return nil, err
 	}
@@ -547,8 +623,15 @@ func (p *Pool) discardLauncher(l *launcher.Launcher) {
 
 // LaunchOptions configures a custom browser spawn with per-session overrides.
 type LaunchOptions struct {
-	ProxyURL   string   // Proxy URL (replaces pool default)
-	WindowSize string   // "width,height" e.g. "1280,720"
+	ProxyURL   string // Proxy URL (replaces pool default)
+	WindowSize string // "width,height" e.g. "1280,720"
+
+	// Credentials for ProxyURL. Only the egress guard uses them (it
+	// authenticates to the proxy itself); without the guard the caller
+	// answers the proxy's challenge on the page.
+	ProxyUsername string
+	ProxyPassword string
+
 	Language   string   // Accept-Language e.g. "fr-FR"
 	Timezone   string   // Timezone for stealth patches (applied at JS level)
 	Headless   *bool    // Override global headless setting
@@ -582,6 +665,16 @@ func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.B
 		Str("window_size", opts.WindowSize).
 		Str("language", opts.Language).
 		Msg("Spawning browser with custom options")
+
+	var route *EgressRoute
+	if p.guard != nil {
+		var err error
+		route, err = p.GuardRoute(launchProxy(opts.ProxyURL, opts.ProxyUsername, opts.ProxyPassword))
+		if err != nil {
+			return nil, fmt.Errorf("custom browser spawn failed: %w", err)
+		}
+		proxyURL = route.ProxyServer
+	}
 
 	// Create launcher with proxy
 	l := p.createLauncher(proxyURL)
@@ -619,7 +712,11 @@ func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.B
 
 	browser, err := p.launchAndConnect(ctx, l)
 	if err != nil {
+		route.Release()
 		return nil, fmt.Errorf("custom browser spawn failed: %w", err)
+	}
+	if route != nil {
+		p.routes.Store(browser, route)
 	}
 
 	log.Debug().Msg("Browser with custom options spawned successfully")
@@ -643,9 +740,30 @@ func (p *Pool) SpawnWithProxy(ctx context.Context, proxyURL string) (*rod.Browse
 	// Use redacted proxy URL in logs to prevent credential exposure
 	log.Debug().Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Spawning browser with custom proxy")
 
-	browser, err := p.launchAndConnect(ctx, p.createLauncher(proxyURL))
+	launchURL := proxyURL
+	var route *EgressRoute
+	if p.guard != nil {
+		// The configured default is the guard's default route, credentials
+		// included; anything else is routed as given.
+		proxy := launchProxy(proxyURL, "", "")
+		if proxyURL == p.config.ProxyURL {
+			proxy = nil
+		}
+		var err error
+		route, err = p.GuardRoute(proxy)
+		if err != nil {
+			return nil, fmt.Errorf("proxy browser spawn failed: %w", err)
+		}
+		launchURL = route.ProxyServer
+	}
+
+	browser, err := p.launchAndConnect(ctx, p.createLauncher(launchURL))
 	if err != nil {
+		route.Release()
 		return nil, fmt.Errorf("proxy browser spawn failed: %w", err)
+	}
+	if route != nil {
+		p.routes.Store(browser, route)
 	}
 
 	log.Debug().Str("proxy", security.RedactProxyURL(proxyURL)).Msg("Browser with proxy spawned successfully")
@@ -994,6 +1112,11 @@ func (p *Pool) CleanupBrowser(browser *rod.Browser) {
 		}
 	}
 	p.controlURLs.Delete(browser)
+	if v, ok := p.routes.LoadAndDelete(browser); ok {
+		if route, ok := v.(*EgressRoute); ok {
+			route.Release()
+		}
+	}
 }
 
 // reapLauncher waits for the browser process to exit and removes its user-data
@@ -1276,6 +1399,9 @@ func (p *Pool) Close() error {
 	for b := range p.available {
 		p.CleanupBrowser(b) // safe on nil
 	}
+
+	// Every browser is gone; nothing is left to route.
+	p.stopEgressGuard()
 
 	// Fix MEDIUM: Capture stats before resetting so we can log actual values
 	finalAcquired := p.stats.Acquired.Load()

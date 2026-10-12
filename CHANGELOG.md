@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`EGRESS_GUARD`** - An optional in-process forward proxy that every browser and browser context is pointed at, so that each connection the browser makes is checked, not only the URL in the request. For every destination it resolves the name once, requires every resolved address to be public (the same rules the URL check uses, including cloud metadata and all special-purpose ranges) and connects to the address it checked. This stops a page from reaching private addresses by redirect, image, iframe, `fetch()`, WebSocket or DNS rebinding, and from reaching `127.0.0.1` on the machine running FlareSolverr. It covers pooled browsers, sessions, `browserFlags` sessions and both Chrome launches of the reconnect bypass. HTTPS is tunnelled without terminating TLS (JA4 and HTTP/2 fingerprints are unchanged) and plain HTTP headers are forwarded unchanged and in order. Off by default in this release: Chromium does not use HTTP/3 through a proxy, and the effect of that on Cloudflare's managed challenge could not be measured. See "Egress guard" in the README.
+- **Proxies through the egress guard** - With `EGRESS_GUARD=true`, a proxy from a request, a session, `PROXY_LIST` or `PROXY_URL` is reached through the guard, which performs the proxy handshake and authentication itself (`http`, `https`, `socks5`). Chromium is only given a loopback address, so proxy credentials no longer appear on a command line. A per-request proxy uses a browser context on a pooled browser instead of launching a browser, the reconnect bypass works with proxies that need credentials, `PROXY_USERNAME` / `PROXY_PASSWORD` apply to `PROXY_URL`, and wrong credentials are reported as such. `socks4` proxies are rejected when the guard is on. When a proxy is in use it resolves hostnames, so the guard can only refuse destinations it recognises without resolving (private IP literals, `localhost`, metadata names).
+- **Egress guard metrics** - `/metrics` exports `flaresolverr_egress_guard_*` (listeners, active connections, tunnels, forwarded requests, refused and failed destinations) when the guard is on.
+
 ## [0.9.0] - 2026-10-12
 
 This release changes defaults that can affect existing setups. Read "Changed (may need action on upgrade)" first.

@@ -209,6 +209,7 @@ flaresolverr-go/
 │   ├── browser/                  # Browser lifecycle and page setup
 │   │   ├── pool.go               # Pool: launch, acquire/release, recycle, cleanup
 │   │   ├── context.go            # Isolated browser contexts (per request / session)
+│   │   ├── egress.go             # Routing browsers and contexts through the egress guard
 │   │   ├── stealth.go            # Stealth script, UA and viewport overrides
 │   │   ├── stealth_extension.go  # Stealth as a Chrome extension (reconnect bypass)
 │   │   ├── fingerprint.go        # Fingerprint profiles
@@ -237,6 +238,14 @@ flaresolverr-go/
 │   │   ├── logreporter.go        # Periodic stats to the log
 │   │   └── model.go              # bubbletea Model/View
 │   │
+│   ├── guardproxy/               # Egress guard: in-process forward proxy (EGRESS_GUARD)
+│   │   ├── guardproxy.go         # Listener, CONNECT tunnels, limits
+│   │   ├── request.go            # Request-head and target parsing
+│   │   ├── plain.go              # Plain HTTP forwarding
+│   │   ├── dial.go               # Resolve once, validate, dial the literal
+│   │   ├── upstream.go           # Chained http/https/socks5 upstreams
+│   │   └── manager.go            # Per-upstream listeners, reference-counted
+│   │
 │   ├── handlers/                 # HTTP handlers
 │   │   ├── router.go             # Command routing
 │   │   ├── handlers.go           # /v1 commands, /health, index
@@ -264,6 +273,7 @@ flaresolverr-go/
 │   │
 │   ├── security/                 # Input validation at the trust boundary
 │   │   ├── url_validator.go      # SSRF checks for target and proxy URLs
+│   │   ├── egress.go             # The same address rules, exported for the egress guard
 │   │   ├── headers.go            # Custom header validation
 │   │   ├── redact.go             # Secret redaction for logs
 │   │   └── session.go            # Session ID generation/validation
@@ -344,6 +354,8 @@ flaresolverr-go/
 | New browser launch flag | `internal/browser/pool.go` | solver |
 | New page setup or stealth patch | `internal/browser/` | solver |
 | New URL, header or proxy validation | `internal/security/` | handlers, solver |
+| New rule for where a browser may connect | `internal/security/` (the egress guard calls it) | guardproxy, solver |
+| New place a browser or browser context is created | route it via `Pool.GuardRoute` / `Pool.NewEgressContext` | a bare `--proxy-server` or `NewIsolatedContext` |
 | New detection or solving logic | `internal/solver/` | handlers |
 | New result extraction logic | `internal/solver/` | handlers |
 | New captcha provider | `internal/captcha/` (register in `registry.go`) | solver |

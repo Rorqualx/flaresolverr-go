@@ -282,11 +282,22 @@ func safeEvalResultString(result *proto.RuntimeEvaluateResult) string {
 	return result.Result.Value.Str()
 }
 
+// errProxyCredentials is reported when the egress guard saw the upstream
+// proxy refuse the credentials during a request.
+var errProxyCredentials = errors.New("the proxy rejected the supplied credentials")
+
+// guardRefusalStatus is the HTTP status the egress guard answers with when it
+// cannot reach a destination through the upstream proxy.
+const guardRefusalStatus = 502
+
 // Fix #13: setupProxyAuth sets up proxy authentication for a page if needed.
 // Returns a cleanup function and error. The cleanup function is safe to call
 // even if it's nil (will be a no-op). Errors are now propagated to caller.
-func setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) (func(), error) {
-	if proxy == nil || proxy.URL == "" {
+//
+// With the egress guard enabled it does nothing: the guard authenticates to
+// the upstream proxy itself, so Chrome never sees a proxy challenge.
+func (s *Solver) setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) (func(), error) {
+	if proxy == nil || proxy.URL == "" || s.pool.EgressGuardEnabled() {
 		return func() {}, nil
 	}
 
@@ -456,7 +467,38 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	var browserInstance *rod.Browser
 	var usePooledBrowser bool
 
-	if opts.Proxy != nil && opts.Proxy.URL != "" {
+	// With the egress guard a per-request proxy does not need a browser of
+	// its own: the request's context on a pooled browser is pointed at the
+	// guard listener for that proxy.
+	var contextProxy *types.Proxy
+	guarded := s.pool.EgressGuardEnabled()
+	if guarded && opts.Proxy != nil && opts.Proxy.URL != "" {
+		contextProxy = opts.Proxy
+	}
+	if guarded {
+		// Chrome only reports that its tunnel failed. The guard knows when
+		// that was the upstream proxy refusing the credentials, so say so.
+		route, routeErr := s.pool.GuardRoute(contextProxy)
+		if routeErr != nil {
+			return nil, fmt.Errorf("failed to route the request: %w", routeErr)
+		}
+		defer route.Release()
+		authFailures := route.UpstreamAuthFailures()
+		defer func() {
+			if route.UpstreamAuthFailures() == authFailures {
+				return
+			}
+			switch {
+			case err != nil:
+				err = fmt.Errorf("%w: %w", errProxyCredentials, err)
+			case result != nil && result.StatusCode == guardRefusalStatus:
+				// A plain-HTTP page: the guard answered in the target's place.
+				result, err = nil, errProxyCredentials
+			}
+		}()
+	}
+
+	if !guarded && opts.Proxy != nil && opts.Proxy.URL != "" {
 		// Per-request proxy: spawn dedicated browser with this proxy
 		// This browser is NOT pooled and will be closed after use
 		// Use redacted proxy URL in logs to prevent credential exposure
@@ -493,7 +535,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// reused across callers, and cookies with an expiry, localStorage and cache
 	// all outlive a page: without this, one caller's cf_clearance and site
 	// cookies were sent on, and returned to, the next caller's request.
-	requestBrowser, disposeContext, ctxErr := browser.NewIsolatedContext(browserInstance, "")
+	requestBrowser, disposeContext, ctxErr := s.pool.NewEgressContext(browserInstance, contextProxy)
 	if ctxErr != nil {
 		return nil, fmt.Errorf("failed to isolate request: %w", ctxErr)
 	}
@@ -560,7 +602,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 
 		// Fix #13: Use helper for proxy setup to reduce duplication
-		proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
+		proxyCleanup, err := s.setupProxyAuth(solveCtx, page, opts.Proxy)
 		if err != nil {
 			return nil, fmt.Errorf("proxy authentication setup failed: %w", err)
 		}
@@ -667,7 +709,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// Fix #13: Use helper for proxy setup to reduce duplication
-	proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
+	proxyCleanup, err := s.setupProxyAuth(solveCtx, page, opts.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("proxy authentication setup failed: %w", err)
 	}
@@ -1045,10 +1087,11 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	// The bypass launches Chrome outside the pool, so it must be told about the
 	// request's proxy itself. Without this the target saw the server's real IP
 	// and the clearance was cached under the proxy's egress, where it is useless.
-	proxyServer, proxyErr := bypassProxyServer(opts, s.pool.DefaultProxyURL())
+	proxyArgs, releaseProxy, proxyErr := s.bypassProxyArgs(opts)
 	if proxyErr != nil {
 		return nil, proxyErr
 	}
+	defer releaseProxy()
 
 	// Create a temporary user-data-dir for cookie persistence between phases.
 	// Removed on every return path, including cancellation during Phase 1.
@@ -1091,9 +1134,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		"--load-extension=" + stealthExt.Dir(), // Stealth patches without CDP
 	}
 	phase1Args = append(phase1Args, sandboxArgs(s.pool.SandboxEnabled())...)
-	if proxyServer != "" {
-		phase1Args = append(phase1Args, "--proxy-server="+proxyServer)
-	}
+	phase1Args = append(phase1Args, proxyArgs...)
 	phase1Args = append(phase1Args, opts.URL)
 	log.Debug().
 		Str("browser", browserPath).
@@ -1157,9 +1198,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		"--window-size=1920,1080",
 	}
 	phase2Args = append(phase2Args, sandboxArgs(s.pool.SandboxEnabled())...)
-	if proxyServer != "" {
-		phase2Args = append(phase2Args, "--proxy-server="+proxyServer)
-	}
+	phase2Args = append(phase2Args, proxyArgs...)
 	phase2Args = append(phase2Args, opts.URL)
 	cmd2 := exec.Command(browserPath, phase2Args...) //nolint:gosec // browserPath is validated by findBrowserBinary
 	cmd2.Stderr = nil
@@ -3320,6 +3359,39 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	s.applyPostSolveProcessing(solveCtx, page, opts, result)
 
 	return result, nil
+}
+
+// bypassProxyArgs returns the proxy flags both Chrome launches of the
+// reconnect bypass must carry, and a function that releases whatever they
+// refer to once the bypass is over.
+//
+// With the egress guard the bypass is pointed at the guard listener for the
+// request's egress, loopback included, like every other browser. Without it
+// the flags are what bypassProxyServer allows.
+func (s *Solver) bypassProxyArgs(opts *SolveOptions) (args []string, release func(), err error) {
+	if s.pool.EgressGuardEnabled() {
+		var proxy *types.Proxy
+		if opts.Proxy != nil && opts.Proxy.URL != "" {
+			proxy = opts.Proxy
+		}
+		route, routeErr := s.pool.GuardRoute(proxy)
+		if routeErr != nil {
+			return nil, nil, fmt.Errorf("reconnect bypass: %w", routeErr)
+		}
+		return []string{
+			"--proxy-server=" + route.ProxyServer,
+			"--proxy-bypass-list=" + route.BypassList,
+		}, route.Release, nil
+	}
+
+	proxyServer, err := bypassProxyServer(opts, s.pool.DefaultProxyURL())
+	if err != nil {
+		return nil, nil, err
+	}
+	if proxyServer == "" {
+		return nil, func() {}, nil
+	}
+	return []string{"--proxy-server=" + proxyServer}, func() {}, nil
 }
 
 // bypassProxyServer returns the --proxy-server value the reconnect bypass must
