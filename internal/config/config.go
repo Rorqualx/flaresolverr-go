@@ -396,6 +396,9 @@ func (c *Config) Validate() {
 	}
 	// Normalise so LOG_LEVEL=DEBUG means debug everywhere the value is read
 	c.LogLevel = strings.ToLower(strings.TrimSpace(c.LogLevel))
+	if c.LogLevel == "warning" {
+		c.LogLevel = "warn"
+	}
 	if !validLogLevels[c.LogLevel] {
 		log.Warn().Str("level", c.LogLevel).Msg("Invalid log level, using 'info'")
 		c.LogLevel = "info"

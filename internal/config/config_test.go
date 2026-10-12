@@ -233,6 +233,7 @@ func TestValidate_LogLevelCaseInsensitive(t *testing.T) {
 	}{
 		{env: "DEBUG", want: "debug"},
 		{env: "Warn", want: "warn"},
+		{env: "WARNING", want: "warn"},
 		{env: " error ", want: "error"},
 		{env: "fatal", want: "fatal"},
 		{env: "verbose", want: "info"},
