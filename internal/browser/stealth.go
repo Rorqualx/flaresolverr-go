@@ -516,12 +516,13 @@ const stealthScript = `
     // itself detectable and corrupted page canvases):
     //   - Reads are idempotent: reading an untouched canvas twice gives
     //     identical results. The noise for a pixel depends only on the pixel's
-    //     position in the canvas and the seed, never on how often or through
-    //     which rectangle it was read.
+    //     position in the canvas, its own value and the seed, never on how
+    //     often or through which rectangle it was read.
     //   - The page's canvas is never written to. toDataURL/toBlob encode a
     //     private copy.
     //   - Noise is applied exactly once per read: the copy is read with the
     //     original getImageData, not the patched one.
+    //   - Transparent pixels are never given a colour.
     // Skip on about:blank as canvas APIs may not be fully initialized
     if (!isAboutBlank) try {
         // Per-document seed in 1..255. Zero is excluded: it is falsy, so a
@@ -556,6 +557,10 @@ const stealthScript = `
                     const noise = noiseAt(originX + x, originY + y);
                     if (noise === 0) continue;
                     const i = (y * width + x) * 4;
+                    // Fully transparent pixels stay exactly (0, 0, 0, 0): colour
+                    // in a transparent pixel is impossible for a real canvas
+                    // and is a well-known test for canvas noise.
+                    if (data[i + 3] === 0) continue;
                     // RGB channels only, not alpha
                     data[i] = Math.max(0, Math.min(255, data[i] + noise));
                     data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + noise));

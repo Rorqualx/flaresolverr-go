@@ -269,6 +269,48 @@ func TestCanvasNoiseIdempotent(t *testing.T) {
 		}
 	})
 
+	t.Run("transparent pixels stay transparent black", func(t *testing.T) {
+		// Whatever the seed, an untouched (fully transparent) canvas must read
+		// back as all zeroes through every API.
+		result, err := page.Timeout(canvasProbeTimeout).Eval(`() => {
+			const canvas = document.createElement('canvas');
+			canvas.width = 64;
+			canvas.height = 64;
+			const ctx = canvas.getContext('2d', { willReadFrequently: true });
+			ctx.fillStyle = 'rgb(10, 200, 90)';
+			ctx.fillRect(32, 0, 32, 64);
+
+			const direct = ctx.getImageData(0, 0, 32, 64).data;
+
+			const exported = new OffscreenCanvas(64, 64);
+			const exportedCtx = exported.getContext('2d', { willReadFrequently: true });
+			return new Promise((resolve, reject) => {
+				const image = new Image();
+				image.onload = () => {
+					exportedCtx.drawImage(image, 0, 0);
+					const viaExport = exportedCtx.getImageData(0, 0, 32, 64).data;
+					resolve({
+						directClean: direct.every((v) => v === 0),
+						exportClean: viaExport.every((v) => v === 0),
+					});
+				};
+				image.onerror = () => reject(new Error('exported PNG did not load'));
+				image.src = canvas.toDataURL();
+			});
+		}`)
+		if err != nil {
+			t.Fatalf("transparent pixel probe failed: %v", err)
+		}
+		got := result.Value.Map()
+
+		if !got["directClean"].Bool() {
+			t.Error("getImageData put colour into transparent pixels")
+		}
+		if !got["exportClean"].Bool() {
+			t.Error("toDataURL put colour into transparent pixels")
+		}
+	})
+
 	t.Run("reading a canvas does not claim its context", func(t *testing.T) {
 		// toDataURL on a canvas with no context yet must not create a 2d one,
 		// or a later getContext('webgl') on that canvas returns null.
