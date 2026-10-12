@@ -897,6 +897,13 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		Language:           h.config.BrowserLang,     // LANG env; a session's own language wins
 	}
 
+	// Fingerprint profiles were removed. Say so once, rather than let a client
+	// believe an option took effect.
+	if ignored := req.Fingerprint.IgnoredOptions(); len(ignored) > 0 {
+		log.Warn().Strs("ignored", ignored).
+			Msg("Ignoring fingerprint options: only fingerprint.overrides.timezone and the userAgent field are honored")
+	}
+
 	var result *solver.Result
 	var solveErr error
 

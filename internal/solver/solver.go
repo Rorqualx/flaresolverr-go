@@ -99,7 +99,8 @@ type SolveOptions struct {
 	// CookieExtractDelay is the number of seconds to wait before extracting cookies.
 	// This allows late-set JS cookies to be captured.
 	CookieExtractDelay int
-	// Fingerprint specifies per-request browser fingerprint customization.
+	// Fingerprint is the request's fingerprint object. Only its timezone
+	// override is honored; see types.FingerprintConfig.
 	Fingerprint *types.FingerprintConfig
 	// Language is the locale (e.g. "fr_FR" or "fr-FR") behind the page's
 	// Accept-Language header and navigator.languages. Empty means en-US.
@@ -163,10 +164,8 @@ func resolveTimezone(opts *SolveOptions) string {
 	if opts == nil {
 		return ""
 	}
-	if opts.Fingerprint != nil && opts.Fingerprint.Overrides != nil {
-		if v, ok := opts.Fingerprint.Overrides["timezone"].(string); ok && v != "" {
-			return v
-		}
+	if tz := opts.Fingerprint.Timezone(); tz != "" {
+		return tz
 	}
 	return opts.DefaultTimezone
 }
@@ -3200,7 +3199,14 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 			return nil, fmt.Errorf("failed to prepare session page: %w", err)
 		}
 	} else {
-		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping stealth on reused session page")
+		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping page setup on reused session page")
+		// A timezone asked for by this request still applies: it is a CDP
+		// override, which can change at any point in a page's life.
+		if tz := opts.Fingerprint.Timezone(); tz != "" {
+			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
+				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
+			}
+		}
 	}
 
 	// Set up media blocking if requested
