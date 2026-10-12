@@ -282,6 +282,14 @@ func safeEvalResultString(result *proto.RuntimeEvaluateResult) string {
 	return result.Result.Value.Str()
 }
 
+// errProxyCredentials is reported when the egress guard saw the upstream
+// proxy refuse the credentials during a request.
+var errProxyCredentials = errors.New("the proxy rejected the supplied credentials")
+
+// guardRefusalStatus is the HTTP status the egress guard answers with when it
+// cannot reach a destination through the upstream proxy.
+const guardRefusalStatus = 502
+
 // Fix #13: setupProxyAuth sets up proxy authentication for a page if needed.
 // Returns a cleanup function and error. The cleanup function is safe to call
 // even if it's nil (will be a no-op). Errors are now propagated to caller.
@@ -477,8 +485,15 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		defer route.Release()
 		authFailures := route.UpstreamAuthFailures()
 		defer func() {
-			if err != nil && route.UpstreamAuthFailures() > authFailures {
-				err = fmt.Errorf("the proxy rejected the supplied credentials: %w", err)
+			if route.UpstreamAuthFailures() == authFailures {
+				return
+			}
+			switch {
+			case err != nil:
+				err = fmt.Errorf("%w: %w", errProxyCredentials, err)
+			case result != nil && result.StatusCode == guardRefusalStatus:
+				// A plain-HTTP page: the guard answered in the target's place.
+				result, err = nil, errProxyCredentials
 			}
 		}()
 	}

@@ -278,7 +278,10 @@ func isTimeout(err error) bool {
 // reach. The client gets a status and a reason; nothing is sent anywhere else.
 func (p *Proxy) refuse(conn net.Conn, dest destination, err error) {
 	status, reason := refusalFor(err)
+	// The error names addresses and failure classes only: every message in
+	// this package is written without proxy URLs or credentials.
 	log.Debug().
+		Err(err).
 		Str("host", dest.host).
 		Int("port", dest.port).
 		Int("status", status).

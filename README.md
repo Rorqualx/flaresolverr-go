@@ -500,6 +500,7 @@ All configuration is done via environment variables.
 | `ALLOW_LOCAL_PROXIES` | `false` | Allow a `proxy` in an API request to point at localhost or a private address. Does not apply to `PROXY_URL`, which is trusted configuration |
 | `IGNORE_CERT_ERRORS` | `false` | Ignore TLS certificate errors |
 | `DNS_REBINDING_PROTECTION` | `true` | Pin response URL to the request-time IP. Set `false` for sites serving identical content across multiple TLDs/CDN IPs (SSRF protection stays on) |
+| `EGRESS_GUARD` | `false` | Route every browser connection through an in-process proxy that refuses private, loopback and cloud-metadata destinations. See [Egress guard](#egress-guard) |
 | `API_KEY_ENABLED` | `false` | Enable API key authentication |
 | `API_KEY` | (none) | Required API key (use 16+ chars) |
 | `BROWSER_SANDBOX` | `false` | Run Chromium with its own sandbox instead of `--no-sandbox`. Needs extra container permissions; see below |
@@ -630,6 +631,28 @@ Hot-reload capable selectors for adapting to Cloudflare changes without restarts
 When `SELECTORS_HOT_RELOAD` is enabled, changes to the selectors file are automatically detected and applied without restarting the service.
 
 When `SELECTORS_REMOTE_URL` is configured, selectors are fetched periodically from the remote URL. File selectors take priority over remote selectors if both are configured.
+
+### Egress guard
+
+FlareSolverr checks the URL you ask for and refuses private, loopback and cloud-metadata addresses. That check cannot see what the browser does next. A page can redirect to `http://10.0.0.5/`, load an image or an iframe from it, `fetch()` it, open a WebSocket to it, or sit behind a hostname that resolves to a public address when it is checked and to a private one when Chromium connects (DNS rebinding). Without the guard those requests are made, from inside your network, before the final URL is examined.
+
+`EGRESS_GUARD=true` closes that gap. Every browser and browser context is pointed at a small forward proxy inside the FlareSolverr process, listening on `127.0.0.1` only. For each connection the guard resolves the name once, requires every address it resolves to to be public, and connects to the address it checked. This applies to pooled browsers, sessions, `browserFlags` sessions and the reconnect bypass, and to loopback as well: with the guard on, a page cannot reach `127.0.0.1` or `localhost` on the machine running FlareSolverr (which includes FlareSolverr's own API).
+
+What it does not change:
+
+- **TLS and HTTP/2 fingerprints.** HTTPS is tunnelled byte for byte; the guard never terminates TLS. The JA4 and HTTP/2 fingerprints are identical with the guard on and off.
+- **Request headers.** Plain HTTP is forwarded with its headers unchanged and in order. No `Via` or `X-Forwarded-For` is added.
+
+What it does change:
+
+- **No HTTP/3.** Chromium does not use HTTP/3 (QUIC) through a proxy, so sites that would have moved to HTTP/3 stay on HTTP/2. Cloudflare can see that. The solves tested for this release were unaffected, but a managed-challenge target was not available to measure, which is why the guard is off by default.
+- **Refused destinations look like errors.** A blocked HTTPS destination fails with `net::ERR_TUNNEL_CONNECTION_FAILED`; a blocked plain-HTTP destination returns a `403` page from the guard.
+- **Proxies.** With the guard on, a proxy from a request, a session, `PROXY_LIST` or `PROXY_URL` is reached through the guard, which logs in to it itself (`http`, `https` and `socks5`, with or without credentials). A per-request proxy then runs in a browser context on a pooled browser instead of a browser of its own, the reconnect bypass works with proxies that need credentials, and `PROXY_USERNAME` / `PROXY_PASSWORD` are applied to `PROXY_URL`. `socks4` proxies are rejected. Wrong proxy credentials are reported as `the proxy rejected the supplied credentials`.
+- **DNS.** Names are resolved by FlareSolverr with the system resolver rather than by Chromium.
+
+Limit when a proxy is in use: the upstream proxy resolves hostnames, so the guard cannot check the address a name leads to. It still refuses what it can recognise without resolving (private and special-purpose IP addresses in any notation, `localhost` names, cloud-metadata names), but a hostname that the proxy resolves to a private address is not caught. Without an upstream proxy there is no such gap.
+
+The guard exports counters on `/metrics` (`flaresolverr_egress_guard_*`), including the number of destinations it refused.
 
 ### Logging & Monitoring
 
