@@ -253,7 +253,7 @@ func testBrowserStartup(pool *browser.Pool, testURL string) {
 		log.Warn().Err(err).Str("url", testURL).Msg("Startup test: could not create page")
 		return
 	}
-	defer page.Close()
+	defer browser.ClosePage(page)
 
 	if err := page.Context(ctx).WaitLoad(); err != nil {
 		log.Warn().Err(err).Str("url", testURL).Msg("Startup test: page load failed")
