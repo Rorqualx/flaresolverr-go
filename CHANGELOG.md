@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-12
+
+### Fixed
+- **A page that stopped answering held its browser forever** - If a page's script never returned (an endless loop in the page or in `executeJs`, or a crashed renderer), the request did not come back after `maxTimeout`: cleanup waited on the page without a deadline, and the pooled browser was never returned. Three such requests used up a pool of three, after which every request failed with "failed to acquire browser" until a restart. Every call a request makes on its page now ends at most 10 seconds after the request's deadline, the page is closed with its own 5-second limit, and the browser goes back to the pool. This applies to stateless GET and POST requests and to sessions. A session whose page is stuck stays stuck (later requests on it fail at their deadline) until it is destroyed, which now works.
+
 ## [0.10.0] - 2026-10-12
 
 ### Added

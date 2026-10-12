@@ -552,11 +552,12 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// POST request path. The page is prepared exactly as for a GET; only the
 	// navigation differs (a submitted form or a fetch instead of Navigate).
 	if opts.IsPost && opts.PostData != "" {
-		page, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
+		var closePage func()
+		page, closePage, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create page for POST: %w", err)
 		}
-		defer page.Close()
+		defer closePage()
 
 		// Install the turnstile.render interceptor before navigation so managed
 		// challenges expose their sitekey/action/cData/chlPageData to the external
@@ -627,11 +628,12 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// GET request path
-	page, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
+	var closePage func()
+	page, closePage, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create page: %w", err)
 	}
-	defer page.Close()
+	defer closePage()
 
 	// Install the turnstile.render interceptor before navigation so managed
 	// challenges expose their sitekey/action/cData/chlPageData to the external
@@ -3198,25 +3200,49 @@ func (s *Solver) pageSetup(opts *SolveOptions) browser.PageSetup {
 	}
 }
 
+// cleanupGrace is how long a request's page keeps answering after the solve
+// deadline. Cleanup (disabling domains, removing listeners) runs in that time;
+// after it every call on the page fails instead of waiting.
+const cleanupGrace = 10 * time.Second
+
+// boundPage returns page with every later call on it limited to the deadline
+// of ctx plus cleanupGrace. A renderer that has stopped answering (a script
+// that never returns, a crashed renderer) otherwise holds the request, and the
+// browser it runs on, in the first cleanup call that needs it.
+//
+// The limit does not follow the cancellation of ctx: a caller that goes away
+// must not stop cleanup from running. The returned function releases the timer.
+func boundPage(ctx context.Context, page *rod.Page, fallback time.Duration) (*rod.Page, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(fallback)
+	}
+	hardCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(cleanupGrace))
+	return page.Context(hardCtx), cancel
+}
+
 // newPreparedPage opens a page in the given browser context and applies the
-// shared page setup. The caller owns the returned page and must close it.
+// shared page setup. The caller must call the returned function, which closes
+// the page.
 //
 // Opening the page is bounded by ctx: a browser that has stopped answering
 // fails the request at its deadline instead of holding it forever. The page
-// itself is returned on the browser's own context, so closing it still works
-// after ctx has ended.
-func (s *Solver) newPreparedPage(ctx context.Context, b *rod.Browser, opts *SolveOptions) (*rod.Page, error) {
+// itself stays usable for cleanupGrace after that deadline (see boundPage).
+func (s *Solver) newPreparedPage(ctx context.Context, b *rod.Browser, opts *SolveOptions) (*rod.Page, func(), error) {
 	page, err := b.Context(ctx).Page(proto.TargetCreateTarget{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to open page: %w", err)
+		return nil, nil, fmt.Errorf("failed to open page: %w", err)
 	}
-	page = page.Context(b.GetContext())
+	page, cancel := boundPage(ctx, page, opts.Timeout)
+	closePage := func() {
+		browser.ClosePage(page)
+		cancel()
+	}
 	if err := browser.PreparePage(page, s.pageSetup(opts)); err != nil {
-		// Ignore error: the setup failure is the one worth reporting
-		_ = page.Close()
-		return nil, err
+		closePage()
+		return nil, nil, err
 	}
-	return page, nil
+	return page, closePage, nil
 }
 
 // SolveWithPage solves a challenge using an existing page (for session support).
@@ -3226,6 +3252,13 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		Bool("disable_media", opts.DisableMedia).
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve with existing page")
+
+	// The session owns the page and it outlives this request, but no call this
+	// request makes on it may wait on a renderer that has stopped answering.
+	requestCtx, cancelRequest := context.WithTimeout(ctx, opts.Timeout)
+	defer cancelRequest()
+	page, cancelPage := boundPage(requestCtx, page, opts.Timeout)
+	defer cancelPage()
 
 	// Prepare only a fresh, blank page. A reused session page was prepared on
 	// its first request, and the registered scripts and CDP overrides persist

@@ -579,3 +579,61 @@ func TestSolver_DisableMedia(t *testing.T) {
 		t.Error("Expected successful result with media disabled")
 	}
 }
+
+// TestSolver_StuckScriptDoesNotHoldBrowser checks that a page running a script
+// that never returns cannot keep the request, or its pooled browser, forever:
+// the request comes back, and the single browser serves the next request.
+func TestSolver_StuckScriptDoesNotHoldBrowser(t *testing.T) {
+	skipCI(t)
+
+	cfg := &config.Config{
+		Host:               "127.0.0.1",
+		Port:               8191,
+		Headless:           true,
+		BrowserPoolSize:    1,
+		BrowserPoolTimeout: 60 * time.Second,
+		MaxMemoryMB:        512,
+	}
+
+	pool, err := browser.NewPool(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create pool: %v", err)
+	}
+	defer pool.Close()
+
+	server := startTestServer(t)
+	s := solver.New(pool, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+	const solveTimeout = 5 * time.Second
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// The result does not matter here, only that the call returns.
+		_, _ = s.Solve(context.Background(), &solver.SolveOptions{
+			URL:                    server.URL + "/html",
+			Timeout:                solveTimeout,
+			ExecuteJs:              "while (true) {}",
+			SkipResponseValidation: true,
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("request with a never-ending script did not return")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	result, err := s.Solve(ctx, &solver.SolveOptions{
+		URL:                    server.URL + "/html",
+		Timeout:                30 * time.Second,
+		SkipResponseValidation: true,
+	})
+	if err != nil {
+		t.Fatalf("browser did not serve the next request: %v", err)
+	}
+	if !strings.Contains(result.HTML, "Test Page") {
+		t.Error("next request did not return the test page")
+	}
+}

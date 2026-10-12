@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -11,6 +12,27 @@ import (
 
 // browserContextTimeout bounds creating and disposing a browser context.
 const browserContextTimeout = 10 * time.Second
+
+// pageCloseTimeout bounds closing one page.
+const pageCloseTimeout = 5 * time.Second
+
+// ClosePage closes page and gives up after pageCloseTimeout.
+//
+// A page whose renderer is stuck (a script that never returns, a crashed
+// renderer) does not answer Page.close. Waiting for it would hold the request,
+// and the pooled browser it runs on, forever. The page is then removed with its
+// browser context, or with its browser when the pool recycles it.
+func ClosePage(page *rod.Page) {
+	if page == nil {
+		return
+	}
+	// Its own deadline: the page's context may already have ended.
+	ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
+	defer cancel()
+	if err := page.Context(ctx).Close(); err != nil {
+		log.Debug().Err(err).Msg("Failed to close page")
+	}
+}
 
 // NewIsolatedContext creates a fresh browser context on b and returns a handle
 // whose pages live inside it, plus a function that disposes the context.
