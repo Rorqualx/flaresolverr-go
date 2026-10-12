@@ -5,27 +5,35 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Called by release.yml so a tag is only released after these jobs pass
+  workflow_call:
 
+# Least privilege: every job only needs to read the repository.
+permissions:
+  contents: read
+
+# Third-party actions are pinned to a full commit SHA (the tag is in the
+# trailing comment). Dependabot keeps both in step; see .github/dependabot.yml.
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    continue-on-error: true  # Don't block on lint failures for now
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.26'
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@d6238b002a20823d52840fda27e2d4891c5952dc # v4.0.1
         with:
           # Pinned v1 release built from source with the job's Go toolchain:
           # prebuilt v1 binaries are compiled with Go 1.24 and refuse a go.mod
-          # that targets a newer Go. Moving to v2 needs a .golangci.yml migration.
+          # that targets a newer Go. Moving to v2 needs a .golangci.yml
+          # migration plus code fixes for the findings v2 adds.
           version: v1.64.8
           install-mode: goinstall
           args: --config .golangci.yml
@@ -34,10 +42,10 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.26'
           cache: true
@@ -52,7 +60,7 @@ jobs:
         run: go test -v -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
           files: coverage.out
           fail_ci_if_error: false
@@ -60,12 +68,12 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [test]  # Build after tests pass (lint is advisory)
+    needs: [lint, test]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.26'
           cache: true

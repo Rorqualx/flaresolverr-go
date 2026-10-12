@@ -1,3 +1,5 @@
+> **Historical, superseded.** This document describes the January 2026 audit and is kept for reference only. It does not reflect the current code; see [CHANGELOG.md](../../CHANGELOG.md) for what has been fixed since and [SECURITY.md](../../SECURITY.md) for the current policy.
+
 # Security Audit Report - FlareSolverr Go
 
 **Date:** 2026-01-15

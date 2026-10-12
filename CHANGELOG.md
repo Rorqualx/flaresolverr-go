@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Releases are gated on tests** - The GitHub release and the Docker image are now two jobs of one `Release` workflow, and both wait for the CI workflow (lint, tests, build) to pass on the tagged commit. They used to start on the tag without running any tests. The separate `Docker` workflow is gone.
+- **`latest` only moves for full releases** - A pre-release tag such as `v0.9.0-rc.1` now publishes only its own version tag; before, every tag moved `latest`. The bare major image tag (`0`) is no longer published while the project is 0.x; `0.8`-style and exact version tags are unchanged.
+- **Release assets are signed and attested** - After a release is published, a follow-up job attests the build provenance of the archives, signs `checksums.txt` with cosign (keyless; the bundle is uploaded as `checksums.txt.sigstore.json`) and uploads an SPDX SBOM per archive. The job only adds files and cannot fail a release. Verify with `gh attestation verify <archive> --repo Rorqualx/flaresolverr-go` or `cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-regexp '^https://github.com/Rorqualx/flaresolverr-go/' --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt`.
+- **CI hardening** - All GitHub Actions are pinned to commit SHAs, workflows run with read-only permissions unless a job needs more, and Dependabot tracks actions, Go modules and Docker base images. The lint job now fails the build instead of being advisory.
+- **Repository layout** - `CLAUDE.md`'s directory structure and file-placement table now describe the real tree. The two old audit reports moved to `docs/audits/` (marked historical), the October 2026 review research is filed under `docs/research/`, and a `SECURITY.md` describes how to report a vulnerability and what the no-sandbox default means.
+
 ## [0.8.5] - 2026-10-11
 
 ### Fixed
