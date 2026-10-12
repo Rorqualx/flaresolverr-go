@@ -304,10 +304,10 @@ func TestCanvasNoiseIdempotent(t *testing.T) {
 		got := result.Value.Map()
 
 		if !got["directClean"].Bool() {
-			t.Error("getImageData put colour into transparent pixels")
+			t.Error("getImageData put color into transparent pixels")
 		}
 		if !got["exportClean"].Bool() {
-			t.Error("toDataURL put colour into transparent pixels")
+			t.Error("toDataURL put color into transparent pixels")
 		}
 	})
 

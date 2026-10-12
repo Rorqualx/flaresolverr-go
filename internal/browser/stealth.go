@@ -522,7 +522,7 @@ const stealthScript = `
     //     private copy.
     //   - Noise is applied exactly once per read: the copy is read with the
     //     original getImageData, not the patched one.
-    //   - Transparent pixels are never given a colour.
+    //   - Transparent pixels are never given a color.
     // Skip on about:blank as canvas APIs may not be fully initialized
     if (!isAboutBlank) try {
         // Per-document seed in 1..255. Zero is excluded: it is falsy, so a
@@ -557,7 +557,7 @@ const stealthScript = `
                     const noise = noiseAt(originX + x, originY + y);
                     if (noise === 0) continue;
                     const i = (y * width + x) * 4;
-                    // Fully transparent pixels stay exactly (0, 0, 0, 0): colour
+                    // Fully transparent pixels stay exactly (0, 0, 0, 0): color
                     // in a transparent pixel is impossible for a real canvas
                     // and is a well-known test for canvas noise.
                     if (data[i + 3] === 0) continue;
