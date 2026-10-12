@@ -131,6 +131,12 @@ func (p *Pool) GetBrowserPath() string {
 	return p.config.BrowserPath
 }
 
+// SandboxEnabled reports whether browsers are launched with Chromium's own
+// sandbox (BROWSER_SANDBOX=true), i.e. without --no-sandbox.
+func (p *Pool) SandboxEnabled() bool {
+	return p.config.BrowserSandbox
+}
+
 // DefaultProxyURL returns the proxy every pooled browser is launched with
 // (PROXY_URL), or "" if none is configured.
 func (p *Pool) DefaultProxyURL() string {
@@ -296,8 +302,12 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// ========================================
 	// Container Security Flags
 	// ========================================
-	l = l.Set("no-sandbox").
-		Set("disable-setuid-sandbox").
+	// Chromium's sandbox is off unless BROWSER_SANDBOX=true: the default Docker
+	// runtime grants neither the user namespaces nor the syscalls it needs.
+	// go-rod adds --no-sandbox by itself when it detects a container, so the
+	// flag has to be removed explicitly when the sandbox is wanted.
+	l = l.NoSandbox(!p.config.BrowserSandbox)
+	l = l.Set("disable-setuid-sandbox").
 		Set("disable-dev-shm-usage")
 
 	// ========================================
@@ -417,6 +427,12 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	if isARM() {
 		l = l.Set("disable-gpu-compositing")
 		log.Debug().Msg("ARM detected: using software compositing")
+	}
+
+	// The sandbox forks renderers from the zygote process; Chromium refuses to
+	// start with "Zygote cannot be disabled if sandbox is enabled" otherwise.
+	if p.config.BrowserSandbox {
+		l = l.Delete("no-zygote")
 	}
 
 	return l

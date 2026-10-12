@@ -37,6 +37,10 @@ type Config struct {
 	// Browser settings
 	Headless    bool
 	BrowserPath string
+	// BrowserSandbox keeps Chromium's own sandbox on (omits --no-sandbox).
+	// Off by default: the sandbox needs user namespaces or a seccomp profile
+	// that the default Docker runtime does not grant.
+	BrowserSandbox bool
 
 	// Pool settings - CRITICAL for memory efficiency
 	BrowserPoolSize    int
@@ -130,8 +134,9 @@ func Load() *Config {
 		Port: getEnvInt("PORT", 8191),
 
 		// Browser
-		Headless:    getEnvBool("HEADLESS", true),
-		BrowserPath: getEnvString("BROWSER_PATH", ""),
+		Headless:       getEnvBool("HEADLESS", true),
+		BrowserPath:    getEnvString("BROWSER_PATH", ""),
+		BrowserSandbox: getEnvBool("BROWSER_SANDBOX", false),
 
 		// Pool - These defaults are tuned for memory efficiency
 		BrowserPoolSize:    getEnvInt("BROWSER_POOL_SIZE", 3),
