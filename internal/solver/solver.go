@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -390,10 +391,12 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	cacheEgress := proxyID(opts.Proxy)
 	cacheEligible := s.clearanceCache != nil && !opts.IsPost && cacheDomain != ""
+	injectedFromCache := false
 	if cacheEligible {
 		if e := s.clearanceCache.Get(cacheDomain, cacheEgress); e != nil &&
 			(opts.UserAgent == "" || opts.UserAgent == e.userAgent) {
 			// cf_clearance is IP+UA bound — reuse the exact UA that minted it.
+			injectedFromCache = true
 			opts.UserAgent = e.userAgent
 			opts.Cookies = append(append([]types.RequestCookie{}, e.cookies...), opts.Cookies...)
 			log.Info().
@@ -405,6 +408,16 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		defer func() {
 			if err == nil && result != nil && result.Success {
 				s.clearanceCache.Put(cacheDomain, cacheEgress, result.UserAgent, result.Cookies)
+				return
+			}
+			// The cached clearance did not get this request through, so it is
+			// stale. Drop it rather than replay it on every later request.
+			if injectedFromCache {
+				s.clearanceCache.Delete(cacheDomain, cacheEgress)
+				log.Info().
+					Str("domain", cacheDomain).
+					Str("egress", cacheEgress).
+					Msg("Evicted cached cf_clearance after a failed solve")
 			}
 		}()
 	}
@@ -497,9 +510,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 			}
 		}
 
-		// Set user agent
-		if s.userAgent != "" {
-			if err := browser.SetUserAgent(page, s.userAgent); err != nil {
+		// Set user agent — per-request override takes priority
+		if ua := s.effectiveUserAgent(opts); ua != "" {
+			if err := browser.SetUserAgent(page, ua); err != nil {
 				log.Warn().Err(err).Msg("Failed to set user agent")
 			}
 		}
@@ -537,6 +550,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 		defer networkCleanup()
 
+		// Record clearance cookies that exist before navigation
+		knownClearance := s.clearanceValues(page)
+
 		// Dispatch POST based on content type
 		if opts.ContentType == types.ContentTypeJSON {
 			// JSON POST via Fetch API
@@ -556,7 +572,14 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 
 		// Main solve loop with DNS pinning
-		return s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
+		result, err = s.solveLoop(solveCtx, page, s.newSolveParams(opts, networkCapture, knownClearance))
+		if err != nil {
+			return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
+		}
+
+		// Post-solve processing, shared with the GET and session paths
+		s.applyPostSolveProcessing(solveCtx, page, opts, result)
+		return result, nil
 	}
 
 	// GET request path
@@ -591,9 +614,8 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// Set user agent — per-request override takes priority
-	ua := s.userAgent
+	ua := s.effectiveUserAgent(opts)
 	if opts.UserAgent != "" {
-		ua = opts.UserAgent
 		log.Debug().Str("user_agent", ua).Msg("Using per-request User-Agent override")
 	}
 	if ua != "" {
@@ -642,14 +664,22 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 	}
 
+	// Record clearance cookies that exist before navigation (cache-injected or
+	// supplied by the client), so a stale one is not mistaken for a fresh solve.
+	knownClearance := s.clearanceValues(page)
+
 	// Handle followRedirects=false — capture first response via JS fetch with redirect:manual
 	if opts.FollowRedirects != nil && !*opts.FollowRedirects {
 		log.Debug().Str("url", opts.URL).Msg("followRedirects=false: using fetch with redirect:manual")
 
-		escapedURL := strings.ReplaceAll(opts.URL, "'", "\\'")
+		// JSON encoding yields a valid JS string literal for any URL
+		urlLiteral, err := json.Marshal(opts.URL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode URL: %w", err)
+		}
 		noRedirectJS := `async function() {
 			try {
-				const resp = await fetch('` + escapedURL + `', { redirect: 'manual', credentials: 'include' });
+				const resp = await fetch(` + string(urlLiteral) + `, { redirect: 'manual', credentials: 'include' });
 				const headers = {};
 				resp.headers.forEach((v, k) => { headers[k] = v; });
 				const body = await resp.text();
@@ -747,18 +777,26 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// Main solve loop with DNS pinning
-	result, err = s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
+	params := s.newSolveParams(opts, networkCapture, knownClearance)
+	params.allowEarlyBypass = true
+	result, err = s.solveLoop(solveCtx, page, params)
 	if err != nil {
 		// If the challenge timed out (or native Turnstile solving was exhausted early)
-		// and we still have time in the parent context, try the disconnect/reconnect
-		// approach. This launches a clean Chrome without CDP so Cloudflare can't detect
+		// and the caller is still there, try the disconnect/reconnect approach.
+		// This launches a clean Chrome without CDP so Cloudflare can't detect
 		// it, lets Chrome handle the challenge naturally, then reconnects to extract results.
-		if (strings.Contains(err.Error(), "timed out") || strings.Contains(err.Error(), "turnstile_early_bypass")) && ctx.Err() == nil {
-			log.Info().Msg("Normal solve timed out, attempting CDP disconnect/reconnect bypass")
-			reconnResult, reconnErr := s.solveWithReconnect(ctx, browserInstance, opts)
+		if (errors.Is(err, types.ErrChallengeTimeout) || errors.Is(err, errEarlyBypass)) && ctx.Err() == nil {
+			log.Info().Msg("Normal solve did not clear the challenge, attempting CDP disconnect/reconnect bypass")
+
+			// The bypass runs after the request's own timeout, so it gets a
+			// budget of its own instead of the deadline-less parent context.
+			bypassCtx, bypassCancel := context.WithTimeout(ctx, ReconnectBypassBudget)
+			defer bypassCancel()
+
+			reconnResult, reconnErr := s.solveWithReconnect(bypassCtx, browserInstance, opts)
 			if reconnErr == nil {
-				// Force-recycle the pool browser since it was held for a long
-				// time during the bypass and may be stale
+				// The pool browser was held for a long time during the bypass and
+				// may be stale: flag it so the deferred Release replaces it.
 				s.pool.RecycleBrowser(browserInstance)
 				return reconnResult, nil
 			}
@@ -785,11 +823,16 @@ func (s *Solver) applyPostSolveProcessing(ctx context.Context, page *rod.Page, o
 	// Download mode: re-fetch the URL via Fetch API and return base64
 	if opts.Download {
 		log.Info().Str("url", opts.URL).Msg("Download mode: fetching URL as binary via Fetch API")
-		escapedURL := strings.ReplaceAll(opts.URL, "'", "\\'")
-		escapedURL = strings.ReplaceAll(escapedURL, "\\", "\\\\")
+		// JSON encoding yields a valid JS string literal for any URL. (The old
+		// manual escaping doubled its own backslashes and broke on any quote.)
+		urlLiteral, marshalErr := json.Marshal(opts.URL)
+		if marshalErr != nil {
+			log.Warn().Err(marshalErr).Msg("Download mode: failed to encode URL")
+			return
+		}
 		downloadJS := `async function() {
 			try {
-				const resp = await fetch('` + escapedURL + `', { credentials: 'include' });
+				const resp = await fetch(` + string(urlLiteral) + `, { credentials: 'include' });
 				const blob = await resp.blob();
 				return await new Promise((resolve, reject) => {
 					const reader = new FileReader();
@@ -870,7 +913,11 @@ func (s *Solver) solveHCaptchaExternal(ctx context.Context, page *rod.Page, page
 		return fmt.Errorf("could not extract hCaptcha sitekey")
 	}
 
-	log.Info().Str("sitekey", sitekey.Value.Str()[:10]+"...").Msg("Extracted hCaptcha sitekey")
+	sitekeyPreview := sitekey.Value.Str()
+	if len(sitekeyPreview) > 10 {
+		sitekeyPreview = sitekeyPreview[:10] + "..."
+	}
+	log.Info().Str("sitekey", sitekeyPreview).Msg("Extracted hCaptcha sitekey")
 
 	// Use the first configured provider that supports hCaptcha
 	// All 3 providers (2captcha, capsolver, anticaptcha) support HCaptchaTaskProxyless
@@ -1016,8 +1063,25 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		return nil, fmt.Errorf("two-phase bypass requires a Chrome/Chromium binary")
 	}
 
-	// Create a temporary user-data-dir for cookie persistence between phases
-	userDataDir := fmt.Sprintf("/tmp/flaresolverr-bypass-%d", time.Now().UnixNano())
+	// The bypass launches Chrome outside the pool, so it must be told about the
+	// request's proxy itself. Without this the target saw the server's real IP
+	// and the clearance was cached under the proxy's egress, where it is useless.
+	proxyServer, proxyErr := bypassProxyServer(opts, s.pool.DefaultProxyURL())
+	if proxyErr != nil {
+		return nil, proxyErr
+	}
+
+	// Create a temporary user-data-dir for cookie persistence between phases.
+	// Removed on every return path, including cancellation during Phase 1.
+	userDataDir, err := os.MkdirTemp("", "flaresolverr-bypass-")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bypass profile dir: %w", err)
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(userDataDir); rmErr != nil {
+			log.Warn().Err(rmErr).Str("dir", userDataDir).Msg("Failed to remove bypass profile dir")
+		}
+	}()
 
 	// Create stealth extension to inject anti-detection patches without CDP.
 	// This applies the same stealth.go patches (webdriver, plugins, WebGL spoof,
@@ -1047,8 +1111,11 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		"--window-size=1920,1080",
 		"--force-device-scale-factor=1.25",     // Realistic DPI (Xvfb defaults to 1.0)
 		"--load-extension=" + stealthExt.Dir(), // Stealth patches without CDP
-		opts.URL,
 	}
+	if proxyServer != "" {
+		phase1Args = append(phase1Args, "--proxy-server="+proxyServer)
+	}
+	phase1Args = append(phase1Args, opts.URL)
 	log.Debug().
 		Str("browser", browserPath).
 		Strs("args", phase1Args).
@@ -1103,20 +1170,23 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	// ========================================
 	log.Info().Int("port", debugPort).Msg("Phase 2: Relaunching with CDP for extraction...")
 
-	cmd2 := exec.Command(browserPath, //nolint:gosec // browserPath is validated by findBrowserBinary
+	phase2Args := []string{
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--no-sandbox",
-		"--user-data-dir="+userDataDir,
-		"--remote-debugging-port="+fmt.Sprintf("%d", debugPort),
+		"--user-data-dir=" + userDataDir,
+		"--remote-debugging-port=" + fmt.Sprintf("%d", debugPort),
 		"--window-size=1920,1080",
-		opts.URL,
-	)
+	}
+	if proxyServer != "" {
+		phase2Args = append(phase2Args, "--proxy-server="+proxyServer)
+	}
+	phase2Args = append(phase2Args, opts.URL)
+	cmd2 := exec.Command(browserPath, phase2Args...) //nolint:gosec // browserPath is validated by findBrowserBinary
 	cmd2.Stderr = nil
 	cmd2.Stdout = nil
 
 	if err := cmd2.Start(); err != nil {
-		os.RemoveAll(userDataDir)
 		return nil, fmt.Errorf("failed to launch Phase 2 Chrome: %w", err)
 	}
 	defer func() {
@@ -1124,8 +1194,6 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 			_ = cmd2.Process.Kill() // Best-effort cleanup during shutdown
 			_ = cmd2.Wait()         // Best-effort cleanup during shutdown
 		}
-		// Clean up temp dir
-		os.RemoveAll(userDataDir)
 	}()
 
 	// Wait for Chrome to start and the debugging port to be ready
@@ -1194,7 +1262,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	}
 	defer networkCleanup()
 
-	return s.buildResult(targetPage, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
+	return s.buildResult(solveCtx, targetPage, s.newSolveParams(opts, networkCapture, nil))
 }
 
 // setCookies sets cookies on the page before navigation.
@@ -1578,6 +1646,68 @@ var turnstileTriggerSelectors = map[string]bool{
 	"#challenge-stage":                         true,
 }
 
+// solveParams carries the per-request settings the solve loop and the result
+// builder need.
+type solveParams struct {
+	url                string
+	screenshot         bool
+	expectedIP         net.IP
+	tabsTillVerify     int
+	skipValidation     bool
+	networkCapture     *NetworkCapture
+	cookieExtractDelay int
+
+	// userAgent is the User-Agent the page actually used. cf_clearance is bound
+	// to it, so it is what the result must report.
+	userAgent string
+
+	// knownClearance holds the cf_clearance values that were already in the
+	// cookie jar before navigation (cached, client-supplied, or left in a
+	// session). On a challenge interstitial, one of these still being present
+	// proves nothing: Cloudflare re-challenges without removing the cookie.
+	knownClearance map[string]struct{}
+
+	// allowEarlyBypass lets the loop give up early on a stuck Turnstile so the
+	// caller can try the reconnect bypass. Only the stateless GET path has one.
+	allowEarlyBypass bool
+}
+
+// cookieSnapshotTimeout bounds reading the cookie jar before navigation.
+const cookieSnapshotTimeout = 5 * time.Second
+
+// errEarlyBypass is returned by solveLoop when native Turnstile solving is
+// exhausted and the caller asked to be handed control early.
+var errEarlyBypass = errors.New("native turnstile solving exhausted")
+
+// ReconnectBypassBudget bounds the reconnect bypass, which starts after the
+// normal solve has used the request's timeout. A request can therefore take up
+// to its timeout plus this budget; the HTTP server's write timeout must allow it.
+const ReconnectBypassBudget = 75 * time.Second
+
+// newSolveParams builds the loop parameters for a request.
+func (s *Solver) newSolveParams(opts *SolveOptions, networkCapture *NetworkCapture, knownClearance map[string]struct{}) solveParams {
+	return solveParams{
+		url:                opts.URL,
+		screenshot:         opts.Screenshot,
+		expectedIP:         opts.ExpectedIP,
+		tabsTillVerify:     opts.TabsTillVerify,
+		skipValidation:     opts.SkipResponseValidation,
+		networkCapture:     networkCapture,
+		cookieExtractDelay: opts.CookieExtractDelay,
+		userAgent:          s.effectiveUserAgent(opts),
+		knownClearance:     knownClearance,
+	}
+}
+
+// effectiveUserAgent returns the User-Agent a request runs with: the
+// per-request override if given, otherwise the server default.
+func (s *Solver) effectiveUserAgent(opts *SolveOptions) string {
+	if opts.UserAgent != "" {
+		return opts.UserAgent
+	}
+	return s.userAgent
+}
+
 // solveLoop repeatedly checks for and attempts to solve challenges.
 // Uses the same approach as Python FlareSolverr: check title and selectors.
 //
@@ -1590,7 +1720,14 @@ var turnstileTriggerSelectors = map[string]bool{
 //   - tabsTillVerify: Number of Tab presses to reach Turnstile checkbox (0 uses default of 10)
 //   - skipValidation: If true, skip response URL validation (for testing only)
 //   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
-func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, tabsTillVerify int, skipValidation bool, networkCapture *NetworkCapture, cookieExtractDelay int) (*Result, error) {
+func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) (*Result, error) {
+	url := sp.url
+
+	// Bind every CDP call in the loop to the request deadline. go-rod applies no
+	// timeout of its own, so a page that blocks its main thread would otherwise
+	// hold the browser (and a session's lock) indefinitely.
+	page = page.Context(ctx)
+
 	// Phase 2: Use randomized poll interval (0.8-1.5s) instead of fixed 1s
 	// This makes polling patterns appear more human-like
 	avgPollInterval := 1150 * time.Millisecond // Average of 800-1500ms for calculation
@@ -1653,14 +1790,15 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 		// If no challenge indicators, we're done
 		if !challengeInTitle && challengeSelector == "" {
 			log.Info().Str("title", title).Msg("Challenge solved or no challenge present")
-			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture, cookieExtractDelay)
+			return s.buildResult(ctx, page, sp)
 		}
 
-		// For invisible Turnstile: if cf_clearance cookie is present, challenge is solved
-		// even if the widget is still visible on the page
-		if s.hasCfClearanceCookie(page) {
+		// For invisible Turnstile: a cf_clearance cookie means the challenge is
+		// solved even if the widget is still visible on the page. On a full-page
+		// interstitial that only holds for a cookie minted during this request.
+		if s.clearanceProvesSolved(page, challengeInTitle, sp.knownClearance) {
 			log.Info().Msg("cf_clearance cookie present - challenge solved (invisible Turnstile)")
-			return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture, cookieExtractDelay)
+			return s.buildResult(ctx, page, sp)
 		}
 
 		// Check for access denied — but only after giving the JS challenge
@@ -1677,7 +1815,7 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 					return nil, types.NewChallengeTimeoutError(url)
 				}
 				// Try to get result from the new page
-				return s.buildResult(page, url, captureScreenshot, expectedIP, skipValidation, networkCapture, cookieExtractDelay)
+				return s.buildResult(ctx, page, sp)
 			}
 			log.Debug().Err(err).Msg("Failed to get page HTML for challenge detection")
 			return nil, fmt.Errorf("failed to get page HTML: %w", err)
@@ -1712,7 +1850,7 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 				Msg("Turnstile detected, attempting to solve...")
 
 			// Try native solving methods first (Methods 1-5)
-			if err := s.solveTurnstile(ctx, page, tabsTillVerify); err != nil {
+			if err := s.solveTurnstile(ctx, page, sp.tabsTillVerify); err != nil {
 				// Fix: Log but continue - Turnstile solve is best-effort, the loop will
 				// check again and return error if challenge persists past timeout
 				log.Warn().Err(err).Msg("Turnstile solve attempt failed, will retry")
@@ -1739,11 +1877,11 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, url string, capt
 			if s.solverChain != nil && s.solverChain.IsEnabled() {
 				earlyBypassThreshold = s.solverChain.NativeAttempts() + 1
 			}
-			if turnstileAttempts >= earlyBypassThreshold && ctx.Err() == nil {
+			if sp.allowEarlyBypass && turnstileAttempts >= earlyBypassThreshold && ctx.Err() == nil {
 				log.Info().
 					Int("native_attempts", turnstileAttempts).
 					Msg("Turnstile native solving struggling, attempting early two-phase bypass")
-				return nil, fmt.Errorf("turnstile_early_bypass: native solving exhausted after %d attempts", turnstileAttempts)
+				return nil, fmt.Errorf("%w after %d attempts", errEarlyBypass, turnstileAttempts)
 			}
 		}
 
@@ -2018,6 +2156,56 @@ func (s *Solver) hasCfClearanceCookie(page *rod.Page) bool {
 	for _, cookie := range cookies {
 		if cookie.Name == "cf_clearance" && len(cookie.Value) > 50 {
 			log.Debug().Msg("cf_clearance cookie found")
+			return true
+		}
+	}
+	return false
+}
+
+// clearanceValues returns every cf_clearance value in the page's browser
+// context. Call it before navigation to record what was already there.
+//
+// It deliberately does not use page.Cookies(nil): that only returns cookies
+// for the page's current URL, which before navigation is about:blank.
+func (s *Solver) clearanceValues(page *rod.Page) map[string]struct{} {
+	values := make(map[string]struct{})
+	res, err := proto.NetworkGetAllCookies{}.Call(page.Timeout(cookieSnapshotTimeout))
+	if res == nil {
+		// A partitionKey type mismatch returns an error together with the
+		// cookies; only a missing result means there is nothing to read.
+		log.Debug().Err(err).Msg("Could not snapshot cookies before navigation")
+		return values
+	}
+	for _, cookie := range res.Cookies {
+		if cookie.Name == "cf_clearance" {
+			values[cookie.Value] = struct{}{}
+		}
+	}
+	return values
+}
+
+// clearanceProvesSolved reports whether a cf_clearance cookie is evidence that
+// the challenge was passed.
+//
+// When the page is not an interstitial (an embedded Turnstile widget on a
+// normal page), any plausible clearance cookie counts: the content is there.
+// When the page IS an interstitial, Cloudflare is refusing whatever clearance
+// we presented, so only a value that was not in the jar before navigation
+// counts. Without this, a stale cached or client-supplied cookie made the
+// challenge page come back as a successful result.
+func (s *Solver) clearanceProvesSolved(page *rod.Page, onInterstitial bool, known map[string]struct{}) bool {
+	cookies, err := page.Cookies(nil)
+	if err != nil {
+		return false
+	}
+	for _, cookie := range cookies {
+		if cookie.Name != "cf_clearance" || len(cookie.Value) <= 50 {
+			continue
+		}
+		if !onInterstitial {
+			return true
+		}
+		if _, stale := known[cookie.Value]; !stale {
 			return true
 		}
 	}
@@ -2563,9 +2751,11 @@ func (s *Solver) validateResponseURL(page *rod.Page, expectedIP net.IP, skipVali
 //   - expectedIP: The IP resolved during initial validation for DNS pinning (nil to skip)
 //   - skipValidation: If true, skip response URL validation (for testing only)
 //   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
-func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool, expectedIP net.IP, skipValidation bool, networkCapture *NetworkCapture, cookieExtractDelay int) (*Result, error) {
+func (s *Solver) buildResult(ctx context.Context, page *rod.Page, sp solveParams) (*Result, error) {
+	page = page.Context(ctx)
+
 	// Validate response URL to detect DNS rebinding attacks
-	if err := s.validateResponseURL(page, expectedIP, skipValidation); err != nil {
+	if err := s.validateResponseURL(page, sp.expectedIP, sp.skipValidation); err != nil {
 		return nil, err
 	}
 
@@ -2573,7 +2763,7 @@ func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool,
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract page HTML: %w", err)
 	}
-	return s.buildResultWithHTML(page, url, html, captureScreenshot, networkCapture, cookieExtractDelay)
+	return s.buildResultWithHTML(ctx, page, html, sp)
 }
 
 // buildResultWithHTML constructs the result using pre-fetched HTML.
@@ -2585,7 +2775,9 @@ func (s *Solver) buildResult(page *rod.Page, url string, captureScreenshot bool,
 //   - html: Pre-fetched HTML content
 //   - captureScreenshot: Whether to capture a screenshot
 //   - networkCapture: Optional network capture for real HTTP status codes and headers (may be nil)
-func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, captureScreenshot bool, networkCapture *NetworkCapture, cookieExtractDelay int) (*Result, error) {
+func (s *Solver) buildResultWithHTML(ctx context.Context, page *rod.Page, html string, sp solveParams) (*Result, error) {
+	url, captureScreenshot, networkCapture, cookieExtractDelay := sp.url, sp.screenshot, sp.networkCapture, sp.cookieExtractDelay
+
 	// Fix #15: Track if HTML was truncated
 	htmlTruncated := false
 
@@ -2605,7 +2797,9 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 	// This allows late-set JS cookies (e.g., analytics, session tokens) to be captured.
 	if cookieExtractDelay > 0 {
 		log.Debug().Int("delay_seconds", cookieExtractDelay).Msg("Waiting before cookie extraction")
-		time.Sleep(time.Duration(cookieExtractDelay) * time.Second)
+		if !sleepWithContext(ctx, time.Duration(cookieExtractDelay)*time.Second) {
+			return nil, types.NewChallengeTimeoutError(url)
+		}
 	}
 
 	// Use Network.getAllCookies to get ALL cookies regardless of domain
@@ -2725,7 +2919,7 @@ func (s *Solver) buildResultWithHTML(page *rod.Page, url string, html string, ca
 		HTMLTruncated:   htmlTruncated, // Fix #15: Include truncation flag
 		Cookies:         cookies,
 		CookieError:     cookieError, // Include cookie retrieval error if any
-		UserAgent:       s.userAgent,
+		UserAgent:       sp.userAgent,
 		URL:             currentURL,
 		TurnstileToken:  turnstileToken,
 		Screenshot:      screenshotBase64,
@@ -3085,6 +3279,9 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	}
 	defer networkCleanup()
 
+	// Record clearance cookies the session already holds before navigating
+	knownClearance := s.clearanceValues(page)
+
 	// Navigate (GET or POST)
 	// Use page.Context() inline to avoid reassigning the page variable
 	if opts.IsPost && opts.PostData != "" {
@@ -3118,7 +3315,7 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	}
 
 	// Solve with DNS pinning
-	result, err := s.solveLoop(solveCtx, page, opts.URL, opts.Screenshot, opts.ExpectedIP, opts.TabsTillVerify, opts.SkipResponseValidation, networkCapture, opts.CookieExtractDelay)
+	result, err := s.solveLoop(solveCtx, page, s.newSolveParams(opts, networkCapture, knownClearance))
 	if err != nil {
 		return nil, fmt.Errorf("solve loop failed for %s: %w", opts.URL, err)
 	}
@@ -3129,4 +3326,29 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	s.applyPostSolveProcessing(solveCtx, page, opts, result)
 
 	return result, nil
+}
+
+// bypassProxyServer returns the --proxy-server value the reconnect bypass must
+// launch Chrome with: the request's proxy, else the configured default, else "".
+//
+// The bypass drives Chrome without CDP, so it cannot answer a proxy's
+// authentication challenge. For a proxy that needs credentials it returns an
+// error instead of silently going out unproxied.
+func bypassProxyServer(opts *SolveOptions, defaultProxyURL string) (string, error) {
+	proxyURL, username := defaultProxyURL, ""
+	if opts.Proxy != nil && opts.Proxy.URL != "" {
+		proxyURL, username = opts.Proxy.URL, opts.Proxy.Username
+	}
+	if proxyURL == "" {
+		return "", nil
+	}
+
+	parsed, err := neturl.Parse(proxyURL)
+	if err != nil || parsed.Host == "" {
+		return "", errors.New("reconnect bypass: invalid proxy URL")
+	}
+	if username != "" || parsed.User != nil {
+		return "", errors.New("reconnect bypass is not available with an authenticated proxy")
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/middleware"
 	"github.com/Rorqualx/flaresolverr-go/internal/selectors"
 	"github.com/Rorqualx/flaresolverr-go/internal/session"
+	"github.com/Rorqualx/flaresolverr-go/internal/solver"
 	"github.com/Rorqualx/flaresolverr-go/pkg/version"
 )
 
@@ -147,10 +148,13 @@ func main() {
 	// Create HTTP server
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	server := &http.Server{
-		Addr:              addr,
-		Handler:           finalHandler,
-		ReadTimeout:       cfg.MaxTimeout + 10*time.Second,
-		WriteTimeout:      cfg.MaxTimeout + 10*time.Second,
+		Addr:        addr,
+		Handler:     finalHandler,
+		ReadTimeout: cfg.MaxTimeout + 10*time.Second,
+		// A request can run for its timeout, then the reconnect bypass, plus
+		// the wait for a pooled browser. A shorter write timeout dropped the
+		// connection after all the work had been done.
+		WriteTimeout:      cfg.MaxTimeout + solver.ReconnectBypassBudget + cfg.BrowserPoolTimeout + 10*time.Second,
 		IdleTimeout:       120 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second, // Prevent slowloris attacks
 	}
