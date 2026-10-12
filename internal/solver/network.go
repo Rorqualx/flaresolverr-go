@@ -9,6 +9,8 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/rs/zerolog/log"
+
+	"github.com/Rorqualx/flaresolverr-go/internal/security"
 )
 
 // Maximum number of headers to capture per response to prevent memory exhaustion
@@ -192,7 +194,7 @@ func setupNetworkCapture(ctx context.Context, page *rod.Page) (*NetworkCapture, 
 
 				log.Debug().
 					Int("status_code", statusCode).
-					Str("url", url).
+					Str("url", security.RedactURL(url)).
 					Int("header_count", len(headers)).
 					Msg("Captured Document response")
 

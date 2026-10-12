@@ -343,7 +343,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		if r := recover(); r != nil {
 			log.Error().
 				Interface("panic", r).
-				Str("url", opts.URL).
+				Str("url", security.RedactURL(opts.URL)).
 				Msg("Panic recovered in Solve")
 			err = fmt.Errorf("unexpected error during solve: %v", r)
 		}
@@ -361,7 +361,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	log.Info().
-		Str("url", opts.URL).
+		Str("url", security.RedactURL(opts.URL)).
 		Dur("timeout", timeout).
 		Bool("is_post", opts.IsPost).
 		Int("cookies_count", len(opts.Cookies)).
@@ -670,7 +670,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	// Handle followRedirects=false — capture first response via JS fetch with redirect:manual
 	if opts.FollowRedirects != nil && !*opts.FollowRedirects {
-		log.Debug().Str("url", opts.URL).Msg("followRedirects=false: using fetch with redirect:manual")
+		log.Debug().Str("url", security.RedactURL(opts.URL)).Msg("followRedirects=false: using fetch with redirect:manual")
 
 		// JSON encoding yields a valid JS string literal for any URL
 		urlLiteral, err := json.Marshal(opts.URL)
@@ -825,7 +825,7 @@ func (s *Solver) applyPostSolveProcessing(ctx context.Context, page *rod.Page, o
 
 	// Download mode: re-fetch the URL via Fetch API and return base64
 	if opts.Download {
-		log.Info().Str("url", opts.URL).Msg("Download mode: fetching URL as binary via Fetch API")
+		log.Info().Str("url", security.RedactURL(opts.URL)).Msg("Download mode: fetching URL as binary via Fetch API")
 		// JSON encoding yields a valid JS string literal for any URL. (The old
 		// manual escaping doubled its own backslashes and broke on any quote.)
 		urlLiteral, marshalErr := json.Marshal(opts.URL)
@@ -1096,7 +1096,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	defer stealthExt.Cleanup()
 
 	log.Info().
-		Str("url", opts.URL).
+		Str("url", security.RedactURL(opts.URL)).
 		Str("user_data_dir", userDataDir).
 		Str("stealth_ext", stealthExt.Dir()).
 		Msg("Starting two-phase CDP bypass")
@@ -1241,7 +1241,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 			!strings.Contains(titleLower, "please wait") &&
 			!strings.Contains(titleLower, "performing security") {
 			targetPage = p
-			log.Info().Str("title", pInfo.Title).Str("url", pInfo.URL).Msg("Challenge resolved via two-phase bypass!")
+			log.Info().Str("title", pInfo.Title).Str("url", security.RedactURL(pInfo.URL)).Msg("Challenge resolved via two-phase bypass!")
 			break
 		}
 	}
@@ -1249,7 +1249,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	if targetPage == nil {
 		for _, p := range pages {
 			if pInfo, err := p.Info(); err == nil {
-				log.Debug().Str("title", pInfo.Title).Str("url", pInfo.URL).Msg("Page found after Phase 2")
+				log.Debug().Str("title", pInfo.Title).Str("url", security.RedactURL(pInfo.URL)).Msg("Page found after Phase 2")
 			}
 		}
 		return nil, fmt.Errorf("challenge not resolved after two-phase bypass (found %d pages)", len(pages))
@@ -1314,7 +1314,7 @@ func (s *Solver) setCookies(page *rod.Page, cookies []types.RequestCookie, targe
 // Fix: Accept explicit context parameter for proper timeout/cancellation propagation.
 func (s *Solver) navigatePost(ctx context.Context, page *rod.Page, targetURL string, postData string) error {
 	log.Debug().
-		Str("url", targetURL).
+		Str("url", security.RedactURL(targetURL)).
 		Int("post_data_len", len(postData)).
 		Msg("Performing POST request")
 
@@ -1446,7 +1446,7 @@ func (s *Solver) buildFormFieldsJS(postData string) (string, error) {
 // Fix: Accept explicit context parameter for proper timeout/cancellation propagation.
 func (s *Solver) navigatePostJSON(ctx context.Context, page *rod.Page, targetURL string, jsonData string, headers map[string]string) error {
 	log.Debug().
-		Str("url", targetURL).
+		Str("url", security.RedactURL(targetURL)).
 		Int("json_data_len", len(jsonData)).
 		Int("headers_count", len(headers)).
 		Msg("Performing JSON POST request via Fetch API")
@@ -2719,14 +2719,14 @@ func (s *Solver) validateResponseURL(page *rod.Page, expectedIP net.IP, skipVali
 	if expectedIP != nil {
 		if err := security.ValidateURLWithPinnedIP(info.URL, expectedIP); err != nil {
 			log.Warn().
-				Str("url", info.URL).
+				Str("url", security.RedactURL(info.URL)).
 				Str("expected_ip", expectedIP.String()).
 				Err(err).
 				Msg("Response URL failed DNS pinning validation (possible DNS rebinding attack)")
 			return fmt.Errorf("DNS rebinding detected: %w", err)
 		}
 		log.Debug().
-			Str("url", info.URL).
+			Str("url", security.RedactURL(info.URL)).
 			Str("expected_ip", expectedIP.String()).
 			Msg("Response URL passed DNS pinning validation")
 		return nil
@@ -2735,7 +2735,7 @@ func (s *Solver) validateResponseURL(page *rod.Page, expectedIP net.IP, skipVali
 	// Fallback: Re-validate the response URL without pinning
 	if err := security.ValidateURL(info.URL); err != nil {
 		log.Warn().
-			Str("url", info.URL).
+			Str("url", security.RedactURL(info.URL)).
 			Err(err).
 			Msg("Response URL failed validation (possible DNS rebinding)")
 		return fmt.Errorf("response URL validation failed: %w", err)
@@ -2905,7 +2905,7 @@ func (s *Solver) buildResultWithHTML(ctx context.Context, page *rod.Page, html s
 	}
 
 	log.Info().
-		Str("url", currentURL).
+		Str("url", security.RedactURL(currentURL)).
 		Int("cookies_count", len(cookies)).
 		Int("html_length", len(html)).
 		Bool("html_truncated", htmlTruncated).
@@ -3223,7 +3223,7 @@ func (s *Solver) captureScreenshot(page *rod.Page) ([]byte, error) {
 // SolveWithPage solves a challenge using an existing page (for session support).
 func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveOptions) (*Result, error) {
 	log.Info().
-		Str("url", opts.URL).
+		Str("url", security.RedactURL(opts.URL)).
 		Bool("disable_media", opts.DisableMedia).
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve with existing page")
@@ -3254,7 +3254,7 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 			}
 		}
 	} else {
-		log.Debug().Str("url", pageInfo.URL).Msg("Skipping stealth on reused session page")
+		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping stealth on reused session page")
 	}
 
 	// Set up media blocking if requested
@@ -3395,6 +3395,6 @@ func (s *Solver) buildBodylessErrorResult(ctx context.Context, page *rod.Page, s
 	}
 	// The page itself is on Chrome's internal error document
 	result.URL = sp.url
-	log.Info().Int("status_code", result.StatusCode).Str("url", sp.url).Msg("Server returned an error status with an empty body")
+	log.Info().Int("status_code", result.StatusCode).Str("url", security.RedactURL(sp.url)).Msg("Server returned an error status with an empty body")
 	return result, nil
 }
