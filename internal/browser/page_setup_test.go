@@ -20,6 +20,9 @@ const pageSetupProbe = `() => ({
 	innerHeight: window.innerHeight,
 	timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
 	customScript: window.__stealthApplied === true,
+	languages: navigator.languages.join(','),
+	languagesNative: Object.getOwnPropertyDescriptor(Navigator.prototype, 'languages').get.toString().includes('[native code]'),
+	holderLeft: '__nativeLanguages' in window,
 })`
 
 // TestPreparePage checks, in a real browser, that the shared page setup leaves
@@ -53,9 +56,11 @@ func TestPreparePage(t *testing.T) {
 		name         string
 		setup        PageSetup
 		wantTimezone string // empty: not checked
+		wantLangs    string
 	}{
-		{name: "user agent only", setup: PageSetup{UserAgent: testUA}},
-		{name: "user agent and timezone", setup: PageSetup{UserAgent: testUA, Timezone: "Asia/Tokyo"}, wantTimezone: "Asia/Tokyo"},
+		{name: "user agent only", setup: PageSetup{UserAgent: testUA}, wantLangs: "en-US,en"},
+		{name: "user agent and timezone", setup: PageSetup{UserAgent: testUA, Timezone: "Asia/Tokyo"}, wantTimezone: "Asia/Tokyo", wantLangs: "en-US,en"},
+		{name: "configured languages", setup: PageSetup{UserAgent: testUA, AcceptLanguages: "fr-FR,fr,en"}, wantLangs: "fr-FR,fr,en"},
 	}
 
 	for _, tt := range tests {
@@ -102,6 +107,15 @@ func TestPreparePage(t *testing.T) {
 			}
 			if got.Get("customScript").Bool() {
 				t.Error("the custom stealth script ran; request pages must use go-rod/stealth only")
+			}
+			if langs := got.Get("languages").Str(); langs != tt.wantLangs {
+				t.Errorf("navigator.languages = %q, want %q", langs, tt.wantLangs)
+			}
+			if !got.Get("languagesNative").Bool() {
+				t.Error("navigator.languages is not Chrome's own getter")
+			}
+			if got.Get("holderLeft").Bool() {
+				t.Error("the temporary languages holder was left on window")
 			}
 			if tt.wantTimezone != "" {
 				if tz := got.Get("timezone").Str(); tz != tt.wantTimezone {

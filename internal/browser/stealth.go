@@ -268,12 +268,10 @@ const stealthScript = `
     });
 
     // ========================================
-    // 3. Mock languages
+    // 3. Languages
     // ========================================
-    Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
-        configurable: true
-    });
+    // navigator.languages is left alone: Chrome derives it from the same
+    // language list as the Accept-Language header, so the two always agree.
 
     // ========================================
     // 4. Add chrome runtime object
