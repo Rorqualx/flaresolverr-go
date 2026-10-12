@@ -187,92 +187,147 @@ Compare to Python: 5 sessions = 2000-3500MB
 
 ## 3. Directory Structure
 
-### Required Structure
+### Current Structure
+
+Test files (`*_test.go`) sit next to the code they test and are omitted below.
 
 ```
 flaresolverr-go/
 │
 ├── cmd/                          # Application entrypoints
-│   └── flaresolverr/
-│       └── main.go               # ONLY startup code, no business logic
+│   ├── flaresolverr/
+│   │   └── main.go               # ONLY startup/shutdown wiring, no business logic
+│   └── probe-oopif/
+│       └── main.go               # Throwaway investigation harness (not in the image)
 │
 ├── internal/                     # Private application code
 │   │
-│   ├── config/                   # Configuration
-│   │   ├── config.go             # Config struct, Load()
-│   │   ├── config_test.go
-│   │   └── selectors.go          # Challenge selectors
+│   ├── assets/                   # Embedded static assets
+│   │   ├── assets.go
+│   │   └── templates/health.html
 │   │
-│   ├── types/                    # Shared types (NO business logic)
-│   │   ├── request.go            # V1Request
-│   │   ├── response.go           # V1Response, Solution
-│   │   ├── cookie.go             # Cookie type
-│   │   ├── proxy.go              # Proxy type
-│   │   ├── errors.go             # Error types
-│   │   └── types_test.go
+│   ├── browser/                  # Browser lifecycle and page setup
+│   │   ├── pool.go               # Pool: launch, acquire/release, recycle, cleanup
+│   │   ├── context.go            # Isolated browser contexts (per request / session)
+│   │   ├── stealth.go            # Stealth script, UA and viewport overrides
+│   │   ├── stealth_extension.go  # Stealth as a Chrome extension (reconnect bypass)
+│   │   ├── fingerprint.go        # Fingerprint profiles
+│   │   ├── timezone.go           # Timezone override (CDP)
+│   │   ├── proxy.go              # Proxy authentication over CDP
+│   │   ├── proxy_extension.go    # Proxy authentication as an extension
+│   │   └── allowed_flags.go      # Whitelist for per-session Chrome flags
 │   │
-│   ├── browser/                  # Browser management
-│   │   ├── pool.go               # BrowserPool
-│   │   ├── pool_test.go
-│   │   ├── stealth.go            # Anti-detection
-│   │   └── stealth_test.go
+│   ├── captcha/                  # External captcha providers and token handling
+│   │   ├── solver.go             # Provider chain
+│   │   ├── registry.go           # Provider registration
+│   │   ├── twocaptcha.go, anticaptcha.go, capsolver.go, ninekw.go
+│   │   ├── extraction.go         # Sitekey/action extraction
+│   │   ├── injection.go          # Token injection
+│   │   ├── intercept.go          # turnstile.render interceptor
+│   │   ├── oopif.go              # Out-of-process iframe capture
+│   │   └── metrics.go
 │   │
-│   ├── sessions/                 # Session management
-│   │   ├── manager.go            # SessionManager
-│   │   ├── manager_test.go
-│   │   └── cleanup.go            # TTL cleanup routines
+│   ├── config/
+│   │   └── config.go             # Config struct, Load(), Validate() (all env vars)
 │   │
-│   ├── solver/                   # Challenge solving
-│   │   ├── solver.go             # Main Solver
-│   │   ├── solver_test.go
-│   │   ├── detector.go           # Challenge detection
-│   │   ├── resolver.go           # Challenge resolution
-│   │   ├── extractor.go          # Data extraction
-│   │   └── turnstile.go          # Turnstile CAPTCHA
+│   ├── dashboard/                # CLI dashboard (TUI)
+│   │   ├── dashboard.go          # Public API + middleware
+│   │   ├── event.go              # Request event ring buffer
+│   │   ├── collector.go          # Data aggregator
+│   │   ├── logreporter.go        # Periodic stats to the log
+│   │   └── model.go              # bubbletea Model/View
 │   │
 │   ├── handlers/                 # HTTP handlers
-│   │   ├── router.go             # Route setup
-│   │   ├── v1.go                 # /v1 handler
-│   │   ├── health.go             # /health handler
-│   │   ├── index.go              # / handler
-│   │   └── handlers_test.go
+│   │   ├── router.go             # Command routing
+│   │   ├── handlers.go           # /v1 commands, /health, index
+│   │   ├── metrics.go            # /metrics
+│   │   ├── pools.go              # Buffer pools
+│   │   └── openapi.yaml          # Embedded API description
+│   │
+│   ├── humanize/                 # Human-like timing, mouse and scroll
+│   │   ├── timing.go
+│   │   ├── mouse.go
+│   │   └── scroll.go
 │   │
 │   ├── middleware/               # HTTP middleware
-│   │   ├── chain.go              # Middleware chaining
+│   │   ├── chain.go
+│   │   ├── apikey.go
+│   │   ├── cors.go
 │   │   ├── logging.go
+│   │   ├── ratelimit.go
 │   │   ├── recovery.go
+│   │   ├── response.go
 │   │   └── timeout.go
 │   │
-│   └── dashboard/               # CLI dashboard (TUI)
-│       ├── dashboard.go          # Public API + middleware
-│       ├── event.go              # Request event ring buffer
-│       ├── collector.go          # Data aggregator
-│       └── model.go              # bubbletea Model/View
+│   ├── ratelimit/
+│   │   └── detector.go           # Detects rate-limit responses from target sites
+│   │
+│   ├── security/                 # Input validation at the trust boundary
+│   │   ├── url_validator.go      # SSRF checks for target and proxy URLs
+│   │   ├── headers.go            # Custom header validation
+│   │   ├── redact.go             # Secret redaction for logs
+│   │   └── session.go            # Session ID generation/validation
+│   │
+│   ├── selectors/                # Challenge selectors
+│   │   ├── selectors.go          # Types and embedded defaults
+│   │   ├── manager.go            # Override file, remote fetch, hot reload
+│   │   └── selectors.yaml        # Embedded selectors (the source of truth)
+│   │
+│   ├── session/
+│   │   └── session.go            # Session and Manager (TTL cleanup, hosted sessions)
+│   │
+│   ├── solver/                   # Challenge solving
+│   │   ├── solver.go             # Solve, SolveWithPage, solve loop, result building
+│   │   ├── shadow.go             # Shadow-DOM traversal for Turnstile
+│   │   ├── network.go            # Response status/header capture
+│   │   ├── egress.go             # Egress proxy pool
+│   │   └── clearance_cache.go    # cf_clearance cache
+│   │
+│   ├── stats/
+│   │   └── domain_stats.go       # Per-domain statistics
+│   │
+│   └── types/                    # Shared types (NO business logic)
+│       ├── api.go                # Request, Response, Solution, Cookie, Proxy
+│       └── errors.go             # Sentinel and structured errors
 │
-├── pkg/                          # Public libraries (if any)
+├── pkg/
 │   └── version/
 │       └── version.go            # Version from ldflags
 │
-├── configs/                      # Configuration files
-│   └── selectors.yaml            # Challenge selectors
+├── tests/                        # Cross-package tests (real browser)
+│   ├── integration/              # Built with -tags=integration
+│   └── probe/                    # Probe/stress tests
 │
-├── deployments/                  # Deployment configs
-│   ├── Dockerfile
-│   ├── docker-compose.yml
-│   └── kubernetes/
-│
-├── scripts/                      # Build/test scripts
-│   ├── build.sh
-│   └── test.sh
+├── scripts/                      # Manual test scripts
+│   ├── test_all_features.sh
+│   └── test_sites.sh
 │
 ├── docs/                         # Documentation
-│   ├── API.md
-│   └── MIGRATION.md
+│   ├── openapi.yaml
+│   ├── TEST_SITES.md
+│   ├── PYTHON_STRATEGIES.md
+│   ├── INVESTIGATION-*.md        # Investigation write-ups
+│   ├── audits/                   # Historical security audits
+│   └── research/                 # Research behind review findings
 │
+├── .github/
+│   ├── workflows/ci.yml          # Lint, test, build (also called by release.yml)
+│   ├── workflows/release.yml     # Tag: tests, GitHub release, Docker image
+│   └── dependabot.yml
+│
+├── Dockerfile                    # Production image
+├── Dockerfile.probe              # Investigation image for cmd/probe-oopif
+├── docker-compose.yml
+├── docker-entrypoint.sh
+├── .goreleaser.yml
+├── .golangci.yml
 ├── go.mod
 ├── go.sum
 ├── Makefile
 ├── README.md
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── SECURITY.md
 └── CLAUDE.md                     # This file
 ```
 
@@ -280,13 +335,18 @@ flaresolverr-go/
 
 | If you're adding... | Put it in... | NOT in... |
 |--------------------|--------------|-----------|
-| New request/response field | `internal/types/` | handlers, solver |
-| New challenge selector | `configs/selectors.yaml` | hardcoded anywhere |
+| New request/response field | `internal/types/api.go` | handlers, solver |
+| New error type | `internal/types/errors.go` | the package that returns it |
+| New challenge selector | `internal/selectors/selectors.yaml` | hardcoded anywhere |
 | New environment variable | `internal/config/config.go` | direct `os.Getenv()` |
-| New HTTP endpoint | `internal/handlers/` | main.go |
-| New browser flag | `internal/browser/pool.go` | solver |
-| New detection logic | `internal/solver/detector.go` | resolver, extractor |
-| New extraction logic | `internal/solver/extractor.go` | detector, resolver |
+| New HTTP endpoint or command | `internal/handlers/` | main.go |
+| New HTTP middleware | `internal/middleware/` | handlers |
+| New browser launch flag | `internal/browser/pool.go` | solver |
+| New page setup or stealth patch | `internal/browser/` | solver |
+| New URL, header or proxy validation | `internal/security/` | handlers, solver |
+| New detection or solving logic | `internal/solver/` | handlers |
+| New result extraction logic | `internal/solver/` | handlers |
+| New captcha provider | `internal/captcha/` (register in `registry.go`) | solver |
 | New dashboard widget | `internal/dashboard/model.go` | handlers, main.go |
 
 ---
