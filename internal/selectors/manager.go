@@ -5,8 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +74,20 @@ func NewManagerWithRemote(externalPath string, hotReload bool, remoteURL string,
 		stopCh:          make(chan struct{}),
 		remoteURL:       remoteURL,
 		refreshInterval: refreshInterval,
+	}
+
+	// Selectors decide what counts as a challenge, so a tampered file can make
+	// every page look blocked or every challenge look solved. Refuse to fetch
+	// them over a channel anyone on the path can rewrite.
+	if remoteURL != "" {
+		if err := validateRemoteURL(remoteURL); err != nil {
+			log.Error().
+				Err(err).
+				Str("url", remoteURL).
+				Msg("Remote selectors disabled")
+			remoteURL = ""
+			m.remoteURL = ""
+		}
 	}
 
 	// Initialize HTTP client for remote fetch
@@ -385,11 +403,60 @@ func (m *Manager) refreshFromRemote() {
 	}
 }
 
-// Validate checks that the Selectors have minimum required patterns.
+// validateRemoteURL reports whether selectors may be fetched from rawURL.
+// It must be https. Plain http is accepted only for a loopback host, where
+// there is no network path to tamper with.
+func validateRemoteURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Hostname() == "" {
+		return fmt.Errorf("invalid remote selectors URL")
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := parsed.Hostname()
+		if host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("remote selectors must be fetched over https, not plain http")
+	default:
+		return fmt.Errorf("remote selectors URL scheme %q is not supported, use https", parsed.Scheme)
+	}
+}
+
+// Validate checks that the Selectors have minimum required patterns and that
+// no pattern is empty.
 func (s *Selectors) Validate() error {
 	// We require at least one pattern in each critical category
 	if len(s.AccessDenied) == 0 && len(s.Turnstile) == 0 && len(s.JavaScript) == 0 {
 		return fmt.Errorf("selectors must have at least one pattern in access_denied, turnstile, or javascript")
+	}
+
+	// Patterns are matched with strings.Contains, and every string contains
+	// the empty string: one blank entry would match every page.
+	lists := []struct {
+		name     string
+		patterns []string
+	}{
+		{"access_denied", s.AccessDenied},
+		{"turnstile", s.Turnstile},
+		{"javascript", s.JavaScript},
+		{"captcha", s.Captcha},
+		{"turnstile_selectors", s.TurnstileSelectors},
+		{"shadow_hosts", s.ShadowHosts},
+		{"shadow_inner_selectors", s.ShadowInnerSelectors},
+	}
+	for _, list := range lists {
+		for i, pattern := range list.patterns {
+			if strings.TrimSpace(pattern) == "" {
+				return fmt.Errorf("selectors: %s[%d] is empty", list.name, i)
+			}
+		}
 	}
 	return nil
 }
@@ -416,6 +483,12 @@ func (m *Manager) mergeWithEmbedded(external *Selectors) *Selectors {
 		merged.JavaScript = external.JavaScript
 	} else {
 		merged.JavaScript = m.embedded.JavaScript
+	}
+
+	if len(external.Captcha) > 0 {
+		merged.Captcha = external.Captcha
+	} else {
+		merged.Captcha = m.embedded.Captcha
 	}
 
 	if len(external.TurnstileSelectors) > 0 {
@@ -446,15 +519,20 @@ func (m *Manager) mergeWithEmbedded(external *Selectors) *Selectors {
 }
 
 // startWatcher starts the file watcher for hot-reload.
+//
+// It watches the file's directory rather than the file. Editors, config
+// management and Kubernetes ConfigMaps replace a file by writing a new one and
+// renaming it into place; a watch on the file itself follows the old inode and
+// never fires again after the first such save.
 func (m *Manager) startWatcher() error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
 	}
 
-	if err := watcher.Add(m.externalPath); err != nil {
+	if err := watcher.Add(filepath.Dir(m.externalPath)); err != nil {
 		_ = watcher.Close()
-		return fmt.Errorf("failed to watch file: %w", err)
+		return fmt.Errorf("failed to watch directory: %w", err)
 	}
 
 	m.watcher = watcher
@@ -465,14 +543,31 @@ func (m *Manager) startWatcher() error {
 	return nil
 }
 
+// selectorsFileDebounce coalesces the burst of events one save produces.
+const selectorsFileDebounce = 100 * time.Millisecond
+
+// isSelectorsFileEvent reports whether a directory event concerns the watched
+// selectors file and could have changed its content.
+func isSelectorsFileEvent(event fsnotify.Event, watchedPath string) bool {
+	if filepath.Base(event.Name) != filepath.Base(watchedPath) {
+		return false
+	}
+	// Rename covers a replacement moved over the file; Create covers the file
+	// (re)appearing. Chmod and Remove carry no new content.
+	return event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0
+}
+
 // watchFile watches for file changes and triggers reloads.
 func (m *Manager) watchFile() {
 	defer m.wg.Done()
 
-	// Debounce timer to coalesce rapid file changes
-	const debounceDelay = 100 * time.Millisecond
-	var debounceTimer *time.Timer
-	var debouncing bool
+	// The debounce timer is owned by this goroutine and fires into the select
+	// below, so the reload runs here too and nothing is shared across goroutines.
+	debounce := time.NewTimer(selectorsFileDebounce)
+	if !debounce.Stop() {
+		<-debounce.C
+	}
+	defer debounce.Stop()
 
 	for {
 		select {
@@ -480,9 +575,7 @@ func (m *Manager) watchFile() {
 			if !ok {
 				return
 			}
-
-			// Only reload on write or create events
-			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+			if !isSelectorsFileEvent(event, m.externalPath) {
 				continue
 			}
 
@@ -491,27 +584,21 @@ func (m *Manager) watchFile() {
 				Str("file", event.Name).
 				Msg("Selectors file changed")
 
-			// Debounce: wait for rapid changes to settle
-			if debouncing {
-				// Reset timer
-				if !debounceTimer.Stop() {
-					select {
-					case <-debounceTimer.C:
-					default:
-					}
+			// Debounce: (re)start the timer so rapid changes settle first
+			if !debounce.Stop() {
+				select {
+				case <-debounce.C:
+				default:
 				}
-				debounceTimer.Reset(debounceDelay)
-			} else {
-				debouncing = true
-				debounceTimer = time.AfterFunc(debounceDelay, func() {
-					if err := m.Reload(); err != nil {
-						log.Warn().
-							Err(err).
-							Str("path", m.externalPath).
-							Msg("Hot-reload failed, keeping previous selectors")
-					}
-					debouncing = false
-				})
+			}
+			debounce.Reset(selectorsFileDebounce)
+
+		case <-debounce.C:
+			if err := m.Reload(); err != nil {
+				log.Warn().
+					Err(err).
+					Str("path", m.externalPath).
+					Msg("Hot-reload failed, keeping previous selectors")
 			}
 
 		case err, ok := <-m.watcher.Errors:
@@ -521,9 +608,6 @@ func (m *Manager) watchFile() {
 			log.Warn().Err(err).Msg("File watcher error")
 
 		case <-m.stopCh:
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
 			return
 		}
 	}

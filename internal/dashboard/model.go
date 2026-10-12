@@ -59,6 +59,22 @@ var (
 			BorderForeground(lipgloss.Color("8"))
 )
 
+// Smallest terminal the split view is laid out for. Below this the pane widths
+// go negative, which used to panic in strings.Repeat.
+const (
+	minDashboardWidth  = 40
+	minDashboardHeight = 8
+)
+
+// ruleWidth returns the length of a horizontal rule for a pane of the given
+// width, never negative.
+func ruleWidth(paneWidth int) int {
+	if paneWidth < 2 {
+		return 0
+	}
+	return paneWidth - 2
+}
+
 // NewModel creates the bubbletea model wired to a Collector.
 func NewModel(collector *Collector) Model {
 	return Model{
@@ -105,6 +121,9 @@ func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Initializing dashboard..."
 	}
+	if m.width < minDashboardWidth || m.height < minDashboardHeight {
+		return "Terminal too small for the dashboard"
+	}
 
 	leftWidth := m.width/2 - 2
 	rightWidth := m.width - leftWidth - 3
@@ -146,7 +165,7 @@ func (m Model) renderRequestLog(width, height int) string {
 	b.WriteString(dimStyle.Render(fmt.Sprintf(" Total: %d  Req/s: %.1f",
 		m.snapshot.TotalRequests, m.snapshot.RequestsPerSec)))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render(" " + strings.Repeat("─", width-2)))
+	b.WriteString(dimStyle.Render(" " + strings.Repeat("─", ruleWidth(width))))
 	b.WriteString("\n")
 
 	header := fmt.Sprintf(" %-8s %-6s %-*s %6s %7s",
@@ -185,7 +204,7 @@ func (m Model) renderStats(width, height int) string {
 
 	b.WriteString(titleStyle.Render(" Server Stats"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render(" " + strings.Repeat("─", width-2)))
+	b.WriteString(dimStyle.Render(" " + strings.Repeat("─", ruleWidth(width))))
 	b.WriteString("\n")
 
 	// Server section

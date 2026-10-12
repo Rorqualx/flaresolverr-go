@@ -399,7 +399,12 @@ func (c *Config) Validate() {
 		"trace": true, "debug": true, "info": true,
 		"warn": true, "error": true, "fatal": true,
 	}
-	if !validLogLevels[strings.ToLower(c.LogLevel)] {
+	// Normalise so LOG_LEVEL=DEBUG means debug everywhere the value is read
+	c.LogLevel = strings.ToLower(strings.TrimSpace(c.LogLevel))
+	if c.LogLevel == "warning" {
+		c.LogLevel = "warn"
+	}
+	if !validLogLevels[c.LogLevel] {
 		log.Warn().Str("level", c.LogLevel).Msg("Invalid log level, using 'info'")
 		c.LogLevel = "info"
 	}
@@ -539,12 +544,17 @@ func (c *Config) Validate() {
 
 	// Remote selectors URL validation
 	if c.SelectorsRemoteURL != "" {
-		// Validate URL scheme
+		// Validate URL scheme. The selectors manager enforces https (plain http
+		// only for a loopback host); this catches anything that is not a URL.
 		if !strings.HasPrefix(c.SelectorsRemoteURL, "http://") && !strings.HasPrefix(c.SelectorsRemoteURL, "https://") {
 			log.Error().
 				Str("url", c.SelectorsRemoteURL).
-				Msg("SELECTORS_REMOTE_URL must use http:// or https:// scheme, ignoring")
+				Msg("SELECTORS_REMOTE_URL must be an https:// URL, ignoring")
 			c.SelectorsRemoteURL = ""
+		} else if strings.HasPrefix(c.SelectorsRemoteURL, "http://") {
+			log.Warn().
+				Str("url", c.SelectorsRemoteURL).
+				Msg("SELECTORS_REMOTE_URL uses plain http - it will be refused unless the host is loopback; use https")
 		}
 
 		// Warn if both file and remote are configured

@@ -25,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`BROWSER_SANDBOX`** - Set to `true` to run Chromium with its own sandbox instead of `--no-sandbox`. Off by default, so nothing changes unless you set it: the default Docker runtime blocks the user namespaces the sandbox needs, and the server then fails at startup with "No usable sandbox!". It needs a seccomp profile that allows user namespaces or `--cap-add SYS_ADMIN`; see "Chromium sandbox" in the README.
 - **`cap_drop: ALL` in `docker-compose.yml`** - The container runs correctly with no Linux capabilities.
 
+
+- **`MAX_MEMORY_MB` now measures the whole service** - The memory monitor used to compare the limit against the Go heap, which is a few megabytes and never reached it. It now reads the container's cgroup working set (v2, then v1), or the resident memory of the process tree outside a container. When usage is over the limit, idle browsers are recycled at most once every 5 minutes; browsers in use are replaced when released. The default stays 2048. On non-Linux hosts the monitor is disabled.
+- **Quitting the dashboard stops the server** - Pressing `q` or `ctrl+c` in the TUI now shuts the service down cleanly.
+- **Generic rate-limit phrases only count on error responses** - Body text such as "rate limit", "too many requests", "access denied" or "blocked" is only reported as a rate limit when the page's HTTP status is 400 or above. Cloudflare error codes (1015 and the others) are still reported at any status. Pages that merely mention these phrases no longer come back with `rateLimited: true`.
+- **Remote selectors must use https** - `SELECTORS_REMOTE_URL` with a plain `http://` address is refused with an error (loopback addresses excepted) and the built-in selectors are used.
+- **Removed the unused `configs/selectors.yaml`** - The selectors the service loads are embedded from `internal/selectors/selectors.yaml`; override them with `SELECTORS_PATH`.
+
+### Fixed
+
+- **Canvas reads are stable** - Reading a canvas with `toDataURL`, `toBlob` or `getImageData` no longer changes the canvas. Two reads of an untouched canvas now return the same result, and a canvas read before `getContext('webgl')` can still get a WebGL context.
+- **Port conflicts are reported before any browser starts** - The listen port is bound first, so a port that is already in use fails immediately and leaves no Chrome processes behind. A server failure after startup now closes the browser pool before exiting.
+- **`LOG_LEVEL` is case-insensitive** - `DEBUG`, `Debug` and `debug` all work, and `warning` is accepted for `warn`.
+- **Logs keep reaching `LOG_FILE` while the dashboard is open** - The dashboard no longer disables logging globally.
+- **Dashboard no longer crashes in a very narrow terminal**
+- **Selector overrides keep the captcha section** - A selectors file that omits `captcha` now inherits the built-in captcha patterns.
+- **Empty selector patterns are rejected** - An empty or whitespace-only pattern, which would match every page, now fails validation, so that file is not loaded.
+- **Selector hot-reload survives editors that save by rename** - Saving the selectors file with vim, or replacing it atomically, no longer stops hot-reload.
+- **Data races** - Fixed races on a session's TTL, on the selectors reload timer, and on the maps returned by the stats endpoint.
+
 ## [0.8.5] - 2026-10-11
 
 ### Fixed

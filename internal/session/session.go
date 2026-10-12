@@ -618,8 +618,14 @@ func (s *Session) LastUsedTime() time.Time {
 
 // EffectiveTTL returns the session's TTL, falling back to the given default if no per-session TTL is set.
 func (s *Session) EffectiveTTL(defaultTTL time.Duration) time.Duration {
-	if s.TTL > 0 {
-		return s.TTL
+	// Same lock as SetTTL: keepalive can change the TTL while the cleanup
+	// routine is reading it.
+	s.mu.Lock()
+	ttl := s.TTL
+	s.mu.Unlock()
+
+	if ttl > 0 {
+		return ttl
 	}
 	return defaultTTL
 }
