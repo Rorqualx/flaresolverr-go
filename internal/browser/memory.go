@@ -93,21 +93,32 @@ func parseCgroupWorkingSet(usage, stat []byte, inactiveKey string) (uint64, erro
 		return 0, fmt.Errorf("parse cgroup memory usage: %w", err)
 	}
 
-	for _, line := range bytes.Split(stat, []byte{'\n'}) {
-		fields := bytes.Fields(line)
-		if len(fields) != 2 || string(fields[0]) != inactiveKey {
-			continue
-		}
-		inactive, err := strconv.ParseUint(string(fields[1]), 10, 64)
-		if err != nil {
-			break // unreadable stat: fall back to raw usage
-		}
-		if inactive < used {
-			return used - inactive, nil
-		}
+	inactive, ok := cgroupStatValue(stat, inactiveKey)
+	if !ok {
+		// No usable stat entry: report raw usage
+		return used, nil
+	}
+	if inactive >= used {
 		return 0, nil
 	}
-	return used, nil
+	return used - inactive, nil
+}
+
+// cgroupStatValue returns the value of one "key value" line of a cgroup
+// memory.stat file. ok is false if the key is absent or its value unreadable.
+func cgroupStatValue(stat []byte, key string) (value uint64, ok bool) {
+	for _, line := range bytes.Split(stat, []byte{'\n'}) {
+		fields := bytes.Fields(line)
+		if len(fields) != 2 || string(fields[0]) != key {
+			continue
+		}
+		parsed, err := strconv.ParseUint(string(fields[1]), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	}
+	return 0, false
 }
 
 // procStat is the part of /proc/<pid>/stat the process-tree fallback needs.

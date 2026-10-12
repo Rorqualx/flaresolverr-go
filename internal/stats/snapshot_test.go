@@ -52,7 +52,7 @@ func TestToJSON_ReturnsCopies(t *testing.T) {
 	}
 }
 
-// TestToJSON_ConcurrentWithWrites serialises snapshots while the counters are
+// TestToJSON_ConcurrentWithWrites serializes snapshots while the counters are
 // being written. With shared maps this is a concurrent map read and write,
 // which crashes the process; run with -race.
 func TestToJSON_ConcurrentWithWrites(t *testing.T) {
