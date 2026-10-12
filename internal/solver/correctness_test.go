@@ -1,6 +1,8 @@
 package solver
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -139,6 +141,29 @@ func TestBypassProxyServer(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("bypassProxyServer() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsBodylessHTTPError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "empty error response", err: errors.New("navigation failed: net::ERR_HTTP_RESPONSE_CODE_FAILURE"), want: true},
+		{name: "wrapped", err: fmt.Errorf("navigate: %w", errors.New("navigation failed: net::ERR_HTTP_RESPONSE_CODE_FAILURE")), want: true},
+		{name: "dns failure", err: errors.New("navigation failed: net::ERR_NAME_NOT_RESOLVED"), want: false},
+		{name: "proxy failure", err: errors.New("navigation failed: net::ERR_PROXY_CONNECTION_FAILED"), want: false},
+		{name: "timeout", err: errors.New("context deadline exceeded"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBodylessHTTPError(tt.err); got != tt.want {
+				t.Errorf("isBodylessHTTPError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

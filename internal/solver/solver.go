@@ -742,6 +742,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		return nil, fmt.Errorf("context canceled before navigation: %w", solveCtx.Err())
 	}
 	if err := page.Context(solveCtx).Navigate(opts.URL); err != nil {
+		if isBodylessHTTPError(err) {
+			return s.buildBodylessErrorResult(solveCtx, page, s.newSolveParams(opts, networkCapture, nil))
+		}
 		// Fix 2.6: Check if context was canceled to provide better error message
 		if solveCtx.Err() != nil {
 			return nil, fmt.Errorf("navigation timed out for %s: %w", opts.URL, solveCtx.Err())
@@ -3305,6 +3308,9 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 			}
 		}
 		if err := page.Context(solveCtx).Navigate(opts.URL); err != nil {
+			if isBodylessHTTPError(err) {
+				return s.buildBodylessErrorResult(solveCtx, page, s.newSolveParams(opts, networkCapture, nil))
+			}
 			return nil, fmt.Errorf("failed to navigate to %s: %w", opts.URL, err)
 		}
 	}
@@ -3351,4 +3357,44 @@ func bypassProxyServer(opts *SolveOptions, defaultProxyURL string) (string, erro
 		return "", errors.New("reconnect bypass is not available with an authenticated proxy")
 	}
 	return parsed.Scheme + "://" + parsed.Host, nil
+}
+
+// isBodylessHTTPError reports whether a navigation error is Chrome's way of
+// saying the server answered with an HTTP error status and an empty body.
+// Chrome treats that as a failed navigation and shows its own error page.
+func isBodylessHTTPError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+}
+
+// bodylessStatusWait bounds the wait for the response event of a bodyless
+// error response, which can arrive just after Navigate returns its error.
+const bodylessStatusWait = 2 * time.Second
+
+// buildBodylessErrorResult returns the server's answer for a request that got
+// an HTTP error status with no body (for example a bare 404): the real status,
+// headers and cookies, and an empty response. Failing the request instead hid
+// the status from the caller, who asked what the server said.
+func (s *Solver) buildBodylessErrorResult(ctx context.Context, page *rod.Page, sp solveParams) (*Result, error) {
+	if sp.networkCapture == nil {
+		return nil, fmt.Errorf("failed to navigate to %s: server returned an error status with no body", sp.url)
+	}
+
+	deadline := time.Now().Add(bodylessStatusWait)
+	for sp.networkCapture.StatusCode() == 0 && time.Now().Before(deadline) {
+		if !sleepWithContext(ctx, 50*time.Millisecond) {
+			return nil, types.NewChallengeTimeoutError(sp.url)
+		}
+	}
+	if sp.networkCapture.StatusCode() == 0 {
+		return nil, fmt.Errorf("failed to navigate to %s: server returned an error status with no body", sp.url)
+	}
+
+	result, err := s.buildResultWithHTML(ctx, page.Context(ctx), "", sp)
+	if err != nil {
+		return nil, err
+	}
+	// The page itself is on Chrome's internal error document
+	result.URL = sp.url
+	log.Info().Int("status_code", result.StatusCode).Str("url", sp.url).Msg("Server returned an error status with an empty body")
+	return result, nil
 }
