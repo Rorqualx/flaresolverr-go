@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/rs/zerolog/log"
 
@@ -846,6 +845,14 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			return
 		}
 
+		// A session's proxy is fixed when it is created. As in the original
+		// FlareSolverr, a proxy on a session request is ignored rather than
+		// rejected, but say so: the traffic does not go where the request asked.
+		if req.Proxy != nil && req.Proxy.URL != "" {
+			log.Warn().Str("session", req.Session).
+				Msg("Ignoring per-request proxy on a session request; the session uses the proxy given to sessions.create")
+		}
+
 		// Per-session timezone takes precedence over the global TZ default.
 		if sess.Timezone != "" {
 			opts.DefaultTimezone = sess.Timezone
@@ -906,11 +913,33 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		sessionTimezone = req.BrowserFlags.Timezone
 	}
 
-	// Acquire browser — from pool or custom-spawned with flags
-	var browserInstance *rod.Browser
-	ownsBrowser := false
+	// Validate the session proxy up front: the same SSRF rules as request.get/post
+	var proxyURL string
+	if req.Proxy != nil && req.Proxy.URL != "" {
+		if err := security.ValidateProxyURL(req.Proxy.URL, h.config.AllowLocalProxies); err != nil {
+			log.Warn().Err(err).Msg("Session proxy URL validation failed")
+			h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
+			return
+		}
+		proxyURL = req.Proxy.URL
+	}
 
+	// Fail fast, before starting any browser, if the ID is taken or the
+	// session limit is reached.
+	if err := h.sessions.CheckAvailable(sessionID); err != nil {
+		h.writeSessionCreateError(w, err, startTime)
+		return
+	}
+
+	// Convert per-request TTL from minutes to duration (0 = use server default)
+	var sessionTTL time.Duration
+	if req.SessionTTL > 0 {
+		sessionTTL = time.Duration(req.SessionTTL) * time.Minute
+	}
+
+	var sess *session.Session
 	if req.BrowserFlags != nil {
+		// Custom launch flags need a browser process of their own.
 		// Validate extra args against whitelist
 		for _, arg := range req.BrowserFlags.ExtraArgs {
 			if browser.IsBlockedExtraArg(arg) {
@@ -923,85 +952,57 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 			}
 		}
 
-		opts := browser.LaunchOptions{
+		dedicated, err := h.pool.SpawnWithOptions(ctx, browser.LaunchOptions{
+			ProxyURL:   proxyURL,
 			WindowSize: req.BrowserFlags.WindowSize,
 			Language:   req.BrowserFlags.Language,
 			Timezone:   sessionTimezone,
 			Headless:   req.BrowserFlags.Headless,
 			DisableGPU: req.BrowserFlags.DisableGPU,
 			ExtraArgs:  req.BrowserFlags.ExtraArgs,
-		}
-		if req.Proxy != nil && req.Proxy.URL != "" {
-			// SECURITY: same proxy SSRF check as request.get/post
-			if err := security.ValidateProxyURL(req.Proxy.URL, h.config.AllowLocalProxies); err != nil {
-				log.Warn().Err(err).Msg("Session proxy URL validation failed")
-				h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
-				return
-			}
-			opts.ProxyURL = req.Proxy.URL
-		}
-
-		var err error
-		browserInstance, err = h.pool.SpawnWithOptions(ctx, opts)
+		})
 		if err != nil {
 			h.writeError(w, fmt.Sprintf("Failed to spawn custom browser: %v", err), startTime)
 			return
 		}
-		ownsBrowser = true
-	} else {
-		var err error
-		browserInstance, err = h.pool.Acquire(ctx)
+
+		// Ownership of the browser transfers to the session only on success.
+		sess, err = h.sessions.Create(sessionID, dedicated, sessionTTL, func(s *session.Session) {
+			s.OwnsBrowser = true
+		})
 		if err != nil {
-			h.writeError(w, fmt.Sprintf("Failed to acquire browser: %v", err), startTime)
+			h.pool.CleanupBrowser(dedicated) // closes browser + removes user-data dir
+			h.writeSessionCreateError(w, err, startTime)
+			return
+		}
+	} else {
+		// Default: an isolated browser context on the shared session browser.
+		// It does not take a browser out of the request pool.
+		var err error
+		sess, err = h.sessions.CreateIsolated(ctx, sessionID, sessionTTL, proxyURL)
+		if err != nil {
+			h.writeSessionCreateError(w, err, startTime)
 			return
 		}
 	}
 
-	// Convert per-request TTL from minutes to duration (0 = use server default)
-	var sessionTTL time.Duration
-	if req.SessionTTL > 0 {
-		sessionTTL = time.Duration(req.SessionTTL) * time.Minute
-	}
-
-	// Create session. Ownership of the browser transfers to the session only on
-	// success; on any error it is still ours to hand back.
-	sess, err := h.sessions.Create(sessionID, browserInstance, sessionTTL)
-	if err != nil {
-		if ownsBrowser {
-			h.pool.CleanupBrowser(browserInstance) // closes browser + removes user-data dir
-		} else {
-			h.pool.Release(browserInstance)
-		}
-
-		// Idempotent behavior: if session already exists, return success
-		// (matches Python FlareSolverr behavior)
-		if errors.Is(err, types.ErrSessionAlreadyExists) {
-			h.writeJSONResponse(w, http.StatusOK, types.Response{
-				Status:    types.StatusOK,
-				Message:   "Session already exists.",
-				StartTime: startTime.UnixMilli(),
-				EndTime:   time.Now().UnixMilli(),
-				Version:   version.Full(),
-			})
-			return
-		}
-		h.writeError(w, fmt.Sprintf("Failed to create session: %v", err), startTime)
-		return
-	}
-
-	// Set browser ownership flag
-	if ownsBrowser {
-		sess.OwnsBrowser = true
+	// A proxy that needs credentials is answered by a listener on the session
+	// page, which lives as long as the session.
+	if req.Proxy != nil && proxyURL != "" && req.Proxy.Username != "" {
+		h.installSessionProxyAuth(sess, req.Proxy)
 	}
 
 	// Apply timezone override to the session's page so it persists for the session lifetime,
 	// and record it so subsequent solves on this session reuse the same value.
 	if sessionTimezone != "" {
 		sess.Timezone = sessionTimezone
-		if page := sess.SafeGetPage(); page != nil {
+		// The page reference must be released: a leaked reference makes the
+		// session look permanently in use, so it could never be destroyed.
+		if page, release := sess.AcquirePageWithRelease(); page != nil {
 			if err := browser.ApplyTimezoneOverride(page, sessionTimezone); err != nil {
 				log.Warn().Err(err).Str("timezone", sessionTimezone).Str("session_id", sess.ID).Msg("Failed to apply timezone override to session page")
 			}
+			release()
 		}
 	}
 
@@ -1018,6 +1019,45 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		Sessions:  []string{sessionID},
 	}
 	h.writeJSONResponse(w, http.StatusOK, resp)
+}
+
+// writeSessionCreateError writes the response for a failed sessions.create.
+// An existing session ID is reported as success (idempotent, matching Python
+// FlareSolverr behavior).
+func (h *Handler) writeSessionCreateError(w http.ResponseWriter, err error, startTime time.Time) {
+	if errors.Is(err, types.ErrSessionAlreadyExists) {
+		h.writeJSONResponse(w, http.StatusOK, types.Response{
+			Status:    types.StatusOK,
+			Message:   "Session already exists.",
+			StartTime: startTime.UnixMilli(),
+			EndTime:   time.Now().UnixMilli(),
+			Version:   version.Full(),
+		})
+		return
+	}
+	h.writeError(w, fmt.Sprintf("Failed to create session: %v", err), startTime)
+}
+
+// installSessionProxyAuth answers proxy authentication challenges on the
+// session's page for the lifetime of the session.
+func (h *Handler) installSessionProxyAuth(sess *session.Session, proxy *types.Proxy) {
+	page, release := sess.AcquirePageWithRelease()
+	if page == nil {
+		return
+	}
+	defer release()
+
+	// Not the request context: the listener must outlive this request.
+	cleanup, err := browser.SetPageProxy(context.Background(), page, &browser.ProxyConfig{
+		URL:      proxy.URL,
+		Username: proxy.Username,
+		Password: proxy.Password,
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("session_id", sess.ID).Msg("Failed to set up proxy authentication for session")
+		return
+	}
+	sess.SetProxyAuthCleanup(cleanup)
 }
 
 // handleSessionList lists all active sessions.

@@ -786,6 +786,10 @@ func (p *Pool) Release(browser *rod.Browser) {
 // closeAllPages navigates every open page to about:blank and closes it.
 // Returns false if any step failed or timed out.
 func (p *Pool) closeAllPages(browser *rod.Browser) bool {
+	// Requests run inside their own browser context; drop any that were left
+	// behind so their cookies and storage cannot reach the next request.
+	disposeAllContexts(browser)
+
 	ctx, cancel := context.WithTimeout(context.Background(), releaseCleanupTimeout)
 	defer cancel()
 

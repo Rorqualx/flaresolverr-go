@@ -3,6 +3,8 @@
 package session
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -18,8 +20,12 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
-// sessionPageCloseTimeout bounds closing a session's page during teardown.
-const sessionPageCloseTimeout = 10 * time.Second
+const (
+	// sessionPageCloseTimeout bounds closing a session's page during teardown.
+	sessionPageCloseTimeout = 10 * time.Second
+	// sessionHostProbeTimeout bounds the liveness check of the session browser.
+	sessionHostProbeTimeout = 3 * time.Second
+)
 
 // Maximum number of concurrent page references allowed per session.
 // This prevents unbounded growth from bugs or malicious usage.
@@ -59,6 +65,22 @@ type Session struct {
 	// Timezone is the IANA timezone applied to this session's page via CDP at creation.
 	// Empty means no per-session override; callers may apply a global default instead.
 	Timezone string
+
+	// host is set for sessions that live in an isolated browser context on the
+	// shared session browser. Browser is then a handle scoped to that context.
+	host           *sessionHost
+	disposeContext func()
+
+	// proxyAuthCleanup stops the proxy-authentication listener installed on the
+	// session page, if the session's proxy needs credentials.
+	proxyAuthCleanup func()
+}
+
+// sessionHost is a browser process that hosts sessions as isolated browser
+// contexts. It is started with the first hosted session and closed with the last.
+type sessionHost struct {
+	browser  *rod.Browser
+	sessions int // guarded by Manager.hostMu
 }
 
 // Manager handles session lifecycle and cleanup.
@@ -70,6 +92,11 @@ type Manager struct {
 	pool     *browser.Pool // Pool reference for returning browsers on cleanup
 	stopCh   chan struct{}
 	wg       sync.WaitGroup // Track background goroutines for clean shutdown
+
+	// host is the current shared session browser, nil when no hosted session
+	// exists. Lock ordering: hostMu is never held while acquiring mu.
+	hostMu sync.Mutex
+	host   *sessionHost
 }
 
 // NewManager creates a new session manager.
@@ -106,7 +133,10 @@ func NewManager(cfg *config.Config, pool *browser.Pool) *Manager {
 // error the caller still owns the browser and must release it (pooled) or
 // clean it up (dedicated). Create never releases it itself, because it cannot
 // know which kind it was given.
-func (m *Manager) Create(id string, brow *rod.Browser, ttl time.Duration) (*Session, error) {
+//
+// Each configure function runs on the new session before it becomes visible to
+// other goroutines, e.g. to mark the browser as owned by the session.
+func (m *Manager) Create(id string, brow *rod.Browser, ttl time.Duration, configure ...func(*Session)) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -138,6 +168,9 @@ func (m *Manager) Create(id string, brow *rod.Browser, ttl time.Duration) (*Sess
 		TTL:       ttl,
 	}
 	session.lastUsed.Store(now.UnixNano())
+	for _, fn := range configure {
+		fn(session)
+	}
 
 	m.sessions[id] = session
 
@@ -147,6 +180,109 @@ func (m *Manager) Create(id string, brow *rod.Browser, ttl time.Duration) (*Sess
 		Msg("Session created")
 
 	return session, nil
+}
+
+// CheckAvailable reports whether a session with this ID could be created now:
+// ErrSessionAlreadyExists or ErrTooManySessions if not. It lets callers fail
+// fast before launching a browser; Create and CreateIsolated check again.
+func (m *Manager) CheckAvailable(id string) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if _, exists := m.sessions[id]; exists {
+		return types.ErrSessionAlreadyExists
+	}
+	if len(m.sessions) >= m.config.MaxSessions {
+		return types.ErrTooManySessions
+	}
+	return nil
+}
+
+// CreateIsolated creates a session in its own browser context on the shared
+// session browser. The context gives the session private cookies and storage
+// without the cost of a browser process, and without taking a browser out of
+// the request pool for the session's lifetime.
+//
+// proxyServer, if non-empty, routes the session's traffic through that proxy;
+// otherwise the session browser's default (the configured PROXY_URL) applies.
+func (m *Manager) CreateIsolated(ctx context.Context, id string, ttl time.Duration, proxyServer string) (*Session, error) {
+	if m.pool == nil {
+		return nil, errors.New("session manager has no browser pool")
+	}
+	if err := m.CheckAvailable(id); err != nil {
+		return nil, err
+	}
+
+	host, err := m.acquireHost(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	contextBrowser, dispose, err := browser.NewIsolatedContext(host.browser, proxyServer)
+	if err != nil {
+		m.releaseHost(host)
+		return nil, err
+	}
+
+	session, err := m.Create(id, contextBrowser, ttl, func(s *Session) {
+		s.host = host
+		s.disposeContext = dispose
+	})
+	if err != nil {
+		dispose()
+		m.releaseHost(host)
+		return nil, err
+	}
+	return session, nil
+}
+
+// acquireHost returns the shared session browser with one more session counted
+// against it, starting a browser if there is none or the current one has died.
+func (m *Manager) acquireHost(ctx context.Context) (*sessionHost, error) {
+	m.hostMu.Lock()
+	defer m.hostMu.Unlock()
+
+	if m.host != nil && !hostAlive(m.host.browser) {
+		// Its remaining sessions are unusable; they release it as they are
+		// destroyed or expire. New sessions go to a fresh browser.
+		log.Warn().Int("sessions", m.host.sessions).Msg("Session browser is not responding, starting a new one")
+		m.host = nil
+	}
+
+	if m.host == nil {
+		hostBrowser, err := m.pool.SpawnWithProxy(ctx, m.config.ProxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start session browser: %w", err)
+		}
+		m.host = &sessionHost{browser: hostBrowser}
+		log.Info().Msg("Session browser started")
+	}
+
+	m.host.sessions++
+	return m.host, nil
+}
+
+// releaseHost drops one session from host and closes the browser when it was
+// the last one.
+func (m *Manager) releaseHost(host *sessionHost) {
+	m.hostMu.Lock()
+	host.sessions--
+	last := host.sessions <= 0
+	if last && m.host == host {
+		m.host = nil
+	}
+	m.hostMu.Unlock()
+
+	if last {
+		m.pool.CleanupBrowser(host.browser) // slow I/O, outside the lock
+		log.Info().Msg("Session browser closed (no sessions left)")
+	}
+}
+
+// hostAlive reports whether the session browser still answers CDP calls.
+func hostAlive(b *rod.Browser) bool {
+	_, err := b.Timeout(sessionHostProbeTimeout).Version()
+	return err == nil
 }
 
 // Get retrieves a session by ID.
@@ -246,12 +382,21 @@ func (m *Manager) teardown(session *Session) {
 		}
 	}
 
+	if session.proxyAuthCleanup != nil {
+		session.proxyAuthCleanup()
+	}
+
 	// CRITICAL: Return browser to pool, or fully tear down if session owns it.
 	// CleanupBrowser also removes the on-disk user-data dir; plain Close() leaks it.
 	if session.Browser == nil {
 		return
 	}
 	switch {
+	case session.host != nil:
+		// Hosted session: drop its browser context (cookies, storage) and its
+		// claim on the shared session browser.
+		session.disposeContext()
+		m.releaseHost(session.host)
 	case session.OwnsBrowser && m.pool != nil:
 		m.pool.CleanupBrowser(session.Browser)
 	case session.OwnsBrowser:
@@ -648,4 +793,18 @@ func (s *Session) LockOperation() {
 // UnlockOperation releases the operation mutex after a solve operation completes.
 func (s *Session) UnlockOperation() {
 	s.opMu.Unlock()
+}
+
+// SetProxyAuthCleanup records the function that stops the session's
+// proxy-authentication listener. It is called once, at session teardown.
+func (s *Session) SetProxyAuthCleanup(cleanup func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proxyAuthCleanup = cleanup
+}
+
+// Hosted reports whether the session lives in a browser context on the shared
+// session browser (as opposed to owning a dedicated browser).
+func (s *Session) Hosted() bool {
+	return s.host != nil
 }

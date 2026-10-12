@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-10-11
+
+### Security
+- **Cookies and storage leaked between callers** - Pooled browsers are reused, and nothing cleared them between requests: a cookie with an expiry set during one request was sent with the next caller's request to the same site, and every cookie in the browser (including another site's `cf_clearance`) was returned in later responses for unrelated sites. Each stateless request now runs in its own browser context (private cookies, localStorage, cache), which is disposed when the request ends. Reproduced and re-probed live.
+
+### Changed
+- **Sessions no longer take browsers from the request pool** - A session used to hold a pooled browser for its whole lifetime, so `BROWSER_POOL_SIZE` sessions blocked every other request. Sessions are now isolated browser contexts on one shared session browser, started with the first session and closed with the last. Measured on the production Chromium: about 150MB per session with a script-heavy page open, against about 300MB for a dedicated browser, and creation in about 0.2s. Sessions created with `browserFlags` still get a browser process of their own.
+- **`MAX_SESSIONS` default lowered from 100 to 20** - With the pool no longer acting as an accidental cap, the default is sized to memory. A warning is logged at startup when the limit times ~150MB exceeds `MAX_MEMORY_MB`.
+- **Session proxy** - A `proxy` given to `sessions.create` is now applied to the session (it was ignored unless `browserFlags` was also set), including proxy credentials. A `proxy` on a request that uses a session is still ignored, as in the original FlareSolverr, and is now logged.
+
+### Fixed
+- **Sessions with a timezone could not be destroyed** - Applying the timezone at `sessions.create` leaked a page reference, so the session looked permanently in use: `sessions.destroy` returned "in use" and, since v0.8.3, the TTL cleanup skipped it too.
+- **Browser launched before validation** - `sessions.create` with `browserFlags` started Chrome before checking for a duplicate ID or a full session table.
+
 ## [0.8.3] - 2026-10-11
 
 ### Fixed

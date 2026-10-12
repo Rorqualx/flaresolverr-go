@@ -53,8 +53,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SessionTTL != 30*time.Minute {
 		t.Errorf("Expected default session TTL 30m, got %v", cfg.SessionTTL)
 	}
-	if cfg.MaxSessions != 100 {
-		t.Errorf("Expected default max sessions 100, got %d", cfg.MaxSessions)
+	if cfg.MaxSessions != 20 {
+		t.Errorf("Expected default max sessions 20, got %d", cfg.MaxSessions)
 	}
 
 	// Timeout defaults
