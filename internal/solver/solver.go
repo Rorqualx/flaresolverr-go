@@ -101,6 +101,10 @@ type SolveOptions struct {
 	CookieExtractDelay int
 	// Fingerprint specifies per-request browser fingerprint customization.
 	Fingerprint *types.FingerprintConfig
+	// Language is the locale (e.g. "fr_FR" or "fr-FR") behind the page's
+	// Accept-Language header and navigator.languages. Empty means en-US.
+	Language string
+
 	// DefaultTimezone is the global timezone fallback (from TZ env var). Applied
 	// per page via CDP Emulation.setTimezoneOverride when no per-request
 	// Fingerprint.Overrides["timezone"] takes priority.
@@ -3152,8 +3156,9 @@ func (s *Solver) pageSetup(opts *SolveOptions) browser.PageSetup {
 		log.Debug().Str("user_agent", opts.UserAgent).Msg("Using per-request User-Agent override")
 	}
 	return browser.PageSetup{
-		UserAgent: s.effectiveUserAgent(opts),
-		Timezone:  resolveTimezone(opts),
+		UserAgent:       s.effectiveUserAgent(opts),
+		AcceptLanguages: browser.AcceptLanguages(opts.Language),
+		Timezone:        resolveTimezone(opts),
 	}
 }
 

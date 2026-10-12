@@ -228,7 +228,7 @@ func ApplyStealthToPageWithProfile(page *rod.Page, profile *FingerprintProfile) 
 
 	// Apply user agent override if specified
 	if profile.UserAgent != "" {
-		if err := SetUserAgent(page, profile.UserAgent); err != nil {
+		if err := SetUserAgent(page, profile.UserAgent, ""); err != nil {
 			log.Warn().Err(err).Msg("Failed to set user agent from fingerprint profile")
 		}
 	}

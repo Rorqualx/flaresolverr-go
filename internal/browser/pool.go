@@ -386,18 +386,9 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// Browser Behavior (Realistic)
 	// ========================================
 
-	// Language — use LANG env var if set, otherwise default to en-US
-	acceptLang := "en-US,en;q=0.9"
-	if p.config.BrowserLang != "" {
-		// Convert locale format (e.g., "en_GB" → "en-GB,en;q=0.9")
-		lang := strings.ReplaceAll(p.config.BrowserLang, "_", "-")
-		// Strip .UTF-8 or similar suffixes
-		if idx := strings.Index(lang, "."); idx > 0 {
-			lang = lang[:idx]
-		}
-		acceptLang = lang + ",en;q=0.9"
-	}
-	l = l.Set("accept-lang", acceptLang)
+	// Language — from the LANG env var if set, otherwise en-US. The same list
+	// is applied to every page (see PreparePage).
+	l = l.Set("accept-lang", AcceptLanguages(p.config.BrowserLang))
 
 	// First-run and dialogs
 	l = l.Set("no-first-run").
@@ -591,11 +582,7 @@ func (p *Pool) SpawnWithOptions(ctx context.Context, opts LaunchOptions) (*rod.B
 		l = l.Set("window-size", opts.WindowSize)
 	}
 	if opts.Language != "" {
-		lang := strings.ReplaceAll(opts.Language, "_", "-")
-		if idx := strings.Index(lang, "."); idx > 0 {
-			lang = lang[:idx]
-		}
-		l = l.Set("accept-lang", lang+",en;q=0.9")
+		l = l.Set("accept-lang", AcceptLanguages(opts.Language))
 	}
 	if opts.Headless != nil {
 		if *opts.Headless {

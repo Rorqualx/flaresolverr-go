@@ -71,6 +71,10 @@ type Session struct {
 	// Empty means no per-session override; callers may apply a global default instead.
 	Timezone string
 
+	// Language is the locale given to this session's dedicated browser
+	// (browserFlags.language). Empty means the server default.
+	Language string
+
 	// host is set for sessions that live in an isolated browser context on the
 	// shared session browser. Browser is then a handle scoped to that context.
 	host           *sessionHost

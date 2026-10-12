@@ -894,6 +894,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		CookieExtractDelay: req.CookieExtractDelay,
 		Fingerprint:        req.Fingerprint,
 		DefaultTimezone:    h.config.BrowserTimezone, // TZ env fallback; per-request fingerprint override wins
+		Language:           h.config.BrowserLang,     // LANG env; a session's own language wins
 	}
 
 	var result *solver.Result
@@ -919,6 +920,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		// Per-session timezone takes precedence over the global TZ default.
 		if sess.Timezone != "" {
 			opts.DefaultTimezone = sess.Timezone
+		}
+		// Likewise the language of a session's dedicated browser.
+		if sess.Language != "" {
+			opts.Language = sess.Language
 		}
 
 		// Acquire operation lock to prevent concurrent operations on the same session
@@ -1053,6 +1058,7 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		// Ownership of the browser transfers to the session only on success.
 		sess, err = h.sessions.Create(sessionID, dedicated, sessionTTL, func(s *session.Session) {
 			s.OwnsBrowser = true
+			s.Language = req.BrowserFlags.Language
 		})
 		if err != nil {
 			h.pool.CleanupBrowser(dedicated) // closes browser + removes user-data dir

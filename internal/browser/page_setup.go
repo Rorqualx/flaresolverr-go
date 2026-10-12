@@ -20,6 +20,11 @@ type PageSetup struct {
 	// navigator.userAgent. Empty leaves the browser's own value.
 	UserAgent string
 
+	// AcceptLanguages is the plain language list ("fr-FR,fr,en") behind the
+	// Accept-Language header and navigator.languages. Empty means
+	// DefaultAcceptLanguages.
+	AcceptLanguages string
+
 	// Timezone is an IANA timezone ID applied through CDP. Empty leaves the
 	// browser's own timezone.
 	Timezone string
@@ -32,7 +37,7 @@ type PageSetup struct {
 //  1. go-rod/stealth, registered to run at the start of every new document
 //  2. the gate-2 corrections (WebGL renderer and screen geometry)
 //  3. the timezone, through CDP
-//  4. the user agent and its client hints
+//  4. the user agent, with its client hints, platform and language list
 //  5. the viewport
 //
 // Only a failure to register go-rod/stealth is returned: without it the page
@@ -53,7 +58,7 @@ func PreparePage(page *rod.Page, setup PageSetup) error {
 	}
 
 	if setup.UserAgent != "" {
-		if err := SetUserAgent(page, setup.UserAgent); err != nil {
+		if err := SetUserAgent(page, setup.UserAgent, setup.AcceptLanguages); err != nil {
 			log.Warn().Err(err).Msg("Failed to set user agent")
 		}
 	}

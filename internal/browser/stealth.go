@@ -1147,64 +1147,6 @@ func buildBlockPatterns(blockImages, blockCSS, blockFonts, blockMedia bool) []*p
 	return patterns
 }
 
-// SetUserAgent sets a custom user agent on the page with proper Client Hints.
-// This is critical for bypassing Cloudflare detection which checks Sec-CH-UA headers.
-func SetUserAgent(page *rod.Page, userAgent string) error {
-	// Extract Chrome version from user agent for Client Hints
-	// User agent format: ...Chrome/124.0.0.0...
-	chromeVersion := "124"
-	if idx := strings.Index(userAgent, "Chrome/"); idx != -1 {
-		versionStart := idx + 7
-		versionEnd := versionStart
-		for versionEnd < len(userAgent) && userAgent[versionEnd] != '.' && userAgent[versionEnd] != ' ' {
-			versionEnd++
-		}
-		if versionEnd > versionStart {
-			chromeVersion = userAgent[versionStart:versionEnd]
-		}
-	}
-
-	// Determine platform from user agent
-	platform := "Linux"
-	platformVersion := "6.5.0"
-	architecture := "x86_64"
-	if strings.Contains(userAgent, "Windows") {
-		platform = "Windows"
-		platformVersion = "15.0.0"
-		architecture = "x86"
-	} else if strings.Contains(userAgent, "Macintosh") {
-		platform = "macOS"
-		platformVersion = "14.0.0"
-		architecture = "arm"
-	}
-
-	// Include "Google Chrome" brand to match real Chrome browsers
-	// Real Chrome includes: "Not_A Brand", "Google Chrome", "Chromium"
-	return proto.NetworkSetUserAgentOverride{
-		UserAgent:      userAgent,
-		AcceptLanguage: "en-US,en;q=0.9",
-		Platform:       platform,
-		UserAgentMetadata: &proto.EmulationUserAgentMetadata{
-			Brands: []*proto.EmulationUserAgentBrandVersion{
-				{Brand: "Not_A Brand", Version: "8"},
-				{Brand: "Chromium", Version: chromeVersion},
-				{Brand: "Google Chrome", Version: chromeVersion},
-			},
-			FullVersionList: []*proto.EmulationUserAgentBrandVersion{
-				{Brand: "Not_A Brand", Version: "8.0.0.0"},
-				{Brand: "Chromium", Version: chromeVersion + ".0.0.0"},
-				{Brand: "Google Chrome", Version: chromeVersion + ".0.0.0"},
-			},
-			Platform:        platform,
-			PlatformVersion: platformVersion,
-			Architecture:    architecture,
-			Model:           "",
-			Mobile:          false,
-			Bitness:         "64",
-		},
-	}.Call(page)
-}
-
 // SetViewport sets the page viewport size.
 func SetViewport(page *rod.Page, width, height int) error {
 	return page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
