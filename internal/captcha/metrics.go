@@ -17,6 +17,7 @@ type ProviderStats struct {
 	Attempts    int64     // Total solve attempts
 	Successes   int64     // Successful solves
 	Failures    int64     // Failed solves
+	Tasks       int64     // Tasks created at the provider (billable)
 	TotalCost   float64   // Total cost in USD
 	TotalTimeMs int64     // Total time spent solving in milliseconds
 	LastUsed    time.Time // Last time this provider was used
@@ -48,6 +49,28 @@ func (m *Metrics) RecordAttempt(provider string, success bool, cost float64, dur
 	} else {
 		stats.Failures++
 	}
+}
+
+// RecordTask records that a task was created at a provider, which is the point
+// at which the provider may bill for it.
+func (m *Metrics) RecordTask(provider string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.getOrCreate(provider).Tasks++
+}
+
+// Snapshot returns a copy of the stats of every provider seen so far. Provider
+// names come from the registry, so the result is bounded.
+func (m *Metrics) Snapshot() map[string]ProviderStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make(map[string]ProviderStats, len(m.providers))
+	for name, stats := range m.providers {
+		out[name] = *stats
+	}
+	return out
 }
 
 // RecordError records an error for a provider.
@@ -84,6 +107,7 @@ func (m *Metrics) GetStats(provider string) *ProviderStats {
 		Attempts:    stats.Attempts,
 		Successes:   stats.Successes,
 		Failures:    stats.Failures,
+		Tasks:       stats.Tasks,
 		TotalCost:   stats.TotalCost,
 		TotalTimeMs: stats.TotalTimeMs,
 		LastUsed:    stats.LastUsed,
@@ -113,6 +137,7 @@ func (m *Metrics) ToJSON() map[string]interface{} {
 			"attempts":     stats.Attempts,
 			"successes":    stats.Successes,
 			"failures":     stats.Failures,
+			"tasks":        stats.Tasks,
 			"success_rate": successRate,
 			"total_cost":   stats.TotalCost,
 			"avg_time_ms":  avgTimeMs,

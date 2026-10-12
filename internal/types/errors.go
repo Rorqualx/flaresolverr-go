@@ -44,6 +44,15 @@ var (
 	ErrCaptchaSitekeyNotFound = errors.New("turnstile sitekey not found")
 	ErrCaptchaTokenInjection  = errors.New("failed to inject captcha token")
 	ErrCaptchaNoProviders     = errors.New("no captcha solver providers configured")
+
+	// ErrCaptchaBudgetExhausted means the request has already bought as many
+	// external solves as it is allowed (CAPTCHA_MAX_EXTERNAL_SOLVES), or a paid
+	// task timed out and no further purchase will be made for it.
+	ErrCaptchaBudgetExhausted = errors.New("external captcha solve budget exhausted for this request")
+
+	// ErrCaptchaInsufficientTime means the request is too close to its deadline
+	// for a bought solution to arrive, so none was bought.
+	ErrCaptchaInsufficientTime = errors.New("not enough time left in the request for an external captcha solve")
 )
 
 // ChallengeError provides detailed information about challenge failures.

@@ -67,21 +67,19 @@ func TestCaptcha_SitekeyExtraction(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// Try to extract sitekey
-	sitekey, err := captcha.ExtractTurnstileSitekey(page)
+	widget, err := captcha.ExtractTurnstileWidget(ctx, page)
 	if err != nil {
 		t.Logf("Sitekey extraction failed: %v", err)
 		t.Log("Note: This may be expected if the page structure changed")
-	} else {
-		t.Logf("SUCCESS: Extracted sitekey: %s", sitekey)
-		if len(sitekey) < 10 {
-			t.Error("Sitekey seems too short")
-		}
+		return
+	}
+	t.Logf("SUCCESS: Extracted sitekey: %s", widget.SiteKey)
+	if len(widget.SiteKey) < 10 {
+		t.Error("Sitekey seems too short")
 	}
 
-	// Also test action/cdata extraction
-	action := captcha.ExtractTurnstileAction(page)
-	cdata := captcha.ExtractTurnstileCData(page)
-	t.Logf("Action: %q, CData: %q", action, cdata)
+	// Action and cData come from the same widget element as the sitekey
+	t.Logf("Action: %q, CData: %q", widget.Action, widget.CData)
 }
 
 // TestCaptcha_MetricsConcurrency stress tests the metrics system.

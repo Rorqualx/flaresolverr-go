@@ -19,7 +19,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/browser"
-	"github.com/Rorqualx/flaresolverr-go/internal/captcha"
 	"github.com/Rorqualx/flaresolverr-go/internal/config"
 	"github.com/Rorqualx/flaresolverr-go/internal/ratelimit"
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
@@ -207,44 +206,10 @@ func NewWithSelectors(pool *browser.Pool, sessions *session.Manager, cfg *config
 	// This enables per-domain learning of which solving methods work best
 	solverInstance.SetStatsManager(domainStats)
 
-	// Set up external CAPTCHA solver chain if configured
-	if cfg.HasCaptchaFallback() {
-		// Map provider names to their configured API keys
-		providerKeys := map[string]string{
-			"2captcha":    cfg.Captcha2CaptchaAPIKey,
-			"capsolver":   cfg.CaptchaCapSolverAPIKey,
-			"anticaptcha": cfg.CaptchaAntiCaptchaAPIKey,
-			"9kw":         cfg.Captcha9kwAPIKey,
-		}
-
-		// Build providers in priority order using the registry
-		var providers []captcha.CaptchaSolver
-		order := captcha.BuildPriorityOrder(cfg.CaptchaPrimaryProvider, captcha.Available())
-		for _, name := range order {
-			apiKey := providerKeys[name]
-			if apiKey == "" {
-				continue
-			}
-			factory := captcha.GetFactory(name)
-			if factory == nil {
-				continue
-			}
-			provider := factory(apiKey, cfg.CaptchaSolverTimeout)
-			if provider.IsConfigured() {
-				providers = append(providers, provider)
-				log.Debug().Str("provider", name).Msg("CAPTCHA provider registered")
-			}
-		}
-
-		if len(providers) > 0 {
-			chain := captcha.NewSolverChain(captcha.SolverChainConfig{
-				NativeAttempts:  cfg.CaptchaNativeAttempts,
-				Providers:       providers,
-				FallbackEnabled: true,
-			})
-			solverInstance.SetSolverChain(chain)
-		}
-	}
+	// Set up the external CAPTCHA solver chain. It always exists, so a request
+	// that brings its own captchaApiKey can be served; with the server-side
+	// fallback off it holds no providers and buys nothing on its own.
+	solverInstance.SetSolverChain(newCaptchaChain(cfg))
 
 	// Layer-1 clean-egress path: sticky proxy pool (same exit IP per domain).
 	if proxies := solver.ParseProxyList(cfg.ProxyList); len(proxies) > 0 {

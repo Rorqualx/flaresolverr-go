@@ -18,8 +18,17 @@ func init() {
 	}
 }
 
-// ProviderFactory creates a CaptchaSolver given an API key and timeout.
-type ProviderFactory func(apiKey string, timeout time.Duration) CaptchaSolver
+// ProviderOptions is what a provider needs to be constructed. The zero value of
+// BaseURL and PollInterval selects the provider's own defaults.
+type ProviderOptions struct {
+	APIKey       string
+	Timeout      time.Duration
+	BaseURL      string        // Override for testing and self-hosted gateways
+	PollInterval time.Duration // Override for testing
+}
+
+// ProviderFactory creates a CaptchaSolver from the given options.
+type ProviderFactory func(opts ProviderOptions) CaptchaSolver
 
 var (
 	registryMu sync.RWMutex

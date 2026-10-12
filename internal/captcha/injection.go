@@ -4,6 +4,7 @@ package captcha
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,477 +15,200 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/types"
 )
 
-// InjectTurnstileToken injects a solved Turnstile token into the page.
-// This triggers the Turnstile callback to process the token.
+const (
+	// injectionEvalTimeout bounds one injection script.
+	injectionEvalTimeout = 5 * time.Second
+
+	// injectionPollInterval is how often the page is checked for the effect of
+	// an injected token.
+	injectionPollInterval = 500 * time.Millisecond
+)
+
+// injectionMethod is one way of handing a solved token to a page. Its script
+// must evaluate to true only when it actually delivered the token: it wrote it
+// into a response field the widget owns, or it called a callback and the
+// callback returned normally. Dispatching an event or setting an attribute
+// nobody is known to read does not count.
+type injectionMethod struct {
+	name   string
+	script string // a JS function expression taking the token
+}
+
+// turnstileInjectionMethods are tried in order; every one that applies runs,
+// because a real Turnstile both fills its field and calls its callback.
+var turnstileInjectionMethods = []injectionMethod{
+	{name: "response_field", script: turnstileFieldJS},
+	{name: "callback", script: turnstileCallbackJS},
+}
+
+var hcaptchaInjectionMethods = []injectionMethod{
+	{name: "hcaptcha_response_field", script: hcaptchaFieldJS},
+	{name: "hcaptcha_callback", script: hcaptchaCallbackJS},
+}
+
+// turnstileFieldJS writes the token into Turnstile's own response fields.
+// Turnstile names its field cf-turnstile-response; inside a .cf-turnstile
+// container it may also add a g-recaptcha-response field for reCAPTCHA
+// compatibility. A g-recaptcha-response or h-captcha-response field elsewhere
+// belongs to a different captcha and is left alone.
+const turnstileFieldJS = `function(token) {
+	var fields = document.querySelectorAll(
+		'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], ' +
+		'.cf-turnstile input[name="g-recaptcha-response"], .cf-turnstile textarea[name="g-recaptcha-response"]');
+	var set = false;
+	for (var i = 0; i < fields.length; i++) {
+		fields[i].value = token;
+		fields[i].dispatchEvent(new Event('input', { bubbles: true }));
+		fields[i].dispatchEvent(new Event('change', { bubbles: true }));
+		if (fields[i].name === 'cf-turnstile-response') set = true;
+	}
+	return set;
+}`
+
+// turnstileCallbackJS calls the data-callback of Turnstile widgets. Only if no
+// widget names one does it fall back to a conventionally named global callback
+// (the last resort for widgets rendered by script that the render() interceptor
+// did not see), so a callback is never invoked twice with the same token.
+const turnstileCallbackJS = `function(token) {
+	var widgets = document.querySelectorAll('.cf-turnstile[data-callback]');
+	var fired = false;
+	var seen = [];
+	for (var i = 0; i < widgets.length; i++) {
+		var name = widgets[i].getAttribute('data-callback');
+		if (name && seen.indexOf(name) === -1 && typeof window[name] === 'function') {
+			seen.push(name);
+			try { window[name](token); fired = true; } catch (e) {}
+		}
+	}
+	if (fired) return true;
+	var names = ['turnstileCallback', 'onTurnstileSuccess', 'handleTurnstile', 'cfCallback'];
+	for (var i = 0; i < names.length; i++) {
+		if (typeof window[names[i]] === 'function') {
+			try { window[names[i]](token); return true; } catch (e) {}
+		}
+	}
+	return false;
+}`
+
+// hcaptchaFieldJS writes the token into hCaptcha's response fields. hCaptcha
+// adds an h-captcha-response field and, for compatibility, a
+// g-recaptcha-response one next to it; only the former proves an hCaptcha
+// widget is present.
+const hcaptchaFieldJS = `function(token) {
+	var own = document.querySelectorAll('textarea[name="h-captcha-response"], input[name="h-captcha-response"]');
+	if (own.length === 0) return false;
+	var compat = document.querySelectorAll(
+		'.h-captcha textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response-"]');
+	var fields = Array.prototype.slice.call(own).concat(Array.prototype.slice.call(compat));
+	for (var i = 0; i < fields.length; i++) {
+		fields[i].value = token;
+		fields[i].dispatchEvent(new Event('input', { bubbles: true }));
+		fields[i].dispatchEvent(new Event('change', { bubbles: true }));
+	}
+	return true;
+}`
+
+// hcaptchaCallbackJS calls the data-callback of hCaptcha widgets, or failing
+// that a conventionally named global callback.
+const hcaptchaCallbackJS = `function(token) {
+	var fired = false;
+	var widgets = document.querySelectorAll('.h-captcha[data-callback]');
+	for (var i = 0; i < widgets.length; i++) {
+		var name = widgets[i].getAttribute('data-callback');
+		if (name && typeof window[name] === 'function') {
+			try { window[name](token); fired = true; } catch (e) {}
+		}
+	}
+	if (fired) return true;
+	var names = ['hcaptchaCallback', 'onHCaptchaSuccess'];
+	for (var i = 0; i < names.length; i++) {
+		if (typeof window[names[i]] === 'function') {
+			try { window[names[i]](token); return true; } catch (e) {}
+		}
+	}
+	return false;
+}`
+
+// InjectTurnstileToken delivers a solved Turnstile token to the page. It
+// returns nil only if the token really was delivered: written into a Turnstile
+// response field, or passed to a callback that ran. A page with no such field
+// and no callback yields types.ErrCaptchaTokenInjection.
 func InjectTurnstileToken(ctx context.Context, page *rod.Page, token string) error {
+	return injectToken(ctx, page, token, "Turnstile", turnstileInjectionMethods)
+}
+
+// InjectHCaptchaToken delivers a solved hCaptcha token to the page, with the
+// same meaning of success as InjectTurnstileToken.
+func InjectHCaptchaToken(ctx context.Context, page *rod.Page, token string) error {
+	return injectToken(ctx, page, token, "hCaptcha", hcaptchaInjectionMethods)
+}
+
+// injectToken runs every method and reports success if at least one delivered
+// the token.
+func injectToken(ctx context.Context, page *rod.Page, token, kind string, methods []injectionMethod) error {
 	if token == "" {
-		return fmt.Errorf("empty token provided")
+		return errors.New("empty token provided")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
-	// Safety check for context
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// Safely encode the token for JavaScript
+	// Safely encode the token for JavaScript; it is provider-controlled text.
 	tokenJSON, err := json.Marshal(token)
 	if err != nil {
 		return fmt.Errorf("failed to encode token: %w", err)
 	}
 
-	log.Debug().
-		Str("token_prefix", token[:min(20, len(token))]+"...").
-		Msg("Injecting Turnstile token")
-
-	// Try multiple injection methods
-	methods := []struct {
-		name string
-		fn   func(context.Context, *rod.Page, string) error
-	}{
-		{"input_element", injectViaInputElement},
-		{"callback", injectViaCallback},
-		{"turnstile_api", injectViaTurnstileAPI},
-		{"window_callback", injectViaWindowCallback},
-	}
-
+	delivered := false
 	var lastErr error
 	for _, method := range methods {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
-		err := method.fn(ctx, page, string(tokenJSON))
-		if err == nil {
-			log.Info().Str("method", method.name).Msg("Token injection succeeded")
-			return nil
+		ok, err := evalWithContext(ctx, page, "("+method.script+")("+string(tokenJSON)+")")
+		switch {
+		case err != nil:
+			lastErr = err
+			log.Debug().Err(err).Str("captcha", kind).Str("method", method.name).Msg("Token injection method failed")
+		case ok:
+			delivered = true
+			log.Info().Str("captcha", kind).Str("method", method.name).Msg("Token injection delivered the token")
+		default:
+			log.Debug().Str("captcha", kind).Str("method", method.name).Msg("Token injection method found nothing to deliver to")
 		}
-		lastErr = err
-		log.Debug().
-			Err(err).
-			Str("method", method.name).
-			Msg("Token injection method failed, trying next")
 	}
 
+	if delivered {
+		return nil
+	}
 	if lastErr != nil {
-		return fmt.Errorf("all injection methods failed, last error: %w", lastErr)
+		return fmt.Errorf("%w: %w", types.ErrCaptchaTokenInjection, lastErr)
 	}
-
-	return types.ErrCaptchaTokenInjection
+	return fmt.Errorf("%w: no %s response field or callback on the page", types.ErrCaptchaTokenInjection, kind)
 }
 
-// injectViaInputElement sets the token on the hidden input element.
-func injectViaInputElement(ctx context.Context, page *rod.Page, tokenJSON string) error {
-	js := fmt.Sprintf(`
-	(function(token) {
-		// Find the turnstile response input
-		var selectors = [
-			'input[name="cf-turnstile-response"]',
-			'textarea[name="cf-turnstile-response"]',
-			'input[name="g-recaptcha-response"]',
-			'textarea[name="g-recaptcha-response"]',
-			'input[name="h-captcha-response"]'
-		];
-
-		for (var i = 0; i < selectors.length; i++) {
-			var input = document.querySelector(selectors[i]);
-			if (input) {
-				input.value = token;
-				// Dispatch input event to trigger any listeners
-				input.dispatchEvent(new Event('input', { bubbles: true }));
-				input.dispatchEvent(new Event('change', { bubbles: true }));
-				return true;
-			}
-		}
-
-		return false;
-	})(%s)
-	`, tokenJSON)
-
-	result, err := evalWithContext(ctx, page, js)
-	if err != nil {
-		return err
-	}
-
-	if !result {
-		return fmt.Errorf("no input element found")
-	}
-
-	return nil
-}
-
-// injectViaCallback invokes the data-callback function on Turnstile widgets.
-func injectViaCallback(ctx context.Context, page *rod.Page, tokenJSON string) error {
-	js := fmt.Sprintf(`
-	(function(token) {
-		// Find elements with data-callback attribute
-		var widgets = document.querySelectorAll('[data-callback]');
-		for (var i = 0; i < widgets.length; i++) {
-			var callbackName = widgets[i].getAttribute('data-callback');
-			if (callbackName && typeof window[callbackName] === 'function') {
-				try {
-					window[callbackName](token);
-					return true;
-				} catch(e) {
-					console.error('Callback error:', e);
-				}
-			}
-		}
-
-		// Also try cf-turnstile specific callback
-		var cfWidgets = document.querySelectorAll('.cf-turnstile[data-callback]');
-		for (var i = 0; i < cfWidgets.length; i++) {
-			var callbackName = cfWidgets[i].getAttribute('data-callback');
-			if (callbackName && typeof window[callbackName] === 'function') {
-				try {
-					window[callbackName](token);
-					return true;
-				} catch(e) {
-					console.error('CF Callback error:', e);
-				}
-			}
-		}
-
-		return false;
-	})(%s)
-	`, tokenJSON)
-
-	result, err := evalWithContext(ctx, page, js)
-	if err != nil {
-		return err
-	}
-
-	if !result {
-		return fmt.Errorf("no callback function found")
-	}
-
-	return nil
-}
-
-// injectViaTurnstileAPI uses the official turnstile API if available.
-func injectViaTurnstileAPI(ctx context.Context, page *rod.Page, tokenJSON string) error {
-	js := fmt.Sprintf(`
-	(function(token) {
-		// Check if turnstile object exists
-		if (typeof window.turnstile !== 'undefined') {
-			// Try to find widget IDs and invoke callback
-			var widgets = document.querySelectorAll('.cf-turnstile');
-			for (var i = 0; i < widgets.length; i++) {
-				var widgetId = widgets[i].getAttribute('data-turnstile-widget-id');
-				if (widgetId) {
-					// Store the token where turnstile expects it
-					widgets[i].setAttribute('data-turnstile-response', token);
-
-					// Also try to set on internal state
-					if (window.turnstile && window.turnstile.widgets && window.turnstile.widgets[widgetId]) {
-						window.turnstile.widgets[widgetId].response = token;
-					}
-				}
-			}
-
-			// Dispatch custom event that some implementations listen for
-			var event = new CustomEvent('turnstile-success', { detail: { token: token } });
-			document.dispatchEvent(event);
-			window.dispatchEvent(event);
-
-			return true;
-		}
-		return false;
-	})(%s)
-	`, tokenJSON)
-
-	result, err := evalWithContext(ctx, page, js)
-	if err != nil {
-		return err
-	}
-
-	if !result {
-		return fmt.Errorf("turnstile API not available")
-	}
-
-	return nil
-}
-
-// injectViaWindowCallback looks for common callback patterns on window.
-func injectViaWindowCallback(ctx context.Context, page *rod.Page, tokenJSON string) error {
-	js := fmt.Sprintf(`
-	(function(token) {
-		// Common callback function names
-		var callbackNames = [
-			'turnstileCallback',
-			'onTurnstileSuccess',
-			'handleTurnstile',
-			'cfCallback',
-			'captchaCallback',
-			'onCaptchaSuccess',
-			'grecaptchaCallback',
-			'hcaptchaCallback'
-		];
-
-		for (var i = 0; i < callbackNames.length; i++) {
-			var name = callbackNames[i];
-			if (typeof window[name] === 'function') {
-				try {
-					window[name](token);
-					return true;
-				} catch(e) {
-					console.error('Callback ' + name + ' error:', e);
-				}
-			}
-		}
-
-		// Also check for callbacks attached to form elements
-		var forms = document.querySelectorAll('form');
-		for (var i = 0; i < forms.length; i++) {
-			var form = forms[i];
-			var onsubmit = form.getAttribute('onsubmit');
-			if (onsubmit && onsubmit.indexOf('turnstile') !== -1) {
-				// Set the token and trigger submit
-				var input = form.querySelector('input[name="cf-turnstile-response"]');
-				if (input) {
-					input.value = token;
-					return true;
-				}
-			}
-		}
-
-		return false;
-	})(%s)
-	`, tokenJSON)
-
-	result, err := evalWithContext(ctx, page, js)
-	if err != nil {
-		return err
-	}
-
-	if !result {
-		return fmt.Errorf("no window callback found")
-	}
-
-	return nil
-}
-
-// evalWithContext evaluates JavaScript with context timeout support.
+// evalWithContext evaluates a JavaScript expression in the page's main frame
+// and returns its boolean result. The call is bound to ctx and to a short
+// timeout of its own.
 func evalWithContext(ctx context.Context, page *rod.Page, js string) (bool, error) {
-	// Create timeout for evaluation
-	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	evalCtx, cancel := context.WithTimeout(ctx, injectionEvalTimeout)
 	defer cancel()
 
-	resultChan := make(chan struct {
-		result bool
-		err    error
-	}, 1)
-
-	go func() {
-		result, err := proto.RuntimeEvaluate{
-			Expression:    js,
-			ReturnByValue: true,
-		}.Call(page)
-
-		if err != nil {
-			resultChan <- struct {
-				result bool
-				err    error
-			}{false, err}
-			return
-		}
-
-		if result.ExceptionDetails != nil {
-			resultChan <- struct {
-				result bool
-				err    error
-			}{false, fmt.Errorf("js exception: %s", result.ExceptionDetails.Text)}
-			return
-		}
-
-		if result.Result == nil {
-			resultChan <- struct {
-				result bool
-				err    error
-			}{false, fmt.Errorf("nil result")}
-			return
-		}
-
-		// Check if the result is a boolean true
-		success := result.Result.Value.Bool()
-		resultChan <- struct {
-			result bool
-			err    error
-		}{success, nil}
-	}()
-
-	select {
-	case <-evalCtx.Done():
-		return false, evalCtx.Err()
-	case r := <-resultChan:
-		return r.result, r.err
-	}
-}
-
-// InjectHCaptchaToken injects a solved hCaptcha token into the page.
-func InjectHCaptchaToken(ctx context.Context, page *rod.Page, token string) error {
-	if token == "" {
-		return fmt.Errorf("empty token provided")
-	}
-
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	tokenJSON, err := json.Marshal(token)
+	result, err := proto.RuntimeEvaluate{
+		Expression:    js,
+		ReturnByValue: true,
+	}.Call(page.Context(evalCtx))
 	if err != nil {
-		return fmt.Errorf("failed to encode token: %w", err)
+		return false, err
 	}
-
-	log.Debug().
-		Str("token_prefix", token[:min(20, len(token))]+"...").
-		Msg("Injecting hCaptcha token")
-
-	// Try multiple injection methods for hCaptcha
-	methods := []struct {
-		name string
-		fn   func(context.Context, *rod.Page, string) error
-	}{
-		{"hcaptcha_textarea", injectHCaptchaViaTextarea},
-		{"hcaptcha_callback", injectHCaptchaViaCallback},
-		{"hcaptcha_api", injectHCaptchaViaAPI},
+	if result.ExceptionDetails != nil {
+		return false, fmt.Errorf("js exception: %s", result.ExceptionDetails.Text)
 	}
-
-	var lastErr error
-	for _, method := range methods {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		err := method.fn(ctx, page, string(tokenJSON))
-		if err == nil {
-			log.Info().Str("method", method.name).Msg("hCaptcha token injection succeeded")
-			return nil
-		}
-		lastErr = err
-		log.Debug().
-			Err(err).
-			Str("method", method.name).
-			Msg("hCaptcha injection method failed, trying next")
+	if result.Result == nil {
+		return false, errors.New("nil result")
 	}
-
-	if lastErr != nil {
-		return fmt.Errorf("all hCaptcha injection methods failed, last error: %w", lastErr)
-	}
-
-	return types.ErrCaptchaTokenInjection
-}
-
-// injectHCaptchaViaTextarea sets the token on the hCaptcha response textarea.
-func injectHCaptchaViaTextarea(ctx context.Context, page *rod.Page, tokenJSON string) error {
-	js := fmt.Sprintf(`
-	(function(token) {
-		var selectors = [
-			'textarea[name="h-captcha-response"]',
-			'textarea[name="g-recaptcha-response"]',
-			'input[name="h-captcha-response"]'
-		];
-
-		for (var i = 0; i < selectors.length; i++) {
-			var input = document.querySelector(selectors[i]);
-			if (input) {
-				input.value = token;
-				input.dispatchEvent(new Event('input', { bubbles: true }));
-				input.dispatchEvent(new Event('change', { bubbles: true }));
-				return true;
-			}
-		}
-		return false;
-	})(%s)
-	`, tokenJSON)
-
-	result, err := evalWithContext(ctx, page, js)
-	if err != nil {
-		return err
-	}
-	if !result {
-		return fmt.Errorf("no hCaptcha textarea found")
-	}
-	return nil
-}
-
-// injectHCaptchaViaCallback invokes the hCaptcha data-callback function.
-func injectHCaptchaViaCallback(ctx context.Context, page *rod.Page, tokenJSON string) error {
-	js := fmt.Sprintf(`
-	(function(token) {
-		// Find .h-captcha elements with data-callback
-		var widgets = document.querySelectorAll('.h-captcha[data-callback]');
-		for (var i = 0; i < widgets.length; i++) {
-			var callbackName = widgets[i].getAttribute('data-callback');
-			if (callbackName && typeof window[callbackName] === 'function') {
-				try {
-					window[callbackName](token);
-					return true;
-				} catch(e) {}
-			}
-		}
-
-		// Try common hCaptcha callback names
-		var names = ['hcaptchaCallback', 'onHCaptchaSuccess', 'captchaCallback', 'onCaptchaSuccess'];
-		for (var i = 0; i < names.length; i++) {
-			if (typeof window[names[i]] === 'function') {
-				try {
-					window[names[i]](token);
-					return true;
-				} catch(e) {}
-			}
-		}
-
-		return false;
-	})(%s)
-	`, tokenJSON)
-
-	result, err := evalWithContext(ctx, page, js)
-	if err != nil {
-		return err
-	}
-	if !result {
-		return fmt.Errorf("no hCaptcha callback found")
-	}
-	return nil
-}
-
-// injectHCaptchaViaAPI uses the hCaptcha JS API if available.
-func injectHCaptchaViaAPI(ctx context.Context, page *rod.Page, tokenJSON string) error {
-	js := fmt.Sprintf(`
-	(function(token) {
-		if (typeof window.hcaptcha !== 'undefined') {
-			// Set the response directly if possible
-			var iframes = document.querySelectorAll('iframe[data-hcaptcha-widget-id]');
-			for (var i = 0; i < iframes.length; i++) {
-				var widgetId = iframes[i].getAttribute('data-hcaptcha-widget-id');
-				if (widgetId && window.hcaptcha.getRespKey) {
-					try {
-						// Trigger the success callback
-						var event = new CustomEvent('hcaptcha-success', { detail: { token: token } });
-						document.dispatchEvent(event);
-						return true;
-					} catch(e) {}
-				}
-			}
-
-			// Fallback: dispatch event
-			var event = new CustomEvent('hcaptcha-success', { detail: { token: token } });
-			document.dispatchEvent(event);
-			window.dispatchEvent(event);
-			return true;
-		}
-		return false;
-	})(%s)
-	`, tokenJSON)
-
-	result, err := evalWithContext(ctx, page, js)
-	if err != nil {
-		return err
-	}
-	if !result {
-		return fmt.Errorf("hCaptcha API not available")
-	}
-	return nil
+	return result.Result.Value.Bool(), nil
 }
 
 // WaitForTokenInjectionEffect waits for the page to process the injected token.
@@ -516,7 +240,7 @@ func WaitForTokenInjectionEffect(ctx context.Context, page *rod.Page, timeout ti
 	})()
 	`
 
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(injectionPollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -526,16 +250,9 @@ func WaitForTokenInjectionEffect(ctx context.Context, page *rod.Page, timeout ti
 			// but we just can't detect the success indicator
 			return nil
 		case <-ticker.C:
-			result, err := proto.RuntimeEvaluate{
-				Expression:    js,
-				ReturnByValue: true,
-			}.Call(page)
-
-			if err == nil && result != nil && result.Result != nil {
-				if result.Result.Value.Bool() {
-					log.Debug().Msg("Detected token injection success indicator")
-					return nil
-				}
+			if ok, err := evalWithContext(waitCtx, page, js); err == nil && ok {
+				log.Debug().Msg("Detected token injection success indicator")
+				return nil
 			}
 		}
 	}

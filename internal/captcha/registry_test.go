@@ -59,7 +59,7 @@ func TestGetFactory_ReturnsWorkingProvider(t *testing.T) {
 	}
 
 	// Create a provider with the factory
-	provider := factory("test-key", 30*time.Second)
+	provider := factory(ProviderOptions{APIKey: "test-key", Timeout: 30 * time.Second})
 	if provider == nil {
 		t.Fatal("Factory returned nil provider")
 	}

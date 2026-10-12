@@ -4,6 +4,9 @@ package config
 import (
 	"fmt"
 	"net/netip"
+
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +30,10 @@ const (
 	maxTimeout              = 10 * time.Minute
 	maxRateLimitRPM         = 10000 // Maximum requests per minute per IP
 	minAPIKeyLength         = 16    // Minimum API key length for security
+
+	// Paid external captcha solves one request may buy with the server's keys.
+	defaultCaptchaMaxExternalSolves = 1
+	maxCaptchaMaxExternalSolves     = 3
 )
 
 // Config holds all application configuration.
@@ -129,6 +136,14 @@ type Config struct {
 	Captcha9kwAPIKey         string        // 9kw.eu API key (NINEKW_API_KEY) — hCaptcha/reCAPTCHA only, no Turnstile
 	CaptchaPrimaryProvider   string        // Primary provider: "2captcha", "capsolver", "anticaptcha", or "9kw" (default: "2captcha")
 	CaptchaSolverTimeout     time.Duration // Timeout for external solver API (default: 120s)
+	CaptchaMaxExternalSolves int           // Paid solves one request may buy with the server's keys (default: 1, max: 3, 0 buys nothing)
+
+	// Provider base URL overrides, for testing and self-hosted gateways.
+	// Empty selects the provider's public API.
+	Captcha2CaptchaBaseURL    string // TWOCAPTCHA_BASE_URL
+	CaptchaCapSolverBaseURL   string // CAPSOLVER_BASE_URL
+	CaptchaAntiCaptchaBaseURL string // ANTICAPTCHA_BASE_URL
+	Captcha9kwBaseURL         string // NINEKW_BASE_URL
 
 	// Selectors settings
 	SelectorsPath          string        // Path to external selectors.yaml override file
@@ -220,6 +235,12 @@ func Load() *Config {
 		Captcha9kwAPIKey:         getEnvString("NINEKW_API_KEY", ""),
 		CaptchaPrimaryProvider:   getEnvString("CAPTCHA_PRIMARY_PROVIDER", "2captcha"),
 		CaptchaSolverTimeout:     getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
+		CaptchaMaxExternalSolves: getEnvInt("CAPTCHA_MAX_EXTERNAL_SOLVES", defaultCaptchaMaxExternalSolves),
+
+		Captcha2CaptchaBaseURL:    getEnvString("TWOCAPTCHA_BASE_URL", ""),
+		CaptchaCapSolverBaseURL:   getEnvString("CAPSOLVER_BASE_URL", ""),
+		CaptchaAntiCaptchaBaseURL: getEnvString("ANTICAPTCHA_BASE_URL", ""),
+		Captcha9kwBaseURL:         getEnvString("NINEKW_BASE_URL", ""),
 
 		// Selectors settings
 		SelectorsPath:          getEnvString("SELECTORS_PATH", ""),
@@ -832,6 +853,52 @@ func (c *Config) validateCaptchaConfig() {
 	}
 	c.CaptchaPrimaryProvider = strings.ToLower(c.CaptchaPrimaryProvider)
 
+	// Validate the per-request budget of paid solves (0 buys nothing).
+	if c.CaptchaMaxExternalSolves < 0 {
+		log.Warn().
+			Int("max_solves", c.CaptchaMaxExternalSolves).
+			Msg("CAPTCHA_MAX_EXTERNAL_SOLVES cannot be negative, using 0 (no external solves)")
+		c.CaptchaMaxExternalSolves = 0
+	} else if c.CaptchaMaxExternalSolves > maxCaptchaMaxExternalSolves {
+		log.Warn().
+			Int("max_solves", c.CaptchaMaxExternalSolves).
+			Int("max", maxCaptchaMaxExternalSolves).
+			Msg("CAPTCHA_MAX_EXTERNAL_SOLVES too high, capping")
+		c.CaptchaMaxExternalSolves = maxCaptchaMaxExternalSolves
+	}
+
+	// Validate provider base URL overrides. A malformed override must not fall
+	// back silently to the provider's public (paid) API with the server's keys,
+	// so it turns the server-side fallback off.
+	for _, override := range []struct {
+		env   string
+		value *string
+	}{
+		{"TWOCAPTCHA_BASE_URL", &c.Captcha2CaptchaBaseURL},
+		{"CAPSOLVER_BASE_URL", &c.CaptchaCapSolverBaseURL},
+		{"ANTICAPTCHA_BASE_URL", &c.CaptchaAntiCaptchaBaseURL},
+		{"NINEKW_BASE_URL", &c.Captcha9kwBaseURL},
+	} {
+		if *override.value == "" {
+			continue
+		}
+		cleaned, err := validateProviderBaseURL(*override.value)
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("setting", override.env).
+				Msg("Invalid captcha provider base URL; ignoring it and disabling the external CAPTCHA fallback")
+			*override.value = ""
+			c.CaptchaFallbackEnabled = false
+			continue
+		}
+		*override.value = cleaned
+		log.Warn().
+			Str("setting", override.env).
+			Str("base_url", cleaned).
+			Msg("Captcha provider base URL overridden; API keys for this provider are sent to this address")
+	}
+
 	// Warn if fallback enabled but no API keys configured
 	if c.CaptchaFallbackEnabled {
 		if c.Captcha2CaptchaAPIKey == "" && c.CaptchaCapSolverAPIKey == "" && c.CaptchaAntiCaptchaAPIKey == "" && c.Captcha9kwAPIKey == "" {
@@ -855,9 +922,35 @@ func (c *Config) validateCaptchaConfig() {
 				Strs("providers", configured).
 				Str("primary", c.CaptchaPrimaryProvider).
 				Int("native_attempts", c.CaptchaNativeAttempts).
+				Int("max_external_solves_per_request", c.CaptchaMaxExternalSolves).
 				Msg("External CAPTCHA solver fallback enabled")
+			if c.CaptchaMaxExternalSolves == 0 {
+				log.Warn().Msg("CAPTCHA_MAX_EXTERNAL_SOLVES is 0: the fallback is enabled but will never buy a solve")
+			}
 		}
 	}
+}
+
+// validateProviderBaseURL checks a captcha provider base URL override and
+// returns it without a trailing slash.
+func validateProviderBaseURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", errors.New("not a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("scheme must be http or https")
+	}
+	if u.Host == "" {
+		return "", errors.New("host is missing")
+	}
+	if u.User != nil {
+		return "", errors.New("must not contain credentials")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("must not contain a query or fragment")
+	}
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 // HasCaptchaFallback returns true if external CAPTCHA fallback is configured.

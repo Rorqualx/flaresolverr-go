@@ -189,11 +189,23 @@ components:
           description: Follow HTTP redirects (default true)
         captchaSolver:
           type: string
-          description: Per-request captcha provider override
-          enum: ["2captcha", "capsolver", "none"]
+          description: >-
+            External captcha provider for this request. A provider name selects
+            that provider among the ones the server has configured (the
+            server-side fallback must be enabled), or, together with
+            captchaApiKey, uses that provider with the caller's own key.
+            "none" forbids external solving for this request.
+          enum: ["2captcha", "capsolver", "anticaptcha", "9kw", "none"]
         captchaApiKey:
           type: string
-          description: Per-request captcha API key
+          maxLength: 256
+          writeOnly: true
+          description: >-
+            The caller's own API key for the provider named in captchaSolver.
+            It is used for this request only, for at most one paid solve, and
+            works even when the server-side fallback is disabled. Requires
+            captchaSolver (other than "none"); sending it alone is a validation
+            error. It is never logged, stored, or echoed in a response.
         userAgent:
           type: string
           description: Override User-Agent for this request
