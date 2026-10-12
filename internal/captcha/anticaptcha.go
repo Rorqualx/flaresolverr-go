@@ -6,19 +6,22 @@ import (
 )
 
 const (
-	// anti-captcha.com API endpoints (compatible with 2Captcha API format)
+	// anti-captcha.com API endpoint (same protocol as 2Captcha)
 	antiCaptchaBaseURL = "https://api.anti-captcha.com"
+
+	antiCaptchaName = "anticaptcha"
 )
 
 // AntiCaptchaSolver implements CaptchaSolver for anti-captcha.com API.
-// anti-captcha.com uses the same API format as 2Captcha, so we reuse
-// TwoCaptchaSolver with a different base URL.
+// anti-captcha.com speaks the same createTask/getTaskResult protocol as
+// 2Captcha, so it reuses TwoCaptchaSolver with its own name, base URL and
+// field names for the Cloudflare challenge-page parameters.
 type AntiCaptchaSolver struct {
 	*TwoCaptchaSolver
 }
 
 func init() {
-	Register("anticaptcha", func(opts ProviderOptions) CaptchaSolver {
+	Register(antiCaptchaName, func(opts ProviderOptions) CaptchaSolver {
 		return NewAntiCaptchaSolver(AntiCaptchaConfig(opts))
 	})
 }
@@ -32,16 +35,12 @@ type AntiCaptchaConfig struct {
 }
 
 // NewAntiCaptchaSolver creates a new anti-captcha.com solver instance.
+//
+// The provider name lives on the embedded solver. It used to be supplied by a
+// Name method on this wrapper, which the embedded solver's own methods never
+// saw, so every anti-captcha error and result said "2captcha".
 func NewAntiCaptchaSolver(cfg AntiCaptchaConfig) *AntiCaptchaSolver {
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = antiCaptchaBaseURL
-	}
 	return &AntiCaptchaSolver{
-		TwoCaptchaSolver: NewTwoCaptchaSolver(TwoCaptchaConfig(cfg)),
+		TwoCaptchaSolver: newCreateTaskSolver(antiCaptchaName, dialectAntiCaptcha, antiCaptchaBaseURL, TwoCaptchaConfig(cfg)),
 	}
-}
-
-// Name returns the provider name.
-func (s *AntiCaptchaSolver) Name() string {
-	return "anticaptcha"
 }

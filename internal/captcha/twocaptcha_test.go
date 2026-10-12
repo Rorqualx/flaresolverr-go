@@ -18,6 +18,7 @@ var createTaskProviders = []struct {
 	make func(cfg TwoCaptchaConfig) CaptchaSolver
 }{
 	{"2captcha", func(cfg TwoCaptchaConfig) CaptchaSolver { return NewTwoCaptchaSolver(cfg) }},
+	{"anticaptcha", func(cfg TwoCaptchaConfig) CaptchaSolver { return NewAntiCaptchaSolver(AntiCaptchaConfig(cfg)) }},
 }
 
 func fastConfig(baseURL string) TwoCaptchaConfig {
@@ -184,6 +185,15 @@ func TestCreateTaskProviders_TurnstileTaskFields(t *testing.T) {
 				"action": "managed", "data": "cdata-value", "pagedata": "pagedata-value", "userAgent": "Mozilla/5.0 page",
 			},
 			absent: []string{"cData", "chlPageData"},
+		},
+		{
+			provider: "anticaptcha",
+			want: map[string]string{
+				"type": "TurnstileTaskProxyless", "websiteURL": req.PageURL, "websiteKey": req.SiteKey,
+				"action": "managed", "cData": "cdata-value", "chlPageData": "pagedata-value",
+			},
+			// anti-captcha rejects tasks that bring their own User-Agent.
+			absent: []string{"data", "pagedata", "userAgent"},
 		},
 	}
 	for _, tt := range tests {
