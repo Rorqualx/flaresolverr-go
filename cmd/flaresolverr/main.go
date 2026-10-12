@@ -21,6 +21,7 @@ import (
 	"github.com/Rorqualx/flaresolverr-go/internal/dashboard"
 	"github.com/Rorqualx/flaresolverr-go/internal/handlers"
 	"github.com/Rorqualx/flaresolverr-go/internal/middleware"
+	"github.com/Rorqualx/flaresolverr-go/internal/security"
 	"github.com/Rorqualx/flaresolverr-go/internal/selectors"
 	"github.com/Rorqualx/flaresolverr-go/internal/session"
 	"github.com/Rorqualx/flaresolverr-go/internal/solver"
@@ -45,6 +46,12 @@ func main() {
 
 	// Validate configuration (Bug 12: config bounds validation)
 	cfg.Validate()
+
+	// The operator's own proxy is trusted configuration: check it once here
+	// (before any browser is started) instead of on every request.
+	if err := security.ValidateOperatorProxyURL(cfg.ProxyURL); err != nil {
+		log.Fatal().Err(err).Msg("PROXY_URL is not usable")
+	}
 
 	// Print banner
 	printBanner()
@@ -111,6 +118,7 @@ func main() {
 	// 4. API key authentication (if enabled)
 	// 5. Security headers
 	// 6. CORS (handles preflight)
+	// Host/Origin guard sits between logging and rate limiting (see below).
 
 	finalHandler = middleware.CORS(middleware.CORSConfig{
 		AllowedOrigins: cfg.CORSAllowedOrigins,
@@ -133,9 +141,19 @@ func main() {
 			Int("requests_per_minute", cfg.RateLimitRPM).
 			Bool("trust_proxy", cfg.TrustProxy).
 			Msg("Rate limiting enabled")
-		rateLimiter = middleware.NewRateLimitMiddleware(cfg.RateLimitRPM, cfg.TrustProxy)
+		rateLimiter = middleware.NewRateLimitMiddleware(cfg.RateLimitRPM, middleware.ProxyTrust{
+			Enabled: cfg.TrustProxy,
+			Proxies: cfg.TrustedProxies,
+		})
 		finalHandler = rateLimiter.Handler()(finalHandler)
 	}
+
+	// Host and Origin checks run before rate limiting and authentication: a
+	// request a web page tricked a browser into sending is refused outright.
+	finalHandler = middleware.HostGuard(middleware.HostGuardConfig{
+		AllowedHosts:   cfg.AllowedHosts,
+		AllowedOrigins: cfg.CORSAllowedOrigins,
+	})(finalHandler)
 
 	finalHandler = middleware.Logging(finalHandler)
 	if dash != nil {
