@@ -3,6 +3,7 @@ package types
 import (
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -57,7 +58,7 @@ type Request struct {
 	KeepaliveTTL       int                `json:"keepaliveTtl,omitempty"`       // New TTL in minutes for sessions.keepalive (0 = just touch)
 	CookieExtractDelay int                `json:"cookieExtractDelay,omitempty"` // Seconds to wait before extracting cookies (0-30)
 	BrowserFlags       *BrowserFlags      `json:"browserFlags,omitempty"`       // Per-session Chrome flag overrides (sessions.create only)
-	Fingerprint        *FingerprintConfig `json:"fingerprint,omitempty"`        // Per-request browser fingerprint customization
+	Fingerprint        *FingerprintConfig `json:"fingerprint,omitempty"`        // Only overrides.timezone is honored; see FingerprintConfig
 }
 
 // Validate validates the request and returns an error if invalid.
@@ -427,11 +428,67 @@ func (f *BrowserFlags) Validate() error {
 	return nil
 }
 
-// FingerprintConfig specifies per-session browser fingerprint customization.
+// fingerprintTimezoneKey is the one fingerprint override that is honored.
+const fingerprintTimezoneKey = "timezone"
+
+// maxIgnoredFingerprintOptions bounds the list IgnoredOptions returns, so a
+// request with a very large overrides object cannot produce a very large log
+// line.
+const maxIgnoredFingerprintOptions = 10
+
+// FingerprintConfig is the request's "fingerprint" object.
+//
+// Fingerprint profiles were removed: they never took effect on stateless
+// requests, and on sessions they were applied by a script that is no longer
+// used for request pages. The object is still accepted, so existing clients
+// keep working, but only Overrides["timezone"] is honored. Profile,
+// DisablePatches and every other override are ignored; IgnoredOptions names
+// them so the caller can be told.
 type FingerprintConfig struct {
-	Profile        string         `json:"profile,omitempty"`        // Builtin profile name: "default", "desktop-chrome-windows", "desktop-chrome-mac", "minimal"
-	Overrides      map[string]any `json:"overrides,omitempty"`      // Dimension overrides (timezone, locale, screenWidth, etc.)
-	DisablePatches []string       `json:"disablePatches,omitempty"` // Stealth patches to skip
+	Profile        string         `json:"profile,omitempty"`        // Ignored
+	Overrides      map[string]any `json:"overrides,omitempty"`      // Only "timezone" (an IANA timezone ID) is honored
+	DisablePatches []string       `json:"disablePatches,omitempty"` // Ignored
+}
+
+// Timezone returns the requested timezone override, or "" when there is none.
+// It is safe to call on a nil config.
+func (f *FingerprintConfig) Timezone() string {
+	if f == nil {
+		return ""
+	}
+	tz, ok := f.Overrides[fingerprintTimezoneKey].(string)
+	if !ok {
+		return ""
+	}
+	return tz
+}
+
+// IgnoredOptions returns the names of the supplied options that have no
+// effect, sorted, and at most maxIgnoredFingerprintOptions of them. It is
+// safe to call on a nil config.
+func (f *FingerprintConfig) IgnoredOptions() []string {
+	if f == nil {
+		return nil
+	}
+	var ignored []string
+	if f.Profile != "" {
+		ignored = append(ignored, "profile")
+	}
+	if len(f.DisablePatches) > 0 {
+		ignored = append(ignored, "disablePatches")
+	}
+	overrides := make([]string, 0, len(f.Overrides))
+	for key := range f.Overrides {
+		if key != fingerprintTimezoneKey {
+			overrides = append(overrides, "overrides."+key)
+		}
+	}
+	sort.Strings(overrides)
+	ignored = append(ignored, overrides...)
+	if len(ignored) > maxIgnoredFingerprintOptions {
+		ignored = ignored[:maxIgnoredFingerprintOptions]
+	}
+	return ignored
 }
 
 // CaptchaSolverValidator is set by the captcha package to validate provider names

@@ -71,6 +71,14 @@ type Session struct {
 	// Empty means no per-session override; callers may apply a global default instead.
 	Timezone string
 
+	// Proxy is the proxy given to sessions.create, nil when the session uses
+	// the default egress. It is fixed for the session's lifetime.
+	Proxy *types.Proxy
+
+	// Language is the locale given to this session's dedicated browser
+	// (browserFlags.language). Empty means the server default.
+	Language string
+
 	// host is set for sessions that live in an isolated browser context on the
 	// shared session browser. Browser is then a handle scoped to that context.
 	host           *sessionHost
@@ -208,9 +216,11 @@ func (m *Manager) CheckAvailable(id string) error {
 // without the cost of a browser process, and without taking a browser out of
 // the request pool for the session's lifetime.
 //
-// proxyServer, if non-empty, routes the session's traffic through that proxy;
+// proxy, if non-nil, routes the session's traffic through that proxy;
 // otherwise the session browser's default (the configured PROXY_URL) applies.
-func (m *Manager) CreateIsolated(ctx context.Context, id string, ttl time.Duration, proxyServer string) (*Session, error) {
+// With the egress guard enabled the context is pointed at a guard listener
+// either way.
+func (m *Manager) CreateIsolated(ctx context.Context, id string, ttl time.Duration, proxy *types.Proxy) (*Session, error) {
 	if m.pool == nil {
 		return nil, errors.New("session manager has no browser pool")
 	}
@@ -223,7 +233,10 @@ func (m *Manager) CreateIsolated(ctx context.Context, id string, ttl time.Durati
 		return nil, err
 	}
 
-	contextBrowser, dispose, err := browser.NewIsolatedContext(host.browser, proxyServer)
+	if proxy != nil && proxy.URL == "" {
+		proxy = nil
+	}
+	contextBrowser, dispose, err := m.pool.NewEgressContext(host.browser, proxy)
 	if err != nil {
 		m.releaseHost(host)
 		return nil, err
@@ -232,6 +245,7 @@ func (m *Manager) CreateIsolated(ctx context.Context, id string, ttl time.Durati
 	session, err := m.Create(id, contextBrowser, ttl, func(s *Session) {
 		s.host = host
 		s.disposeContext = dispose
+		s.Proxy = proxy
 	})
 	if err != nil {
 		dispose()

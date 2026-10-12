@@ -299,7 +299,7 @@ func TestSetUserAgent_ClientHintsMatch(t *testing.T) {
 
 	// Set a custom user agent
 	testUA := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-	if err := browser.SetUserAgent(page, testUA); err != nil {
+	if err := browser.SetUserAgent(page, testUA, ""); err != nil {
 		t.Fatalf("SetUserAgent failed: %v", err)
 	}
 
@@ -777,6 +777,11 @@ func TestApplyStealthToPage_TimezoneConsistent(t *testing.T) {
 		t.Fatalf("ApplyStealthToPage failed: %v", err)
 	}
 
+	// The timezone is a CDP override; the stealth script does not patch it.
+	if err := browser.ApplyTimezoneOverride(page, "America/New_York"); err != nil {
+		t.Fatalf("ApplyTimezoneOverride failed: %v", err)
+	}
+
 	// Navigate to a real page
 	server := startTestServer(t)
 	if err := page.Navigate(server.URL + "/html"); err != nil {
@@ -813,15 +818,15 @@ func TestApplyStealthToPage_TimezoneConsistent(t *testing.T) {
 
 	obj := result.Value.Map()
 
-	// Check offset is 300 (America/New_York = UTC-5 = 300 minutes)
+	// America/New_York is UTC-5 (300 minutes) or UTC-4 (240) in daylight time
 	offset := obj["offset"].Int()
-	if offset != 300 {
-		t.Errorf("getTimezoneOffset() should return 300 (EST), got %d", offset)
+	if offset != 300 && offset != 240 {
+		t.Errorf("getTimezoneOffset() should return 300 or 240 for America/New_York, got %d", offset)
 	}
 
-	// Check Intl timezone if available
+	// Date and Intl must agree on the zone
 	intlTimezone := obj["intlTimezone"].Str()
-	if intlTimezone != "" && intlTimezone != "America/New_York" {
+	if intlTimezone != "America/New_York" {
 		t.Errorf("Intl.DateTimeFormat timezone should be 'America/New_York', got %q", intlTimezone)
 	}
 

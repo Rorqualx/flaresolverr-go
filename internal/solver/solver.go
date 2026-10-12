@@ -21,7 +21,6 @@ import (
 	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/go-rod/stealth"
 	"github.com/rs/zerolog/log"
 	"github.com/ysmood/gson"
 
@@ -100,8 +99,13 @@ type SolveOptions struct {
 	// CookieExtractDelay is the number of seconds to wait before extracting cookies.
 	// This allows late-set JS cookies to be captured.
 	CookieExtractDelay int
-	// Fingerprint specifies per-request browser fingerprint customization.
+	// Fingerprint is the request's fingerprint object. Only its timezone
+	// override is honored; see types.FingerprintConfig.
 	Fingerprint *types.FingerprintConfig
+	// Language is the locale (e.g. "fr_FR" or "fr-FR") behind the page's
+	// Accept-Language header and navigator.languages. Empty means en-US.
+	Language string
+
 	// DefaultTimezone is the global timezone fallback (from TZ env var). Applied
 	// per page via CDP Emulation.setTimezoneOverride when no per-request
 	// Fingerprint.Overrides["timezone"] takes priority.
@@ -160,10 +164,8 @@ func resolveTimezone(opts *SolveOptions) string {
 	if opts == nil {
 		return ""
 	}
-	if opts.Fingerprint != nil && opts.Fingerprint.Overrides != nil {
-		if v, ok := opts.Fingerprint.Overrides["timezone"].(string); ok && v != "" {
-			return v
-		}
+	if tz := opts.Fingerprint.Timezone(); tz != "" {
+		return tz
 	}
 	return opts.DefaultTimezone
 }
@@ -282,11 +284,22 @@ func safeEvalResultString(result *proto.RuntimeEvaluateResult) string {
 	return result.Result.Value.Str()
 }
 
+// errProxyCredentials is reported when the egress guard saw the upstream
+// proxy refuse the credentials during a request.
+var errProxyCredentials = errors.New("the proxy rejected the supplied credentials")
+
+// guardRefusalStatus is the HTTP status the egress guard answers with when it
+// cannot reach a destination through the upstream proxy.
+const guardRefusalStatus = 502
+
 // Fix #13: setupProxyAuth sets up proxy authentication for a page if needed.
 // Returns a cleanup function and error. The cleanup function is safe to call
 // even if it's nil (will be a no-op). Errors are now propagated to caller.
-func setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) (func(), error) {
-	if proxy == nil || proxy.URL == "" {
+//
+// With the egress guard enabled it does nothing: the guard authenticates to
+// the upstream proxy itself, so Chrome never sees a proxy challenge.
+func (s *Solver) setupProxyAuth(ctx context.Context, page *rod.Page, proxy *types.Proxy) (func(), error) {
+	if proxy == nil || proxy.URL == "" || s.pool.EgressGuardEnabled() {
 		return func() {}, nil
 	}
 
@@ -456,7 +469,38 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	var browserInstance *rod.Browser
 	var usePooledBrowser bool
 
-	if opts.Proxy != nil && opts.Proxy.URL != "" {
+	// With the egress guard a per-request proxy does not need a browser of
+	// its own: the request's context on a pooled browser is pointed at the
+	// guard listener for that proxy.
+	var contextProxy *types.Proxy
+	guarded := s.pool.EgressGuardEnabled()
+	if guarded && opts.Proxy != nil && opts.Proxy.URL != "" {
+		contextProxy = opts.Proxy
+	}
+	if guarded {
+		// Chrome only reports that its tunnel failed. The guard knows when
+		// that was the upstream proxy refusing the credentials, so say so.
+		route, routeErr := s.pool.GuardRoute(contextProxy)
+		if routeErr != nil {
+			return nil, fmt.Errorf("failed to route the request: %w", routeErr)
+		}
+		defer route.Release()
+		authFailures := route.UpstreamAuthFailures()
+		defer func() {
+			if route.UpstreamAuthFailures() == authFailures {
+				return
+			}
+			switch {
+			case err != nil:
+				err = fmt.Errorf("%w: %w", errProxyCredentials, err)
+			case result != nil && result.StatusCode == guardRefusalStatus:
+				// A plain-HTTP page: the guard answered in the target's place.
+				result, err = nil, errProxyCredentials
+			}
+		}()
+	}
+
+	if !guarded && opts.Proxy != nil && opts.Proxy.URL != "" {
 		// Per-request proxy: spawn dedicated browser with this proxy
 		// This browser is NOT pooled and will be closed after use
 		// Use redacted proxy URL in logs to prevent credential exposure
@@ -493,7 +537,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// reused across callers, and cookies with an expiry, localStorage and cache
 	// all outlive a page: without this, one caller's cf_clearance and site
 	// cookies were sent on, and returned to, the next caller's request.
-	requestBrowser, disposeContext, ctxErr := browser.NewIsolatedContext(browserInstance, "")
+	requestBrowser, disposeContext, ctxErr := s.pool.NewEgressContext(browserInstance, contextProxy)
 	if ctxErr != nil {
 		return nil, fmt.Errorf("failed to isolate request: %w", ctxErr)
 	}
@@ -505,26 +549,14 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	var page *rod.Page
 
-	// For POST requests, we need a special approach because stealth scripts
-	// conflict with form creation JavaScript. We use a regular page and
-	// apply stealth manually after the POST navigation.
+	// POST request path. The page is prepared exactly as for a GET; only the
+	// navigation differs (a submitted form or a fetch instead of Navigate).
 	if opts.IsPost && opts.PostData != "" {
-		// Fix 2.10: Use stealth.Page for POST requests too - apply stealth before navigation
-		// The previous concern about conflicts was resolved by proper ordering
-		page, err = stealth.Page(requestBrowser)
+		page, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create stealth page for POST: %w", err)
+			return nil, fmt.Errorf("failed to create page for POST: %w", err)
 		}
 		defer page.Close()
-
-		// Layer our custom stealth over go-rod/stealth. go-rod/stealth alone
-		// reports a macOS WebGL renderer on Linux and leaves screen at the
-		// headless 800x600 default — both bot tells. ApplyStealthToPage fixes the
-		// WebGL/OS consistency and screen geometry (registered after go-rod/stealth
-		// so it wins). See docs/INVESTIGATION-fingerprint-gate2.md.
-		if err := browser.ApplyGate2Corrections(page); err != nil {
-			log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (POST)")
-		}
 
 		// Install the turnstile.render interceptor before navigation so managed
 		// challenges expose their sitekey/action/cData/chlPageData to the external
@@ -532,24 +564,6 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		if s.externalSolver(opts).Active() {
 			captcha.InstallTurnstileInterceptor(solveCtx, page)
 			defer captcha.RemoveTurnstileInterceptor(page)
-		}
-
-		if tz := resolveTimezone(opts); tz != "" {
-			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
-				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
-			}
-		}
-
-		// Set user agent — per-request override takes priority
-		if ua := s.effectiveUserAgent(opts); ua != "" {
-			if err := browser.SetUserAgent(page, ua); err != nil {
-				log.Warn().Err(err).Msg("Failed to set user agent")
-			}
-		}
-
-		// Set viewport
-		if err := browser.SetViewport(page, 1920, 1080); err != nil {
-			log.Warn().Err(err).Msg("Failed to set viewport")
 		}
 
 		// Set up media blocking if requested
@@ -560,7 +574,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		}
 
 		// Fix #13: Use helper for proxy setup to reduce duplication
-		proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
+		proxyCleanup, err := s.setupProxyAuth(solveCtx, page, opts.Proxy)
 		if err != nil {
 			return nil, fmt.Errorf("proxy authentication setup failed: %w", err)
 		}
@@ -613,21 +627,11 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// GET request path
-	// For GET requests, use stealth page
-	page, err = stealth.Page(requestBrowser)
+	page, err = s.newPreparedPage(solveCtx, requestBrowser, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stealth page: %w", err)
+		return nil, fmt.Errorf("failed to create page: %w", err)
 	}
 	defer page.Close()
-
-	// Layer our custom stealth over go-rod/stealth. go-rod/stealth alone reports a
-	// macOS WebGL renderer on Linux and leaves screen at the headless 800x600
-	// default — both bot tells. ApplyStealthToPage fixes WebGL/OS consistency and
-	// screen geometry (registered after go-rod/stealth so it wins).
-	// See docs/INVESTIGATION-fingerprint-gate2.md.
-	if err := browser.ApplyGate2Corrections(page); err != nil {
-		log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (GET)")
-	}
 
 	// Install the turnstile.render interceptor before navigation so managed
 	// challenges expose their sitekey/action/cData/chlPageData to the external
@@ -635,28 +639,6 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	if s.externalSolver(opts).Active() {
 		captcha.InstallTurnstileInterceptor(solveCtx, page)
 		defer captcha.RemoveTurnstileInterceptor(page)
-	}
-
-	if tz := resolveTimezone(opts); tz != "" {
-		if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
-			log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
-		}
-	}
-
-	// Set user agent — per-request override takes priority
-	ua := s.effectiveUserAgent(opts)
-	if opts.UserAgent != "" {
-		log.Debug().Str("user_agent", ua).Msg("Using per-request User-Agent override")
-	}
-	if ua != "" {
-		if err := browser.SetUserAgent(page, ua); err != nil {
-			log.Warn().Err(err).Msg("Failed to set user agent")
-		}
-	}
-
-	// Set viewport
-	if err := browser.SetViewport(page, 1920, 1080); err != nil {
-		log.Warn().Err(err).Msg("Failed to set viewport")
 	}
 
 	// Set up media blocking if requested
@@ -667,7 +649,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	// Fix #13: Use helper for proxy setup to reduce duplication
-	proxyCleanup, err := setupProxyAuth(solveCtx, page, opts.Proxy)
+	proxyCleanup, err := s.setupProxyAuth(solveCtx, page, opts.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("proxy authentication setup failed: %w", err)
 	}
@@ -760,7 +742,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 			StatusCode:      fetchData.Status,
 			HTML:            fetchData.Body,
 			URL:             opts.URL,
-			UserAgent:       ua,
+			UserAgent:       s.effectiveUserAgent(opts),
 			ResponseHeaders: fetchData.Headers,
 		}, nil
 	}
@@ -804,7 +786,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 				StatusCode: 200,
 				HTML:       rawHTML,
 				URL:        opts.URL,
-				UserAgent:  ua,
+				UserAgent:  s.effectiveUserAgent(opts),
 			}, nil
 		}
 	}
@@ -1045,10 +1027,11 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	// The bypass launches Chrome outside the pool, so it must be told about the
 	// request's proxy itself. Without this the target saw the server's real IP
 	// and the clearance was cached under the proxy's egress, where it is useless.
-	proxyServer, proxyErr := bypassProxyServer(opts, s.pool.DefaultProxyURL())
+	proxyArgs, releaseProxy, proxyErr := s.bypassProxyArgs(opts)
 	if proxyErr != nil {
 		return nil, proxyErr
 	}
+	defer releaseProxy()
 
 	// Create a temporary user-data-dir for cookie persistence between phases.
 	// Removed on every return path, including cancellation during Phase 1.
@@ -1091,9 +1074,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		"--load-extension=" + stealthExt.Dir(), // Stealth patches without CDP
 	}
 	phase1Args = append(phase1Args, sandboxArgs(s.pool.SandboxEnabled())...)
-	if proxyServer != "" {
-		phase1Args = append(phase1Args, "--proxy-server="+proxyServer)
-	}
+	phase1Args = append(phase1Args, proxyArgs...)
 	phase1Args = append(phase1Args, opts.URL)
 	log.Debug().
 		Str("browser", browserPath).
@@ -1157,9 +1138,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 		"--window-size=1920,1080",
 	}
 	phase2Args = append(phase2Args, sandboxArgs(s.pool.SandboxEnabled())...)
-	if proxyServer != "" {
-		phase2Args = append(phase2Args, "--proxy-server="+proxyServer)
-	}
+	phase2Args = append(phase2Args, proxyArgs...)
 	phase2Args = append(phase2Args, opts.URL)
 	cmd2 := exec.Command(browserPath, phase2Args...) //nolint:gosec // browserPath is validated by findBrowserBinary
 	cmd2.Stderr = nil
@@ -1591,38 +1570,46 @@ func (s *Solver) setCustomHeaders(page *rod.Page, headers map[string]string) err
 	return nil
 }
 
-// Challenge titles that indicate a challenge is in progress
-var challengeTitles = []string{
-	"just a moment",
-	"checking your browser",
-	"ddos-guard",
-	"please wait",
-	"attention required",
+// titleHasChallenge reports whether a page title contains one of the
+// challenge titles. The comparison ignores the title's case; the patterns are
+// lowercase.
+func titleHasChallenge(title string, challengeTitles []string) bool {
+	titleLower := strings.ToLower(title)
+	for _, pattern := range challengeTitles {
+		if strings.Contains(titleLower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
-// Challenge selectors that indicate a challenge is in progress
-var challengeSelectors = []string{
-	"#cf-challenge-running",
-	".ray_id",
-	"#turnstile-wrapper",
-	".cf-turnstile", // Turnstile widget class (used by nowsecure.nl and others)
-	"#cf-wrapper",
-	"#challenge-running",
-	"#challenge-stage",
-	"#cf-spinner-please-wait",
-	"#cf-spinner-redirecting",
-	"iframe[src*='challenges.cloudflare.com']", // Turnstile embedded in CF interstitial iframe
+// selectorListed reports whether list contains exactly this selector.
+func selectorListed(list []string, selector string) bool {
+	for _, item := range list {
+		if item == selector {
+			return true
+		}
+	}
+	return false
 }
 
-// turnstileTriggerSelectors are selectors that should trigger Turnstile solving.
-// This is broader than just .cf-turnstile — it includes CF interstitial page indicators
-// where Turnstile is embedded inside iframes.
-var turnstileTriggerSelectors = map[string]bool{
-	"#turnstile-wrapper":                       true,
-	".cf-turnstile":                            true,
-	"iframe[src*='challenges.cloudflare.com']": true,
-	"#cf-challenge-running":                    true,
-	"#challenge-stage":                         true,
+// firstString returns the first entry of list, or "" when it is empty.
+func firstString(list []string) string {
+	if len(list) == 0 {
+		return ""
+	}
+	return list[0]
+}
+
+// hasAnySelector reports whether any of the selectors matches an element on
+// the page. It does not wait for one to appear.
+func hasAnySelector(page *rod.Page, selectorList []string) bool {
+	for _, selector := range selectorList {
+		if has, _, _ := page.Has(selector); has {
+			return true
+		}
+	}
+	return false
 }
 
 // solveParams carries the per-request settings the solve loop and the result
@@ -1755,14 +1742,7 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) 
 		}
 
 		// Check if title indicates a challenge
-		titleLower := strings.ToLower(title)
-		challengeInTitle := false
-		for _, t := range challengeTitles {
-			if strings.Contains(titleLower, t) {
-				challengeInTitle = true
-				break
-			}
-		}
+		challengeInTitle := titleHasChallenge(title, s.getSelectors().ChallengeTitles)
 
 		// Check if any challenge selector is present
 		challengeSelector := s.findChallengeSelector(page)
@@ -1820,7 +1800,7 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) 
 		// If Turnstile is present, try to solve it.
 		// Trigger on known Turnstile selectors OR when HTML analysis detects Turnstile
 		// (e.g., embedded in CF interstitial iframe where .cf-turnstile isn't on the main page).
-		shouldSolveTurnstile := turnstileTriggerSelectors[challengeSelector]
+		shouldSolveTurnstile := selectorListed(s.getSelectors().TurnstileTriggerSelectors, challengeSelector)
 		if !shouldSolveTurnstile && html != "" {
 			htmlChallenge := s.detectChallenge(html)
 			shouldSolveTurnstile = htmlChallenge == ChallengeTurnstile
@@ -1908,6 +1888,8 @@ func (s *Solver) getPageTitle(page *rod.Page) (string, error) {
 // Uses shared timeout budget across all selector checks to prevent stacked timeouts.
 // Fix: Share timeout budget across selectors instead of giving each one a full 2 seconds.
 func (s *Solver) findChallengeSelector(page *rod.Page) string {
+	challengeSelectors := s.getSelectors().ChallengeSelectors
+
 	// Calculate timeout budget: use page's context deadline if available, otherwise default
 	ctx := page.GetContext()
 	totalTimeout := 5 * time.Second // Default total budget for all selectors
@@ -2114,16 +2096,11 @@ func (s *Solver) solveTurnstileWait(ctx context.Context, page *rod.Page) error {
 		}
 
 		// Check if Turnstile widget disappeared (page redirected after success)
-		has, _, _ := page.Has(".cf-turnstile")
-		if !has {
-			// Also check for #turnstile-wrapper
-			has2, _, _ := page.Has("#turnstile-wrapper")
-			if !has2 {
-				log.Debug().
-					Int("iteration", i+1).
-					Msg("Turnstile widget disappeared during wait")
-				return nil
-			}
+		if !hasAnySelector(page, s.getSelectors().TurnstileWidgetSelectors) {
+			log.Debug().
+				Int("iteration", i+1).
+				Msg("Turnstile widget disappeared during wait")
+			return nil
 		}
 
 		log.Debug().
@@ -2263,11 +2240,18 @@ func (s *Solver) isTurnstileSolved(page *rod.Page) bool {
 		return true
 	}
 
+	// The widget whose state is inspected is the first widget selector. It is
+	// passed to the script as a JSON string, so no selector can break out of it.
+	widgetSelector, err := json.Marshal(firstString(s.getSelectors().TurnstileWidgetSelectors))
+	if err != nil {
+		return false
+	}
+
 	// Check for success indicators via JavaScript
 	result, err := proto.RuntimeEvaluate{
-		Expression: `(function() {
+		Expression: `(function(widgetSelector) {
 			// Check if Turnstile widget still exists
-			var widget = document.querySelector('.cf-turnstile');
+			var widget = widgetSelector ? document.querySelector(widgetSelector) : null;
 			if (!widget) {
 				// Widget disappeared - check if page actually changed
 				return document.title !== 'Just a moment...' && !document.querySelector('#challenge-running');
@@ -2306,7 +2290,7 @@ func (s *Solver) isTurnstileSolved(page *rod.Page) bool {
 			}
 
 			return false;
-		})()`,
+		})(` + string(widgetSelector) + `)`,
 		ReturnByValue: true,
 	}.Call(page)
 
@@ -2329,7 +2313,7 @@ func (s *Solver) solveTurnstileShadow(ctx context.Context, page *rod.Page) error
 	log.Debug().Msg("Trying CDP-native shadow DOM traversal for Turnstile")
 
 	// Use shorter timeout for shadow traverser
-	traverser := NewShadowRootTraverser(page).WithTimeout(2 * time.Second)
+	traverser := NewShadowRootTraverser(page, s.getSelectors()).WithTimeout(2 * time.Second)
 
 	// Try to find and click the checkbox via shadow DOM
 	if err := traverser.ClickCheckbox(ctx); err != nil {
@@ -2357,7 +2341,7 @@ func (s *Solver) solveTurnstilePositional(ctx context.Context, page *rod.Page) e
 	log.Debug().Msg("Trying positional click for Turnstile with humanized movement")
 
 	// OPTIMIZATION: Use shorter timeout for traverser
-	traverser := NewShadowRootTraverser(page).WithTimeout(1 * time.Second)
+	traverser := NewShadowRootTraverser(page, s.getSelectors()).WithTimeout(1 * time.Second)
 
 	// Get the Turnstile container bounds
 	bounds, err := traverser.GetTurnstileContainerBounds(ctx)
@@ -2458,16 +2442,9 @@ func (s *Solver) solveTurnstileWidget(ctx context.Context, page *rod.Page) error
 	mouse := humanize.NewMouse(page)
 	scroller := humanize.NewScroller(page)
 
-	// Try clicking on .cf-turnstile widget or its checkbox
-	// Prioritized selectors - iframe first as it's more likely to contain the checkbox
-	widgetSelectors := []string{
-		".cf-turnstile iframe",
-		"[data-sitekey] iframe",
-		".cf-turnstile",
-		"[data-sitekey]",
-	}
-
-	for _, selector := range widgetSelectors {
+	// Try clicking on the widget or its checkbox. The selectors are in order
+	// of preference - iframe first as it's more likely to contain the checkbox
+	for _, selector := range s.getSelectors().TurnstileClickSelectors {
 		// Check context at each iteration
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -3208,6 +3185,40 @@ func (s *Solver) captureScreenshot(page *rod.Page) ([]byte, error) {
 	return screenshot, nil
 }
 
+// pageSetup returns the page setup for a request. Every request path uses it,
+// so stateless and session pages present the same browser.
+func (s *Solver) pageSetup(opts *SolveOptions) browser.PageSetup {
+	if opts.UserAgent != "" {
+		log.Debug().Str("user_agent", opts.UserAgent).Msg("Using per-request User-Agent override")
+	}
+	return browser.PageSetup{
+		UserAgent:       s.effectiveUserAgent(opts),
+		AcceptLanguages: browser.AcceptLanguages(opts.Language),
+		Timezone:        resolveTimezone(opts),
+	}
+}
+
+// newPreparedPage opens a page in the given browser context and applies the
+// shared page setup. The caller owns the returned page and must close it.
+//
+// Opening the page is bounded by ctx: a browser that has stopped answering
+// fails the request at its deadline instead of holding it forever. The page
+// itself is returned on the browser's own context, so closing it still works
+// after ctx has ended.
+func (s *Solver) newPreparedPage(ctx context.Context, b *rod.Browser, opts *SolveOptions) (*rod.Page, error) {
+	page, err := b.Context(ctx).Page(proto.TargetCreateTarget{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open page: %w", err)
+	}
+	page = page.Context(b.GetContext())
+	if err := browser.PreparePage(page, s.pageSetup(opts)); err != nil {
+		// Ignore error: the setup failure is the one worth reporting
+		_ = page.Close()
+		return nil, err
+	}
+	return page, nil
+}
+
 // SolveWithPage solves a challenge using an existing page (for session support).
 func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveOptions) (*Result, error) {
 	log.Info().
@@ -3216,33 +3227,23 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve with existing page")
 
-	// Apply stealth patches only to fresh/blank pages
-	// On session reuse, the page already has content and stealth was already applied
-	// Trying to re-apply stealth to a loaded page causes errors due to stale JS context
+	// Prepare only a fresh, blank page. A reused session page was prepared on
+	// its first request, and the registered scripts and CDP overrides persist
+	// for the life of the page.
 	pageInfo, _ := page.Info()
 	if pageInfo == nil || pageInfo.URL == "" || pageInfo.URL == "about:blank" {
-		if opts.Fingerprint != nil {
-			profile := browser.ResolveProfile(opts.Fingerprint.Profile, opts.Fingerprint.Overrides, opts.Fingerprint.DisablePatches)
-			if err := browser.ApplyStealthToPageWithProfile(page, profile); err != nil {
-				log.Warn().Err(err).Msg("Failed to apply stealth patches with fingerprint profile")
-			}
-		} else {
-			if err := browser.ApplyStealthToPage(page); err != nil {
-				log.Warn().Err(err).Msg("Failed to apply stealth patches")
-			}
+		if err := browser.PreparePage(page, s.pageSetup(opts)); err != nil {
+			return nil, fmt.Errorf("failed to prepare session page: %w", err)
 		}
-		// Screen/window geometry coherence (the full stealthScript already sets a
-		// Linux-correct WebGL renderer, but not screen geometry).
-		if err := browser.ApplyGate2Corrections(page); err != nil {
-			log.Warn().Err(err).Msg("Failed to apply gate-2 fingerprint corrections (session)")
-		}
-		if tz := resolveTimezone(opts); tz != "" {
+	} else {
+		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping page setup on reused session page")
+		// A timezone asked for by this request still applies: it is a CDP
+		// override, which can change at any point in a page's life.
+		if tz := opts.Fingerprint.Timezone(); tz != "" {
 			if err := browser.ApplyTimezoneOverride(page, tz); err != nil {
 				log.Warn().Err(err).Str("timezone", tz).Msg("Failed to apply timezone override")
 			}
 		}
-	} else {
-		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping stealth on reused session page")
 	}
 
 	// Set up media blocking if requested
@@ -3320,6 +3321,39 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 	s.applyPostSolveProcessing(solveCtx, page, opts, result)
 
 	return result, nil
+}
+
+// bypassProxyArgs returns the proxy flags both Chrome launches of the
+// reconnect bypass must carry, and a function that releases whatever they
+// refer to once the bypass is over.
+//
+// With the egress guard the bypass is pointed at the guard listener for the
+// request's egress, loopback included, like every other browser. Without it
+// the flags are what bypassProxyServer allows.
+func (s *Solver) bypassProxyArgs(opts *SolveOptions) (args []string, release func(), err error) {
+	if s.pool.EgressGuardEnabled() {
+		var proxy *types.Proxy
+		if opts.Proxy != nil && opts.Proxy.URL != "" {
+			proxy = opts.Proxy
+		}
+		route, routeErr := s.pool.GuardRoute(proxy)
+		if routeErr != nil {
+			return nil, nil, fmt.Errorf("reconnect bypass: %w", routeErr)
+		}
+		return []string{
+			"--proxy-server=" + route.ProxyServer,
+			"--proxy-bypass-list=" + route.BypassList,
+		}, route.Release, nil
+	}
+
+	proxyServer, err := bypassProxyServer(opts, s.pool.DefaultProxyURL())
+	if err != nil {
+		return nil, nil, err
+	}
+	if proxyServer == "" {
+		return nil, func() {}, nil
+	}
+	return []string{"--proxy-server=" + proxyServer}, func() {}, nil
 }
 
 // bypassProxyServer returns the --proxy-server value the reconnect bypass must

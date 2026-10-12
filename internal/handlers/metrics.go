@@ -30,6 +30,17 @@ func (h *Handler) handleMetrics(w http.ResponseWriter) {
 		writeGauge(&b, "flaresolverr_sessions_active", "Active browser sessions", float64(h.sessions.Count()))
 	}
 
+	// Egress guard metrics (only when EGRESS_GUARD is on)
+	if guard, ok := h.pool.EgressGuardStats(); ok {
+		writeGauge(&b, "flaresolverr_egress_guard_listeners", "Open egress guard listeners", float64(guard.Listeners))
+		writeGauge(&b, "flaresolverr_egress_guard_connections_active", "Browser connections open on the egress guard", float64(guard.Totals.Active))
+		writeCounter(&b, "flaresolverr_egress_guard_connections_total", "Browser connections accepted by the egress guard", float64(guard.Totals.Accepted))
+		writeCounter(&b, "flaresolverr_egress_guard_tunnels_total", "CONNECT tunnels established by the egress guard", float64(guard.Totals.Tunnels))
+		writeCounter(&b, "flaresolverr_egress_guard_requests_total", "Plain HTTP requests forwarded by the egress guard", float64(guard.Totals.Requests))
+		writeCounter(&b, "flaresolverr_egress_guard_blocked_total", "Destinations the egress guard refused as non-public", float64(guard.Totals.Blocked))
+		writeCounter(&b, "flaresolverr_egress_guard_failed_total", "Destinations the egress guard could not resolve or reach", float64(guard.Totals.Failed))
+	}
+
 	// Go runtime metrics
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)

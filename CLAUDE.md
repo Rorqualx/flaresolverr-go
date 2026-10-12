@@ -209,9 +209,12 @@ flaresolverr-go/
 │   ├── browser/                  # Browser lifecycle and page setup
 │   │   ├── pool.go               # Pool: launch, acquire/release, recycle, cleanup
 │   │   ├── context.go            # Isolated browser contexts (per request / session)
+│   │   ├── egress.go             # Routing browsers and contexts through the egress guard
 │   │   ├── stealth.go            # Stealth script, UA and viewport overrides
 │   │   ├── stealth_extension.go  # Stealth as a Chrome extension (reconnect bypass)
-│   │   ├── fingerprint.go        # Fingerprint profiles
+│   │   ├── page_setup.go         # The one page setup every request path uses
+│   │   ├── user_agent.go         # User agent override: platform, client hints, language
+│   │   ├── memory.go             # Container memory reading for MAX_MEMORY_MB
 │   │   ├── timezone.go           # Timezone override (CDP)
 │   │   ├── proxy.go              # Proxy authentication over CDP
 │   │   ├── proxy_extension.go    # Proxy authentication as an extension
@@ -236,6 +239,14 @@ flaresolverr-go/
 │   │   ├── collector.go          # Data aggregator
 │   │   ├── logreporter.go        # Periodic stats to the log
 │   │   └── model.go              # bubbletea Model/View
+│   │
+│   ├── guardproxy/               # Egress guard: in-process forward proxy (EGRESS_GUARD)
+│   │   ├── guardproxy.go         # Listener, CONNECT tunnels, limits
+│   │   ├── request.go            # Request-head and target parsing
+│   │   ├── plain.go              # Plain HTTP forwarding
+│   │   ├── dial.go               # Resolve once, validate, dial the literal
+│   │   ├── upstream.go           # Chained http/https/socks5 upstreams
+│   │   └── manager.go            # Per-upstream listeners, reference-counted
 │   │
 │   ├── handlers/                 # HTTP handlers
 │   │   ├── router.go             # Command routing
@@ -264,6 +275,7 @@ flaresolverr-go/
 │   │
 │   ├── security/                 # Input validation at the trust boundary
 │   │   ├── url_validator.go      # SSRF checks for target and proxy URLs
+│   │   ├── egress.go             # The same address rules, exported for the egress guard
 │   │   ├── headers.go            # Custom header validation
 │   │   ├── redact.go             # Secret redaction for logs
 │   │   └── session.go            # Session ID generation/validation
@@ -344,6 +356,8 @@ flaresolverr-go/
 | New browser launch flag | `internal/browser/pool.go` | solver |
 | New page setup or stealth patch | `internal/browser/` | solver |
 | New URL, header or proxy validation | `internal/security/` | handlers, solver |
+| New rule for where a browser may connect | `internal/security/` (the egress guard calls it) | guardproxy, solver |
+| New place a browser or browser context is created | route it via `Pool.GuardRoute` / `Pool.NewEgressContext` | a bare `--proxy-server` or `NewIsolatedContext` |
 | New detection or solving logic | `internal/solver/` | handlers |
 | New result extraction logic | `internal/solver/` | handlers |
 | New captcha provider | `internal/captcha/` (register in `registry.go`) | solver |
@@ -975,7 +989,7 @@ func (p *Pool) Acquire() *rod.Browser {
 | `types/` | 90% | Validation logic |
 | `config/` | 80% | Loading, defaults |
 | `browser/` | 70% | Pool acquire/release |
-| `sessions/` | 80% | Create/destroy, TTL |
+| `session/` | 80% | Create/destroy, TTL |
 | `solver/` | 70% | Detection, extraction |
 | `handlers/` | 80% | All endpoints |
 

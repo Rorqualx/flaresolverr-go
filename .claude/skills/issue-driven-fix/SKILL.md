@@ -77,7 +77,7 @@ go build ./... && go vet ./... && go test -short ./internal/<pkg>/...
 - Commit with a body explaining the measured finding + fix; end with:
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 - Push, **watch CI to green** (`gh run watch <id> --exit-status`), then merge (`--no-ff` to `main`), push `main`, delete the branch (local + remote).
-- For a release: bump CHANGELOG `[Unreleased]`→`[x.y.z]`, tag `vX.Y.Z` (semver: features→minor), push the tag, and watch the Release + Docker workflows. Verify the GitHub release assets and Docker tags exist.
+- For a release: bump CHANGELOG `[Unreleased]`→`[x.y.z]`, tag `vX.Y.Z` (semver: features→minor), push the tag, and watch the single Release workflow (never put two version tags on one commit). Verify the GitHub release assets and Docker tags exist.
 
 ## Phase 10 — Report on the issue
 - Post a structured comment: what was **ruled out** (with the data), what was **fixed** (with validation evidence), **honest scope** (what it does and doesn't do), and what residual remains.

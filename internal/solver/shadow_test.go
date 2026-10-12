@@ -173,7 +173,7 @@ func TestContainsTurnstilePattern(t *testing.T) {
 func TestNewShadowRootTraverser(t *testing.T) {
 	// Test that NewShadowRootTraverser creates a valid traverser
 	// Note: We can't test actual shadow DOM traversal without a real browser
-	traverser := NewShadowRootTraverser(nil)
+	traverser := NewShadowRootTraverser(nil, nil)
 	if traverser == nil {
 		t.Fatal("NewShadowRootTraverser returned nil")
 	}
@@ -183,7 +183,7 @@ func TestNewShadowRootTraverser(t *testing.T) {
 }
 
 func TestShadowRootTraverser_WithTimeout(t *testing.T) {
-	traverser := NewShadowRootTraverser(nil)
+	traverser := NewShadowRootTraverser(nil, nil)
 	customTimeout := 10 * time.Second
 
 	result := traverser.WithTimeout(customTimeout)

@@ -670,6 +670,14 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
 			return
 		}
+		// The egress guard chains to the proxy itself and cannot do so for
+		// every scheme Chrome accepts.
+		if h.pool.EgressGuardEnabled() {
+			if err := h.pool.CheckGuardProxy(req.Proxy); err != nil {
+				h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
+				return
+			}
+		}
 	}
 
 	// Validate proxy credentials size
@@ -894,6 +902,14 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		CookieExtractDelay: req.CookieExtractDelay,
 		Fingerprint:        req.Fingerprint,
 		DefaultTimezone:    h.config.BrowserTimezone, // TZ env fallback; per-request fingerprint override wins
+		Language:           h.config.BrowserLang,     // LANG env; a session's own language wins
+	}
+
+	// Fingerprint profiles were removed. Say so once, rather than let a client
+	// believe an option took effect.
+	if ignored := req.Fingerprint.IgnoredOptions(); len(ignored) > 0 {
+		log.Warn().Strs("ignored", ignored).
+			Msg("Ignoring fingerprint options: only fingerprint.overrides.timezone and the userAgent field are honored")
 	}
 
 	var result *solver.Result
@@ -916,9 +932,20 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 				Msg("Ignoring per-request proxy on a session request; the session uses the proxy given to sessions.create")
 		}
 
+		// With the egress guard the reconnect bypass routes through the
+		// guard listener for the session's own proxy, so it must be told
+		// which proxy that is.
+		if h.pool.EgressGuardEnabled() {
+			opts.Proxy = sess.Proxy
+		}
+
 		// Per-session timezone takes precedence over the global TZ default.
 		if sess.Timezone != "" {
 			opts.DefaultTimezone = sess.Timezone
+		}
+		// Likewise the language of a session's dedicated browser.
+		if sess.Language != "" {
+			opts.Language = sess.Language
 		}
 
 		// Acquire operation lock to prevent concurrent operations on the same session
@@ -999,13 +1026,21 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 
 	// Validate the session proxy up front: the same SSRF rules as request.get/post
 	var proxyURL string
+	var sessionProxy *types.Proxy // nil when the session uses the default egress
 	if req.Proxy != nil && req.Proxy.URL != "" {
 		if err := security.ValidateProxyURL(req.Proxy.URL, h.config.AllowLocalProxies); err != nil {
 			log.Warn().Err(err).Msg("Session proxy URL validation failed")
 			h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
 			return
 		}
+		if h.pool.EgressGuardEnabled() {
+			if err := h.pool.CheckGuardProxy(req.Proxy); err != nil {
+				h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
+				return
+			}
+		}
 		proxyURL = req.Proxy.URL
+		sessionProxy = req.Proxy
 	}
 
 	// Fail fast, before starting any browser, if the ID is taken or the
@@ -1036,7 +1071,7 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 			}
 		}
 
-		dedicated, err := h.pool.SpawnWithOptions(ctx, browser.LaunchOptions{
+		launchOptions := browser.LaunchOptions{
 			ProxyURL:   proxyURL,
 			WindowSize: req.BrowserFlags.WindowSize,
 			Language:   req.BrowserFlags.Language,
@@ -1044,7 +1079,12 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 			Headless:   req.BrowserFlags.Headless,
 			DisableGPU: req.BrowserFlags.DisableGPU,
 			ExtraArgs:  req.BrowserFlags.ExtraArgs,
-		})
+		}
+		if sessionProxy != nil {
+			launchOptions.ProxyUsername = sessionProxy.Username
+			launchOptions.ProxyPassword = sessionProxy.Password
+		}
+		dedicated, err := h.pool.SpawnWithOptions(ctx, launchOptions)
 		if err != nil {
 			h.writeError(w, fmt.Sprintf("Failed to spawn custom browser: %v", err), startTime)
 			return
@@ -1053,6 +1093,8 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		// Ownership of the browser transfers to the session only on success.
 		sess, err = h.sessions.Create(sessionID, dedicated, sessionTTL, func(s *session.Session) {
 			s.OwnsBrowser = true
+			s.Proxy = sessionProxy
+			s.Language = req.BrowserFlags.Language
 		})
 		if err != nil {
 			h.pool.CleanupBrowser(dedicated) // closes browser + removes user-data dir
@@ -1063,7 +1105,7 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 		// Default: an isolated browser context on the shared session browser.
 		// It does not take a browser out of the request pool.
 		var err error
-		sess, err = h.sessions.CreateIsolated(ctx, sessionID, sessionTTL, proxyURL)
+		sess, err = h.sessions.CreateIsolated(ctx, sessionID, sessionTTL, sessionProxy)
 		if err != nil {
 			h.writeSessionCreateError(w, err, startTime)
 			return
@@ -1071,8 +1113,9 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 	}
 
 	// A proxy that needs credentials is answered by a listener on the session
-	// page, which lives as long as the session.
-	if req.Proxy != nil && proxyURL != "" && req.Proxy.Username != "" {
+	// page, which lives as long as the session. The egress guard authenticates
+	// to the proxy itself, so nothing is installed on the page.
+	if sessionProxy != nil && sessionProxy.Username != "" && !h.pool.EgressGuardEnabled() {
 		h.installSessionProxyAuth(sess, req.Proxy)
 	}
 

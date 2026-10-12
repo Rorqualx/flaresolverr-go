@@ -21,7 +21,7 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 - **Memory Management** - Active memory monitoring with automatic browser recycling
 - **Session Support** - TTL-based session management with per-request TTL override, keepalive command, and automatic cleanup
 - **Cloudflare Bypass** - Solves JavaScript challenges and Turnstile CAPTCHAs
-- **Anti-Fingerprinting** - 20 composable stealth patches with configurable fingerprint profiles (default, Windows, macOS, minimal)
+- **Anti-Fingerprinting** - The same browser fingerprint on every request, stateless or session, with a per-request timezone and User-Agent
 - **Per-Session Chrome Flags** - Custom window size, language, timezone, and Chrome flags per session with dedicated browser instances
 - **Human-Like Behavior** - Bezier curve mouse movements, randomized timing, and natural scroll patterns
 - **Two-Phase CDP Bypass** - Bypasses Cloudflare's managed challenge loop by launching a clean Chrome without CDP for challenge resolution
@@ -208,7 +208,7 @@ curl -X POST http://localhost:8191/v1 \
 | `keepaliveTtl` | int | No | New TTL in minutes for `sessions.keepalive` (0 = just touch, max 1440) |
 | `cookieExtractDelay` | int | No | Seconds to wait before extracting cookies (0-30). Captures late-set JS cookies |
 | `browserFlags` | object | No | Per-session Chrome flag overrides (`sessions.create` only). See below |
-| `fingerprint` | object | No | Per-request browser fingerprint customization. See below |
+| `fingerprint` | object | No | Only `overrides.timezone` is honored; fingerprint profiles have been removed. See below |
 
 #### Cookie Object
 
@@ -278,53 +278,21 @@ curl -X POST http://localhost:8191/v1 \
 
 #### Fingerprint Object
 
-Per-request browser fingerprint customization. Controls which stealth patches apply and what values they report.
+Fingerprint profiles have been removed. They never took effect on stateless requests, and every request now presents the same browser whether or not it uses a session.
+
+The `fingerprint` field is still accepted, so existing clients keep working, but only one option in it does anything:
 
 ```json
 {
-  "profile": "desktop-chrome-windows",
-  "overrides": {
-    "timezone": "Asia/Tokyo",
-    "screenWidth": 1920,
-    "screenHeight": 1080
-  },
-  "disablePatches": ["canvas", "audio"]
+  "overrides": { "timezone": "Asia/Tokyo" }
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `profile` | string | Builtin profile name (see below) |
-| `overrides` | object | Override individual fingerprint dimensions |
-| `disablePatches` | array | Stealth patches to skip by name |
+| `overrides.timezone` | string | IANA timezone ID for this request, applied through the browser's own timezone emulation. Takes priority over `TZ` and a session's `browserFlags.timezone` |
 
-**Builtin Profiles:**
-
-| Profile | Description |
-|---------|-------------|
-| `default` | All patches enabled, standard 1920x1080, 8GB memory, 4 cores |
-| `desktop-chrome-windows` | Windows UA, NVIDIA WebGL, 16GB memory, 8 cores |
-| `desktop-chrome-mac` | macOS UA, Apple M1 WebGL, 2560x1440, 16GB, 10 cores |
-| `minimal` | Only essential patches (webdriver, plugins, chrome-runtime) |
-
-**Override Keys:** `timezone`, `locale`, `screenWidth`, `screenHeight`, `deviceMemory`, `hardwareConcurrency`, `webglVendor`, `webglRenderer`, `canvasNoiseSeed`
-
-**Available Patches:** `webrtc`, `webdriver`, `plugins`, `languages`, `chrome-runtime`, `permissions`, `connection`, `hardware-concurrency`, `device-memory`, `tostring`, `webgl`, `notifications`, `canvas`, `audio`, `battery`, `speech`, `fonts`, `timezone`, `screen-position`, `device-pixel-ratio`
-
-**Example**: Request with Windows fingerprint and Tokyo timezone:
-```bash
-curl -X POST http://localhost:8191/v1 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "cmd": "request.get",
-    "url": "https://example.com",
-    "maxTimeout": 60000,
-    "fingerprint": {
-      "profile": "desktop-chrome-windows",
-      "overrides": {"timezone": "Asia/Tokyo"}
-    }
-  }'
-```
+`profile`, `disablePatches` and every other override are ignored; the server logs one warning per request naming them. To change the User-Agent, use the top-level `userAgent` field: the client hints and `navigator.platform` follow it.
 
 ### Response Format
 
@@ -500,6 +468,7 @@ All configuration is done via environment variables.
 | `ALLOW_LOCAL_PROXIES` | `false` | Allow a `proxy` in an API request to point at localhost or a private address. Does not apply to `PROXY_URL`, which is trusted configuration |
 | `IGNORE_CERT_ERRORS` | `false` | Ignore TLS certificate errors |
 | `DNS_REBINDING_PROTECTION` | `true` | Pin response URL to the request-time IP. Set `false` for sites serving identical content across multiple TLDs/CDN IPs (SSRF protection stays on) |
+| `EGRESS_GUARD` | `false` | Route every browser connection through an in-process proxy that refuses private, loopback and cloud-metadata destinations. See [Egress guard](#egress-guard) |
 | `API_KEY_ENABLED` | `false` | Enable API key authentication |
 | `API_KEY` | (none) | Required API key (use 16+ chars) |
 | `BROWSER_SANDBOX` | `false` | Run Chromium with its own sandbox instead of `--no-sandbox`. Needs extra container permissions; see below |
@@ -630,6 +599,28 @@ Hot-reload capable selectors for adapting to Cloudflare changes without restarts
 When `SELECTORS_HOT_RELOAD` is enabled, changes to the selectors file are automatically detected and applied without restarting the service.
 
 When `SELECTORS_REMOTE_URL` is configured, selectors are fetched periodically from the remote URL. File selectors take priority over remote selectors if both are configured.
+
+### Egress guard
+
+FlareSolverr checks the URL you ask for and refuses private, loopback and cloud-metadata addresses. That check cannot see what the browser does next. A page can redirect to `http://10.0.0.5/`, load an image or an iframe from it, `fetch()` it, open a WebSocket to it, or sit behind a hostname that resolves to a public address when it is checked and to a private one when Chromium connects (DNS rebinding). Without the guard those requests are made, from inside your network, before the final URL is examined.
+
+`EGRESS_GUARD=true` closes that gap. Every browser and browser context is pointed at a small forward proxy inside the FlareSolverr process, listening on `127.0.0.1` only. For each connection the guard resolves the name once, requires every address it resolves to to be public, and connects to the address it checked. This applies to pooled browsers, sessions, `browserFlags` sessions and the reconnect bypass, and to loopback as well: with the guard on, a page cannot reach `127.0.0.1` or `localhost` on the machine running FlareSolverr (which includes FlareSolverr's own API).
+
+What it does not change:
+
+- **TLS and HTTP/2 fingerprints.** HTTPS is tunnelled byte for byte; the guard never terminates TLS. The JA4 and HTTP/2 fingerprints are identical with the guard on and off.
+- **Request headers.** Plain HTTP is forwarded with its headers unchanged and in order. No `Via` or `X-Forwarded-For` is added.
+
+What it does change:
+
+- **No HTTP/3.** Chromium does not use HTTP/3 (QUIC) through a proxy, so sites that would have moved to HTTP/3 stay on HTTP/2. Cloudflare can see that. The solves tested for this release were unaffected, but a managed-challenge target was not available to measure, which is why the guard is off by default.
+- **Refused destinations look like errors.** A blocked HTTPS destination fails with `net::ERR_TUNNEL_CONNECTION_FAILED`; a blocked plain-HTTP destination returns a `403` page from the guard.
+- **Proxies.** With the guard on, a proxy from a request, a session, `PROXY_LIST` or `PROXY_URL` is reached through the guard, which logs in to it itself (`http`, `https` and `socks5`, with or without credentials). A per-request proxy then runs in a browser context on a pooled browser instead of a browser of its own, the reconnect bypass works with proxies that need credentials, and `PROXY_USERNAME` / `PROXY_PASSWORD` are applied to `PROXY_URL`. `socks4` proxies are rejected. Wrong proxy credentials are reported as `the proxy rejected the supplied credentials`.
+- **DNS.** Names are resolved by FlareSolverr with the system resolver rather than by Chromium.
+
+Limit when a proxy is in use: the upstream proxy resolves hostnames, so the guard cannot check the address a name leads to. It still refuses what it can recognise without resolving (private and special-purpose IP addresses in any notation, `localhost` names, cloud-metadata names), but a hostname that the proxy resolves to a private address is not caught. Without an upstream proxy there is no such gap.
+
+The guard exports counters on `/metrics` (`flaresolverr_egress_guard_*`), including the number of destinations it refused.
 
 ### Logging & Monitoring
 
