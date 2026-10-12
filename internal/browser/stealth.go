@@ -12,8 +12,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ApplyStealthToPage applies anti-detection measures to a page.
+// ApplyStealthToPage applies the project's own stealth script to a page.
 // This should be called after page creation but BEFORE navigation.
+//
+// Request pages do not use it: they are set up by PreparePage, which uses
+// go-rod/stealth. The script is what the stealth extension loads for the
+// reconnect bypass (see stealth_extension.go); this function applies the same
+// script over CDP and is how the tests exercise it in a real browser.
 //
 // Uses two injection methods for defense-in-depth:
 //  1. PageAddScriptToEvaluateOnNewDocument: Runs at document_start BEFORE any page scripts.
@@ -65,8 +70,9 @@ func ApplyStealthToPage(page *rod.Page) error {
 }
 
 // ApplyGate2Corrections layers two surgical fingerprint fixes over the
-// go-rod/stealth base used on the GET/POST request paths. Measured against live
-// detectors (docs/INVESTIGATION-fingerprint-gate2.md), go-rod/stealth alone:
+// go-rod/stealth base used on every request path (see PreparePage). Measured
+// against live detectors (docs/INVESTIGATION-fingerprint-gate2.md),
+// go-rod/stealth alone:
 //   - reports a macOS WebGL renderer ("Intel Iris OpenGL Engine") on a Linux
 //     browser — an OS-layer inconsistency Cloudflare cross-checks, and
 //   - leaves screen at the headless 800x600 default while the viewport is larger
@@ -155,6 +161,10 @@ const gate2CorrectionsScript = `
 
 // stealthScript contains JavaScript to mask automation.
 // These patches address common detection vectors used by anti-bot systems.
+//
+// It is loaded by the stealth extension, for the reconnect bypass, where there
+// is no CDP connection to inject go-rod/stealth through. Request pages do not
+// run it (see PreparePage).
 const stealthScript = `
 (() => {
     'use strict';

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (may need action on upgrade)
+- **Fingerprint profiles removed** - `fingerprint.profile`, `fingerprint.disablePatches` and every `fingerprint.overrides` key except `timezone` no longer do anything. They never took effect on stateless requests. The `fingerprint` field is still accepted, so existing requests do not fail; the server logs one warning per request naming the options it ignored. `fingerprint.overrides.timezone` and the top-level `userAgent` field work as before, and the timezone now also applies to a session page that has already been used.
+- **Sessions present the same browser as stateless requests** - A session page used to be set up differently from a stateless one, and a site could tell them apart. On the test host a session sent a macOS Chrome 114 `User-Agent` with no `Sec-CH-UA` headers from a Linux Chrome 136 (while the API result reported the Linux one), used a 1280x800 window, and failed two bot.sannysoft.com checks ("WebDriver (New)" and "Plugins is of type PluginArray") that stateless requests pass. Both paths now go through one page setup and produce the same fingerprint; both pass all 31 sannysoft checks. If you compare or pin a session's fingerprint, it has changed: Linux Chrome user agent, 1920x1080, `hardwareConcurrency` and `devicePixelRatio` as the browser really reports them.
+- **`navigator.platform` and client hints corrected** - `navigator.platform` is now `Linux x86_64` (or `Linux aarch64` on arm64) instead of `Linux`, the client-hint architecture is `x86` or `arm` instead of `x86_64`, the `Sec-CH-UA` brand list is the one Chrome of that version sends (for Chrome 136: `"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"`), and the full version is the browser's real one. A per-request `userAgent` that is not Chrome no longer gets Chrome client hints.
+
+### Fixed
+- **`Accept-Language` was malformed and ignored `LANG`** - Every request sent `Accept-Language: en-US,en;q=0.9;q=0.9`, whatever `LANG` or a session's `browserFlags.language` said, and `navigator.languages` was always `['en-US', 'en']`. The header, `navigator.language` and `navigator.languages` now all follow the configured language: `LANG=fr_FR.UTF-8` gives `fr-FR,fr;q=0.9,en;q=0.8` and `['fr-FR', 'fr', 'en']`. The default is unchanged apart from the repaired header (`en-US,en;q=0.9`).
+- **Humanized scrolling never scrolled** - The scroll used before clicking a Turnstile widget failed on every step (the error was logged at debug level and ignored), and its visibility check mixed viewport-relative and page-relative positions. An off-screen widget is now scrolled into view.
+- **Selectors file did not reach all of challenge detection** - The shadow-root traverser ignored an external or remote selectors file, and several lists were hardcoded. They are now in the selectors file (`challenge_titles`, `challenge_selectors`, `turnstile_trigger_selectors`, `turnstile_widget_selectors`, `turnstile_click_selectors`, `turnstile_container_selectors`, `turnstile_landmark_selector`) with the same defaults; an existing selectors file needs no change.
+
 ## [0.9.0] - 2026-10-12
 
 This release changes defaults that can affect existing setups. Read "Changed (may need action on upgrade)" first.

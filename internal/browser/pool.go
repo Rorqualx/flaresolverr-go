@@ -541,7 +541,7 @@ type LaunchOptions struct {
 	ProxyURL   string   // Proxy URL (replaces pool default)
 	WindowSize string   // "width,height" e.g. "1280,720"
 	Language   string   // Accept-Language e.g. "fr-FR"
-	Timezone   string   // Timezone for stealth patches (applied at JS level)
+	Timezone   string   // Not used at launch: a session's timezone is applied to its page through CDP
 	Headless   *bool    // Override global headless setting
 	DisableGPU *bool    // Force software rendering
 	ExtraArgs  []string // Pre-validated extra Chrome flags
