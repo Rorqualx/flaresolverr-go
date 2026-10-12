@@ -42,6 +42,34 @@ func TestCapSolverSolver_Identity(t *testing.T) {
 	}
 }
 
+// TestCapSolverSolver_RefusesManagedChallenge: with chlPageData present CapSolver
+// must refuse before any HTTP call. Its proxyless Turnstile task cannot carry
+// the challenge-page data, so a purchase would be wasted.
+func TestCapSolverSolver_RefusesManagedChallenge(t *testing.T) {
+	fake := newFakeProvider(t).onCreate(ok(capSolverCreated))
+
+	_, err := fastCapSolver(fake.URL).SolveTurnstile(context.Background(), &TurnstileRequest{
+		SiteKey:  "0x4AAAAAAADnPIDROrmt1Wwj",
+		PageURL:  "https://example.com",
+		Action:   "managed",
+		CData:    "cdata",
+		PageData: "challenge-page-data",
+	})
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if TaskCreated(err) {
+		t.Error("TaskCreated = true, want false")
+	}
+	var captchaErr *types.CaptchaError
+	if !errors.As(err, &captchaErr) || captchaErr.Code != "UNSUPPORTED" || captchaErr.Provider != "capsolver" {
+		t.Errorf("error = %#v, want capsolver UNSUPPORTED", captchaErr)
+	}
+	if fake.createCount() != 0 || fake.pollCount() != 0 {
+		t.Errorf("HTTP calls: createTask=%d getTaskResult=%d, want 0 and 0", fake.createCount(), fake.pollCount())
+	}
+}
+
 func TestCapSolverSolver_SolveTurnstile(t *testing.T) {
 	tests := []struct {
 		name      string

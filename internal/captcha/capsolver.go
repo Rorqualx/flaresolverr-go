@@ -140,7 +140,18 @@ type capSolverBalanceResponse struct {
 }
 
 // SolveTurnstile solves a standalone Turnstile widget using CapSolver.
+//
+// It refuses a Cloudflare managed challenge before making any request.
+// AntiTurnstileTaskProxyLess has no field for the challenge page's
+// chlPageData, so CapSolver would return (and bill for) a token the
+// interstitial cannot accept. CapSolver's challenge-page product is a different
+// task that needs a sticky proxy matching the browser's egress.
 func (s *CapSolverSolver) SolveTurnstile(ctx context.Context, req *TurnstileRequest) (*TurnstileResult, error) {
+	if req.PageData != "" {
+		return nil, notCreated(types.NewCaptchaRejectedError(capSolverName, "UNSUPPORTED",
+			"CapSolver cannot solve a Cloudflare managed challenge with a proxyless Turnstile task"))
+	}
+
 	task := capSolverTask{
 		Type:       "AntiTurnstileTaskProxyLess",
 		WebsiteURL: req.PageURL,
