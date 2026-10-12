@@ -131,6 +131,12 @@ func (p *Pool) GetBrowserPath() string {
 	return p.config.BrowserPath
 }
 
+// DefaultProxyURL returns the proxy every pooled browser is launched with
+// (PROXY_URL), or "" if none is configured.
+func (p *Pool) DefaultProxyURL() string {
+	return p.config.ProxyURL
+}
+
 // RecycleBrowser marks a checked-out pooled browser for replacement. The
 // recycle happens when the holder calls Release, never while the browser is
 // still in use. Browsers the pool does not own (SpawnWithProxy,

@@ -820,64 +820,15 @@ const stealthScript = `
     }
 
     // ========================================
-    // 17. Timezone/Geolocation Consistency
+    // 17. Timezone
     // ========================================
-    // Override timezone APIs for consistent fingerprinting defense
-    // Uses America/New_York as default, can be overridden via window.__stealthTimezone
-    // Skip on about:blank as Intl may not be fully initialized
-    if (!isAboutBlank) try {
-        // Session timezone - default to America/New_York (offset 300 minutes = 5 hours)
-        // Can be set via window.__stealthTimezone before stealth script runs
-        const defaultTimezone = 'America/New_York';
-        const defaultOffset = 300; // minutes (EST = UTC-5)
-
-        const stealthTimezone = window.__stealthTimezone || defaultTimezone;
-        const stealthOffset = window.__stealthTimezoneOffset !== undefined ? window.__stealthTimezoneOffset : defaultOffset;
-
-        // Override getTimezoneOffset
-        if (typeof Date.prototype.getTimezoneOffset === 'function' && !Date.prototype.getTimezoneOffset._stealth) {
-            Date.prototype.getTimezoneOffset = function() {
-                return stealthOffset;
-            };
-            Date.prototype.getTimezoneOffset._stealth = true;
-        }
-
-        // Override Intl.DateTimeFormat to return consistent timezone
-        if (window.Intl && window.Intl.DateTimeFormat && !window.Intl.DateTimeFormat._stealth) {
-            const OriginalDateTimeFormat = window.Intl.DateTimeFormat;
-
-            window.Intl.DateTimeFormat = function(locales, options) {
-                // Force our timezone if not explicitly set
-                const opts = options ? Object.assign({}, options) : {};
-                if (!opts.timeZone) {
-                    opts.timeZone = stealthTimezone;
-                }
-                return new OriginalDateTimeFormat(locales, opts);
-            };
-
-            // Copy static methods and properties
-            window.Intl.DateTimeFormat.supportedLocalesOf = OriginalDateTimeFormat.supportedLocalesOf;
-            Object.setPrototypeOf(window.Intl.DateTimeFormat, OriginalDateTimeFormat);
-
-            // Override resolvedOptions to return our timezone
-            const originalResolvedOptions = OriginalDateTimeFormat.prototype.resolvedOptions;
-            // Only patch if resolvedOptions exists and is a function
-            if (typeof originalResolvedOptions === 'function') {
-                OriginalDateTimeFormat.prototype.resolvedOptions = function() {
-                    const resolved = originalResolvedOptions.call(this);
-                    // If no explicit timezone was set, return our default
-                    if (resolved && (resolved.timeZone === undefined || resolved.timeZone === 'UTC')) {
-                        resolved.timeZone = stealthTimezone;
-                    }
-                    return resolved;
-                };
-            }
-
-            window.Intl.DateTimeFormat._stealth = true;
-        }
-    } catch (e) {
-        // Timezone patching failed, continue
-    }
+    // Intentionally not patched in JavaScript. The timezone is set natively via
+    // CDP (Emulation.setTimezoneOverride, see ApplyTimezoneOverride), which keeps
+    // Date, Intl and DST consistent with each other. The JS patch that used to
+    // live here pinned getTimezoneOffset() to a constant 300 and forced
+    // America/New_York into Intl, which (a) overrode the CDP override, so a
+    // session's requested timezone was ignored, and (b) disagreed with itself for
+    // the eight months of the year New York is on daylight time (real offset 240).
 
     // ========================================
     // 18. Fix CDP screenX/screenY detection

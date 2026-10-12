@@ -813,69 +813,25 @@ var (
 	ErrDNSRebinding = errors.New("DNS rebinding detected: resolved IP does not match expected IP")
 )
 
-// ValidateURLWithPinnedIP validates that a URL resolves to the expected IP address.
-// This prevents DNS rebinding attacks where the DNS resolution changes between
-// the initial validation and the actual request.
-//
-// Parameters:
-//   - rawURL: The URL to validate
-//   - expectedIP: The IP address that was resolved during initial validation (can be nil to skip pinning)
-//
-// Returns an error if:
-//   - The URL is invalid or blocked (same checks as ValidateURL)
-//   - The URL's hostname resolves to a different IP than expected (DNS rebinding)
-//   - The resolved IP is blocked (private, metadata, etc.)
+// ValidateURLWithPinnedIP re-validates a URL after navigation. See
+// ValidateURLWithPinnedIPContext.
 func ValidateURLWithPinnedIP(rawURL string, expectedIP net.IP) error {
 	return ValidateURLWithPinnedIPContext(context.Background(), rawURL, expectedIP)
 }
 
-// ValidateURLWithPinnedIPContext validates with context support for DNS timeout.
-func ValidateURLWithPinnedIPContext(ctx context.Context, rawURL string, expectedIP net.IP) error {
-	// First, run standard validation
-	if err := ValidateURLWithContext(ctx, rawURL); err != nil {
-		return err
-	}
-
-	// If no expected IP provided, skip pinning check
-	if expectedIP == nil {
-		return nil
-	}
-
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return ErrInvalidURL
-	}
-
-	hostname := strings.ToLower(parsed.Hostname())
-
-	// If hostname is already an IP, compare directly
-	ip := parseIPWithNormalization(hostname)
-	if ip != nil {
-		ip = normalizeIPv4Mapped(ip)
-		if !ip.Equal(expectedIP) {
-			return ErrDNSRebinding
-		}
-		return nil
-	}
-
-	// Resolve hostname with timeout and check if any resolved IP matches expected
-	ips, err := lookupIPWithTimeout(ctx, hostname)
-	if err != nil {
-		// DNS resolution failed - this could be a rebinding attack
-		// where attacker made DNS unavailable after initial resolution
-		return ErrDNSRebinding
-	}
-
-	// Check if any resolved IP matches the expected IP
-	for _, resolvedIP := range ips {
-		resolvedIP = normalizeIPv4Mapped(resolvedIP)
-		if resolvedIP.Equal(expectedIP) {
-			return nil
-		}
-	}
-
-	// No matching IP found - possible DNS rebinding
-	return ErrDNSRebinding
+// ValidateURLWithPinnedIPContext re-validates the URL a page ended up on:
+// every address its host resolves to right now must be public, and a host that
+// no longer resolves is rejected.
+//
+// The address recorded before navigation is accepted for API compatibility but
+// no longer compared. The comparison could not tell an attack from normal DNS:
+// hosts behind load balancers rotate their address sets between two lookups,
+// and after a redirect the page's host is not the host that was pinned at all.
+// Both failed as "DNS rebinding" (observed live on AWS-hosted sites), while the
+// case that matters, a host that now resolves to a private or metadata address,
+// is caught by the validation below regardless of what was pinned.
+func ValidateURLWithPinnedIPContext(ctx context.Context, rawURL string, _ net.IP) error {
+	return ValidateURLWithContext(ctx, rawURL)
 }
 
 // ExtractAndValidateHostIP extracts the hostname from a URL and returns its resolved IP.

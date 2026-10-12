@@ -161,8 +161,10 @@ func setupNetworkCapture(ctx context.Context, page *rod.Page) (*NetworkCapture, 
 			default:
 			}
 
-			// Only capture Document responses (main page, not subresources)
-			if e.Type != proto.NetworkResourceTypeDocument {
+			// Only capture the main document's responses. Iframes are documents
+			// too: a Turnstile or ad iframe returning 200 must not overwrite the
+			// 403/503 of the page itself.
+			if e.Type != proto.NetworkResourceTypeDocument || e.FrameID != page.FrameID {
 				return false // Continue listening
 			}
 

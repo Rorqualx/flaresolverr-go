@@ -1,6 +1,8 @@
 package solver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"strings"
 	"sync"
@@ -134,6 +136,17 @@ func (c *ClearanceCache) evictLocked(now time.Time) {
 	}
 }
 
+// Delete removes the cached clearance for (domain, egress), if any. Used when a
+// cached clearance failed to get a request through.
+func (c *ClearanceCache) Delete(domain, egress string) {
+	if c == nil || domain == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, clearanceKey(domain, egress))
+}
+
 // clearanceKey couples the registrable domain to the egress identity. cf_clearance
 // is IP-bound, so a different egress must never reuse another's clearance.
 func clearanceKey(domain, egress string) string {
@@ -157,15 +170,30 @@ func registrableDomain(rawURL string) string {
 	return host
 }
 
-// proxyID derives a stable egress identity from a proxy (host:port), or "direct".
+// proxyID derives a stable egress identity from a proxy, or "direct".
+//
+// The identity is host:port plus, when the proxy has a username, a short hash
+// of it. Rotating and sticky-session proxy gateways select the exit IP from the
+// username, so two callers on the same gateway with different credentials are
+// different egresses and must not share an IP-bound clearance.
 func proxyID(p *types.Proxy) string {
 	if p == nil || p.URL == "" {
 		return "direct"
 	}
-	if u, err := url.Parse(p.URL); err == nil && u.Host != "" {
+	u, err := url.Parse(p.URL)
+	if err != nil || u.Host == "" {
+		return p.URL
+	}
+
+	username := p.Username
+	if username == "" && u.User != nil {
+		username = u.User.Username()
+	}
+	if username == "" {
 		return u.Host
 	}
-	return p.URL
+	sum := sha256.Sum256([]byte(username))
+	return u.Host + "#" + hex.EncodeToString(sum[:4])
 }
 
 // extractClearance pulls the Cloudflare clearance cookies into injectable form and

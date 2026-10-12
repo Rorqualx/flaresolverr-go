@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-11
+
+### Fixed
+- **Unsolved challenge reported as solved** - Any existing `cf_clearance` cookie ended the solve as a success, so a stale cached or client-supplied cookie returned the "Just a moment..." page with `status: ok`, and the clearance cache then stored that cookie again for every later request. On an interstitial, only a clearance minted during the request now counts, and a cached clearance that fails to get a request through is evicted. Reproduced and re-probed live.
+- **Reconnect bypass ignored the proxy** - The two-phase bypass launched Chrome without `--proxy-server`, so a proxied request reached the target from the server's real IP and its clearance was cached under the proxy's identity. The bypass now uses the request's proxy (or `PROXY_URL`), and refuses to run with a proxy that needs credentials, since it cannot authenticate without CDP.
+- **Wrong User-Agent in results** - Results always reported the server default, even when a per-request `userAgent` minted the clearance, and `request.post` ignored the override entirely. The result now reports the User-Agent the page used.
+- **Clearance shared across proxy credentials** - The clearance cache keyed a proxy by host and port only. Gateways that choose the exit IP from the username are now separate cache entries per username.
+- **Requests that could outlive their timeout indefinitely** - The solve loop and result extraction made browser calls with no deadline, so a page that blocked its main thread held the browser (and a session's lock) forever. They are now bound to the request deadline, and the cookie-extraction delay is cancellable.
+- **Dropped responses after a long bypass** - The reconnect bypass ran on a context with no deadline after the request's timeout, and at the maximum timeout the server's write timeout expired first, dropping the connection. The bypass has a 75-second budget and the write timeout accounts for it.
+- **`request.post` and session requests failed early on Turnstile** - The early exit meant to hand over to the reconnect bypass fired on paths that have no bypass. Those paths now keep solving until their timeout. `request.post` also runs `executeJs`, `download` and `waitInSeconds` like the other paths.
+- **Status code taken from an iframe** - A Turnstile or ad iframe returning 200 could overwrite the page's own 403/503 in `status` and `responseHeaders`.
+- **False "DNS rebinding detected" errors** - The post-navigation check compared the page's host against the address recorded before navigation. Load-balanced hosts that rotate addresses, and any redirect to another host, failed. The check now only requires every current address to be public.
+- **Session timezone ignored** - A session created with a `timezone` reported `America/New_York` regardless: a JavaScript patch in the stealth script forced that zone and overrode the native CDP override. The same patch pinned `getTimezoneOffset()` to 300 while `Intl` said New York, which is self-contradictory for the eight months New York is on daylight time, and disagreed with `Date.toString()`. The patch is removed; the timezone is set only through CDP, so `Date`, `Intl` and DST agree. Sessions with no timezone now report the host's zone, as stateless requests already did.
+- **Empty error responses failed the request** - A bare `404` or `503` with no body made Chrome report a failed navigation, and the request returned an error with no status. It now returns the real status, headers and cookies with an empty `response`.
+- **Smaller fixes** - A short hCaptcha sitekey no longer panics; URLs containing a quote or backslash no longer break `download` and `followRedirects=false`; the bypass profile directory is removed on every exit path.
+
+### Changed
+- **CI** - Chromium is downloaded before the test step, removing an intermittent launch timeout in the first browser test.
+
 ## [0.8.4] - 2026-10-11
 
 ### Security

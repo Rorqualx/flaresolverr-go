@@ -53,3 +53,19 @@ func TestGate2CorrectionsScriptBalanced(t *testing.T) {
 		}
 	}
 }
+
+// TestStealthScriptDoesNotPatchTimezone guards against reintroducing a
+// JavaScript timezone patch. The timezone is set natively via CDP; a JS patch
+// overrides that (ignoring a session's requested timezone) and cannot keep
+// getTimezoneOffset consistent with Intl across daylight-saving changes.
+func TestStealthScriptDoesNotPatchTimezone(t *testing.T) {
+	for _, forbidden := range []string{
+		"Date.prototype.getTimezoneOffset =",
+		"window.Intl.DateTimeFormat =",
+		"__stealthTimezone",
+	} {
+		if strings.Contains(stealthScript, forbidden) {
+			t.Errorf("stealth script contains %q: the timezone must only be set via CDP", forbidden)
+		}
+	}
+}

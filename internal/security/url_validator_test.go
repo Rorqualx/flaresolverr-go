@@ -387,3 +387,37 @@ func TestValidateIP_SpecialPurposeRanges(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateURLWithPinnedIP_DNSRotation verifies a public host is not rejected
+// because its current addresses differ from the one recorded before navigation
+// (load-balanced hosts rotate; redirects change the host entirely), while a
+// private destination is still rejected whatever was recorded.
+func TestValidateURLWithPinnedIP_DNSRotation(t *testing.T) {
+	stale := net.ParseIP("198.41.0.4") // a public address the host does not resolve to
+
+	tests := []struct {
+		name    string
+		url     string
+		pinned  net.IP
+		wantErr bool
+	}{
+		{name: "public IP literal, different pinned address", url: "http://93.184.216.34/", pinned: stale, wantErr: false},
+		{name: "public IP literal, no pin", url: "http://93.184.216.34/", pinned: nil, wantErr: false},
+		{name: "private IP literal, pinned to itself", url: "http://10.0.0.1/", pinned: net.ParseIP("10.0.0.1"), wantErr: true},
+		{name: "loopback, pinned to a public address", url: "http://127.0.0.1/", pinned: stale, wantErr: true},
+		{name: "metadata address", url: "http://169.254.169.254/", pinned: stale, wantErr: true},
+		{name: "octal private host", url: "http://01200000001/", pinned: stale, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateURLWithPinnedIP(tt.url, tt.pinned)
+			if tt.wantErr && err == nil {
+				t.Errorf("ValidateURLWithPinnedIP(%q) = nil, want error", tt.url)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ValidateURLWithPinnedIP(%q) = %v, want nil", tt.url, err)
+			}
+		})
+	}
+}
