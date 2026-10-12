@@ -281,7 +281,7 @@ flaresolverr-go/
 | If you're adding... | Put it in... | NOT in... |
 |--------------------|--------------|-----------|
 | New request/response field | `internal/types/` | handlers, solver |
-| New challenge selector | `configs/selectors.yaml` | hardcoded anywhere |
+| New challenge selector | `internal/selectors/selectors.yaml` | hardcoded anywhere |
 | New environment variable | `internal/config/config.go` | direct `os.Getenv()` |
 | New HTTP endpoint | `internal/handlers/` | main.go |
 | New browser flag | `internal/browser/pool.go` | solver |
