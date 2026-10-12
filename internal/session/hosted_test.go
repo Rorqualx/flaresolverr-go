@@ -71,7 +71,7 @@ func TestHostedSessionsDoNotUsePoolBrowsers(t *testing.T) {
 
 	ids := []string{"hosted-a", "hosted-b", "hosted-c", "hosted-d"} // more than the pool size of 2
 	for _, id := range ids {
-		sess, err := manager.CreateIsolated(ctx, id, 0, "")
+		sess, err := manager.CreateIsolated(ctx, id, 0, nil)
 		if err != nil {
 			t.Fatalf("CreateIsolated(%s): %v", id, err)
 		}
@@ -88,10 +88,10 @@ func TestHostedSessionsDoNotUsePoolBrowsers(t *testing.T) {
 		t.Fatalf("session browser sessions = %d, want %d on one shared browser", count, len(ids))
 	}
 
-	if _, err := manager.CreateIsolated(ctx, "hosted-e", 0, ""); !errors.Is(err, types.ErrTooManySessions) {
+	if _, err := manager.CreateIsolated(ctx, "hosted-e", 0, nil); !errors.Is(err, types.ErrTooManySessions) {
 		t.Errorf("CreateIsolated over the limit = %v, want ErrTooManySessions", err)
 	}
-	if _, err := manager.CreateIsolated(ctx, "hosted-a", 0, ""); !errors.Is(err, types.ErrSessionAlreadyExists) {
+	if _, err := manager.CreateIsolated(ctx, "hosted-a", 0, nil); !errors.Is(err, types.ErrSessionAlreadyExists) {
 		t.Errorf("CreateIsolated duplicate = %v, want ErrSessionAlreadyExists", err)
 	}
 	if _, count := hostState(manager); count != len(ids) {
@@ -118,11 +118,11 @@ func TestHostedSessionsHaveSeparateCookies(t *testing.T) {
 	manager.config.MaxSessions = 2
 	ctx := context.Background()
 
-	first, err := manager.CreateIsolated(ctx, "cookies-a", 0, "")
+	first, err := manager.CreateIsolated(ctx, "cookies-a", 0, nil)
 	if err != nil {
 		t.Fatalf("CreateIsolated: %v", err)
 	}
-	second, err := manager.CreateIsolated(ctx, "cookies-b", 0, "")
+	second, err := manager.CreateIsolated(ctx, "cookies-b", 0, nil)
 	if err != nil {
 		t.Fatalf("CreateIsolated: %v", err)
 	}

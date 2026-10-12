@@ -24,8 +24,15 @@ const browserContextTimeout = 10 * time.Second
 // keep working until dispose is called. dispose closes any page still open in
 // the context and is safe to call more than once.
 func NewIsolatedContext(b *rod.Browser, proxyServer string) (isolated *rod.Browser, dispose func(), err error) {
+	return newIsolatedContext(b, proxyServer, "")
+}
+
+// newIsolatedContext is NewIsolatedContext with a proxy bypass list for the
+// context's proxy.
+func newIsolatedContext(b *rod.Browser, proxyServer, proxyBypassList string) (isolated *rod.Browser, dispose func(), err error) {
 	res, err := proto.TargetCreateBrowserContext{
 		ProxyServer:     proxyServer,
+		ProxyBypassList: proxyBypassList,
 		DisposeOnDetach: true, // a dropped CDP connection must not leave the context behind
 	}.Call(b.Timeout(browserContextTimeout))
 	if err != nil {
