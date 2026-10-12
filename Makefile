@@ -130,7 +130,7 @@ deps-verify: ## Verify dependencies
 
 docker: ## Build Docker image
 	@echo "$(GREEN)Building Docker image...$(NC)"
-	docker build -t flaresolverr-go:$(VERSION) -f deployments/Dockerfile .
+	docker build --build-arg VERSION=$(VERSION) -t flaresolverr-go:$(VERSION) .
 
 docker-run: docker ## Run Docker container
 	@echo "$(GREEN)Running Docker container...$(NC)"
@@ -138,11 +138,11 @@ docker-run: docker ## Run Docker container
 
 docker-compose-up: ## Start with docker-compose
 	@echo "$(GREEN)Starting with docker-compose...$(NC)"
-	docker-compose -f deployments/docker-compose.yml up -d
+	docker compose up -d
 
 docker-compose-down: ## Stop docker-compose
 	@echo "$(GREEN)Stopping docker-compose...$(NC)"
-	docker-compose -f deployments/docker-compose.yml down
+	docker compose down
 
 #------------------------------------------------------------------------------
 # Development
