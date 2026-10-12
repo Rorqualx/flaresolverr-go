@@ -35,8 +35,8 @@ const maxPageReferences = 100
 // Sessions maintain their own page and cookies across multiple requests.
 //
 // Fix #23: Lock ordering documentation:
-// When acquiring multiple locks, always acquire opMu before mu.
-// - opMu: Serializes solve operations on the session (coarse-grained)
+// When acquiring multiple locks, always take the operation slot before mu.
+// - operation slot (LockOperation): Serializes solve operations on the session (coarse-grained)
 // - mu: Protects Page field access (fine-grained)
 // Never hold mu while performing slow I/O operations.
 type Session struct {
@@ -55,8 +55,13 @@ type Session struct {
 	// Operation mutex to prevent concurrent solve operations on the same session
 	// This ensures only one request can use the page at a time, preventing
 	// page state corruption from concurrent navigation/actions
-	// Fix #23: Always acquire opMu BEFORE mu when both are needed.
-	opMu sync.Mutex
+	// Fix #23: Always take the operation slot BEFORE mu when both are needed.
+	//
+	// It is a one-slot channel rather than a mutex so that a request queued
+	// behind a long solve can give up when its own deadline passes. Created
+	// lazily (opOnce) so a zero-value Session works.
+	opSlot chan struct{}
+	opOnce sync.Once
 
 	// OwnsBrowser is true when the session owns a dedicated browser (not from pool).
 	// On destroy, the browser is Close()'d instead of returned to the pool.
@@ -783,16 +788,46 @@ func (s *Session) SetCookies(cookies []*proto.NetworkCookieParam) error {
 	return page.SetCookies(cookies)
 }
 
-// LockOperation acquires the operation mutex to prevent concurrent operations
-// on the same session. This should be called before any solve operation.
-// The caller MUST call UnlockOperation when done.
-func (s *Session) LockOperation() {
-	s.opMu.Lock()
+// operationSlot returns the session's one-slot operation channel.
+func (s *Session) operationSlot() chan struct{} {
+	s.opOnce.Do(func() {
+		s.opSlot = make(chan struct{}, 1)
+	})
+	return s.opSlot
 }
 
-// UnlockOperation releases the operation mutex after a solve operation completes.
+// LockOperation takes the session's operation slot, so only one request uses
+// the session's page at a time. It waits until the slot is free or ctx is
+// done, and returns ErrSessionInUse (wrapping the context error) if ctx ends
+// first. Without a bound, N requests queued on one session waited N times the
+// solve timeout.
+//
+// On a nil error the caller MUST call UnlockOperation when done.
+func (s *Session) LockOperation(ctx context.Context) error {
+	slot := s.operationSlot()
+
+	// Prefer the slot when it is free, even if ctx is already done
+	select {
+	case slot <- struct{}{}:
+		return nil
+	default:
+	}
+
+	select {
+	case slot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: gave up waiting for the previous request on this session: %w", types.ErrSessionInUse, ctx.Err())
+	}
+}
+
+// UnlockOperation releases the operation slot after a solve operation completes.
 func (s *Session) UnlockOperation() {
-	s.opMu.Unlock()
+	select {
+	case <-s.operationSlot():
+	default:
+		log.Error().Str("session_id", s.ID).Msg("UnlockOperation called without a matching LockOperation")
+	}
 }
 
 // SetProxyAuthCleanup records the function that stops the session's

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -52,14 +53,23 @@ func sanitizeURLForLogging(rawURL string) string {
 		return "[invalid-url]"
 	}
 
-	// If no query parameters, return as-is
+	// Never log credentials embedded in the URL (https://user:pass@host/)
+	redacted := false
+	if parsed.User != nil {
+		parsed.User = nil
+		redacted = true
+	}
+
+	// If no query parameters, there is nothing else to redact
 	if parsed.RawQuery == "" {
+		if redacted {
+			return parsed.String()
+		}
 		return rawURL
 	}
 
 	// Check and redact sensitive parameters
 	query := parsed.Query()
-	redacted := false
 	for _, param := range sensitiveParams {
 		// Check case-insensitively
 		for key := range query {
@@ -364,6 +374,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detailed statistics. Unlike /health this goes through API-key
+	// authentication when it is enabled: it lists every domain requested.
+	if r.URL.Path == "/stats" {
+		h.handleStats(w, startTime)
+		return
+	}
+
 	// Serve OpenAPI docs
 	if r.URL.Path == "/docs" {
 		w.Header().Set("Content-Type", "text/yaml")
@@ -380,6 +397,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only POST is allowed for the main endpoint
 	if r.Method != http.MethodPost {
 		h.writeError(w, "Method not allowed", startTime)
+		return
+	}
+
+	if !h.acceptsContentType(w, r, startTime) {
 		return
 	}
 
@@ -432,6 +453,10 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
+	if !h.acceptsContentType(w, r, startTime) {
+		return
+	}
+
 	// Limit request body size to prevent memory exhaustion (1MB max)
 	const maxBodySize = 1 << 20 // 1MB
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
@@ -469,6 +494,55 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		Msg("Request received")
 
 	h.routeCommand(w, r, &req, startTime)
+}
+
+const (
+	// requestDeadlineMargin is added on top of the work a request may do, to
+	// cover validation and encoding. It is smaller than the margin on the
+	// server's write timeout so the handler gives up first and still answers.
+	requestDeadlineMargin = 5 * time.Second
+
+	// sessionCreateDeadline bounds sessions.create, which may launch a browser.
+	sessionCreateDeadline = 90 * time.Second
+
+	// sessionQueueLogThreshold is the wait for a busy session below which the
+	// request's timeout is left untouched.
+	sessionQueueLogThreshold = 100 * time.Millisecond
+
+	// minSolveTimeAfterQueue is the least time worth starting a solve with
+	// after a request has waited for its session.
+	minSolveTimeAfterQueue = time.Second
+)
+
+// requestDeadline returns the longest a request with the given solve timeout
+// may legitimately run: the solve itself, the reconnect bypass that can follow
+// it, and the wait for a pooled browser.
+func (h *Handler) requestDeadline(timeout time.Duration) time.Duration {
+	return timeout + solver.ReconnectBypassBudget + h.config.BrowserPoolTimeout + requestDeadlineMargin
+}
+
+// acceptsContentType enforces Content-Type: application/json on API requests
+// and writes a 415 response when it is missing or different.
+//
+// This is a CSRF defense, not tidiness: a web page can make a visitor's browser
+// POST text/plain, form or multipart bodies to this server with no preflight,
+// but application/json always triggers one. Requiring it means a cross-site
+// page cannot drive the API through the operator's browser.
+func (h *Handler) acceptsContentType(w http.ResponseWriter, r *http.Request, startTime time.Time) bool {
+	if h.config == nil || !h.config.StrictContentType {
+		return true
+	}
+
+	contentType := r.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err == nil && mediaType == "application/json" {
+		return true
+	}
+
+	log.Warn().Str("content_type", contentType).Msg("Rejected request: Content-Type is not application/json")
+	h.writeErrorWithStatus(w, http.StatusUnsupportedMediaType,
+		"Content-Type must be application/json (set STRICT_CONTENT_TYPE=false to accept any type)", startTime)
+	return false
 }
 
 // HandleMethodNotAllowed handles requests with unsupported HTTP methods.
@@ -519,7 +593,16 @@ type DelayDefaults struct {
 }
 
 // handleHealth returns service health information.
+//
+// /health is reachable without an API key (load balancers and container
+// healthchecks need it), so it reports liveness and pool counters only.
+// Anything that reveals what the server has been used for lives on /stats.
 func (h *Handler) handleHealth(w http.ResponseWriter, startTime time.Time) {
+	h.writeJSONResponse(w, http.StatusOK, h.baseHealth(startTime))
+}
+
+// baseHealth builds the fields shared by /health and /stats.
+func (h *Handler) baseHealth(startTime time.Time) HealthResponse {
 	resp := HealthResponse{
 		Status:    types.StatusOK,
 		Message:   "FlareSolverr is ready",
@@ -541,6 +624,15 @@ func (h *Handler) handleHealth(w http.ResponseWriter, startTime time.Time) {
 			Errors:    poolStats.Errors,
 		}
 	}
+	return resp
+}
+
+// handleStats returns the health fields plus per-domain statistics and
+// selector reload state. It is served on /stats, which (unlike /health) is
+// subject to API-key authentication: the domain list is a record of every
+// site the server has been asked to fetch.
+func (h *Handler) handleStats(w http.ResponseWriter, startTime time.Time) {
+	resp := h.baseHealth(startTime)
 
 	// Include domain stats if any domains have been tracked
 	if h.domainStats != nil && h.domainStats.DomainCount() > 0 {
@@ -601,14 +693,13 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			Msg("URL validated with DNS resolution (IP pinned for rebinding protection)")
 	}
 
-	// Validate proxy URL if provided
-	var proxyURL string
+	// Validate the caller's proxy URL, if one was sent. The operator's own
+	// PROXY_URL is not checked here: it is trusted configuration, validated
+	// once at startup, and running it through the caller-facing SSRF rules
+	// made every request fail when it pointed at a private or Docker-network
+	// address.
 	if req.Proxy != nil && req.Proxy.URL != "" {
-		proxyURL = req.Proxy.URL
-	} else if h.config.HasDefaultProxy() {
-		proxyURL = h.config.ProxyURL
-	}
-	if proxyURL != "" {
+		proxyURL := req.Proxy.URL
 		if err := security.ValidateProxyURL(proxyURL, h.config.AllowLocalProxies); err != nil {
 			log.Warn().Err(err).Msg("Proxy URL validation failed")
 			h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
@@ -769,6 +860,13 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		}
 	}
 
+	// Give the whole request a deadline. r.Context() has none, so anything
+	// downstream that forgot its own bound could run until the server's write
+	// timeout dropped the connection. The budget mirrors that write timeout
+	// (see main.go), minus a margin to write the response.
+	ctx, cancelRequest := context.WithTimeout(ctx, h.requestDeadline(timeout))
+	defer cancelRequest()
+
 	// Validate and cap WaitInSeconds to prevent abuse
 	// Maximum wait is 60 seconds or remaining timeout, whichever is smaller
 	const maxWaitSeconds = 60
@@ -859,9 +957,30 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 		}
 
 		// Acquire operation lock to prevent concurrent operations on the same session
-		// This prevents page state corruption from concurrent navigation/actions
-		sess.LockOperation()
+		// This prevents page state corruption from concurrent navigation/actions.
+		// The wait counts against this request's own timeout: a request queued
+		// behind a long solve fails when its maxTimeout passes instead of
+		// waiting for every request ahead of it and then starting a full solve.
+		lockCtx, cancelLock := context.WithTimeout(ctx, timeout)
+		waitStart := time.Now()
+		lockErr := sess.LockOperation(lockCtx)
+		cancelLock()
+		if lockErr != nil {
+			log.Warn().Err(lockErr).Str("session", req.Session).Msg("Timed out waiting for the session")
+			h.writeError(w, "Session is busy: timed out waiting for the previous request on this session", startTime)
+			return
+		}
 		defer sess.UnlockOperation()
+
+		if waited := time.Since(waitStart); waited > sessionQueueLogThreshold {
+			opts.Timeout = timeout - waited
+			log.Debug().Dur("waited", waited).Dur("remaining", opts.Timeout).Str("session", req.Session).
+				Msg("Request waited for the session; remaining time reduced")
+			if opts.Timeout < minSolveTimeAfterQueue {
+				h.writeError(w, "Session is busy: no time left to run the request after waiting for the session", startTime)
+				return
+			}
+		}
 
 		// Use AcquirePageWithRelease for reference counting to prevent
 		// race condition where page is closed during solve operation.
