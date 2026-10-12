@@ -202,8 +202,8 @@ curl -X POST http://localhost:8191/v1 \
 | `userAgent` | string | No | Override User-Agent for this request |
 | `returnRawHtml` | bool | No | Return raw HTML before JavaScript renders |
 | `executeJs` | string | No | Custom JavaScript to execute after solving |
-| `captchaSolver` | string | No | Per-request captcha provider: `2captcha`, `capsolver`, `anticaptcha`, `9kw`, or `none` |
-| `captchaApiKey` | string | No | Per-request captcha API key |
+| `captchaSolver` | string | No | External captcha provider for this request: `2captcha`, `capsolver`, `anticaptcha` or `9kw` (one of the server's configured providers, unless `captchaApiKey` is given), or `none` to forbid external solving for this request |
+| `captchaApiKey` | string | No | Your own API key for `captchaSolver`. Used for this request only, for at most one paid solve, even when the server-side fallback is disabled. Requires `captchaSolver`. Never logged or stored |
 | `keepaliveTtl` | int | No | New TTL in minutes for `sessions.keepalive` (0 = just touch, max 1440) |
 | `cookieExtractDelay` | int | No | Seconds to wait before extracting cookies (0-30). Captures late-set JS cookies |
 | `browserFlags` | object | No | Per-session Chrome flag overrides (`sessions.create` only). See below |
@@ -527,16 +527,25 @@ environment:
 
 External CAPTCHA solver fallback for Turnstile and hCaptcha challenges that native solving cannot handle.
 
+**Nothing is ever bought unless you opt in.** With `CAPTCHA_FALLBACK_ENABLED` unset or `false`, FlareSolverr never contacts a paid provider, whatever keys are configured. The only other way a provider is contacted is a request that brings its own `captchaSolver` + `captchaApiKey`.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CAPTCHA_NATIVE_ATTEMPTS` | `3` | Native solve attempts before external fallback (1-10) |
-| `CAPTCHA_FALLBACK_ENABLED` | `false` | Enable external CAPTCHA solver fallback |
+| `CAPTCHA_FALLBACK_ENABLED` | `false` | Enable external CAPTCHA solver fallback with the server's keys |
+| `CAPTCHA_MAX_EXTERNAL_SOLVES` | `1` | Paid solves one request may buy with the server's keys (0-3). `0` buys nothing even when the fallback is enabled |
 | `TWOCAPTCHA_API_KEY` | (none) | 2Captcha API key |
-| `CAPSOLVER_API_KEY` | (none) | CapSolver API key |
+| `CAPSOLVER_API_KEY` | (none) | CapSolver API key (standalone Turnstile widgets and hCaptcha; **not** Cloudflare managed challenges) |
 | `ANTICAPTCHA_API_KEY` | (none) | anti-captcha.com API key |
 | `NINEKW_API_KEY` | (none) | 9kw.eu API key (hCaptcha/reCAPTCHA only — does **not** solve Cloudflare Turnstile) |
 | `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha`, `capsolver`, `anticaptcha`, or `9kw` |
-| `CAPTCHA_SOLVER_TIMEOUT` | `120s` | Timeout for external solver API (30s-300s) |
+| `CAPTCHA_SOLVER_TIMEOUT` | `120s` | How long to wait for a provider to solve one task (30s-300s) |
+| `TWOCAPTCHA_BASE_URL` | (none) | Override the 2Captcha API base URL. For testing and self-hosted gateways |
+| `CAPSOLVER_BASE_URL` | (none) | Override the CapSolver API base URL. For testing and self-hosted gateways |
+| `ANTICAPTCHA_BASE_URL` | (none) | Override the anti-captcha.com API base URL. For testing and self-hosted gateways |
+| `NINEKW_BASE_URL` | (none) | Override the 9kw.eu endpoint URL. For testing and self-hosted gateways |
+
+The `*_BASE_URL` overrides must be `http` or `https` URLs without credentials or a query string. API keys for that provider — including a request's own `captchaApiKey` — are sent to the address you configure, so only point them at a gateway you control. A malformed override is ignored **and disables the server-side fallback**, so a typo cannot send your keys to the provider's real API.
 
 **Supported CAPTCHA types:**
 - **Turnstile** — Cloudflare's challenge widget (native + external solving)
@@ -547,7 +556,30 @@ External CAPTCHA solver fallback for Turnstile and hCaptcha challenges that nati
 2. If native solving fails after `CAPTCHA_NATIVE_ATTEMPTS`, it falls back to the external solver
 3. For hCaptcha, external solving is used directly (no native solving available)
 4. External solver extracts the sitekey, submits to the provider, and injects the token
-5. Per-request override: use `captchaSolver` and `captchaApiKey` fields in the request
+5. Providers are tried in order: `CAPTCHA_PRIMARY_PROVIDER` first, then the others alphabetically
+
+**What one request can cost:**
+- A request buys at most `CAPTCHA_MAX_EXTERNAL_SOLVES` solves (default 1), counted in tasks created at a provider, across Turnstile and hCaptcha and across every pass of the solve loop. If the challenge is still there after the bought token was injected, FlareSolverr goes back to native solving and does not buy again.
+- A provider that refuses the task outright (unsupported captcha type, rejected key, empty balance) costs nothing; the next provider is tried and the refusal is remembered for the rest of the request.
+- Once a task was created and then timed out, nothing more is bought for that request, from any provider.
+- No task is created when fewer than 10 seconds of the request's `maxTimeout` remain: the solution could not arrive in time. Native attempts run first and take time, so give requests that should fall back to a provider a generous `maxTimeout`.
+- If it is unclear whether a provider accepted a task (the create call was sent but answered with a 5xx, an error page, or nothing), the solve counts as spent. A create call that never left the server (DNS or connection failure) does not.
+- A flaky response while waiting for a solution (HTTP 429/5xx, an HTML error page) does not abandon the paid task: polling backs off and retries, giving up only after several failures in a row.
+- CapSolver is not sent Cloudflare managed challenges (the "Just a moment..." interstitial): its proxyless Turnstile task cannot carry the challenge-page data, so the solve would be paid for and rejected. With CapSolver as the only provider, managed challenges are not solved externally.
+
+**Per-request control** (see the `captchaSolver` and `captchaApiKey` request fields):
+
+| Request | Effect |
+|---------|--------|
+| neither field | The server's providers, if `CAPTCHA_FALLBACK_ENABLED=true` |
+| `"captchaSolver": "none"` | No external solving for this request |
+| `"captchaSolver": "anticaptcha"` | Only that provider, with the server's key (must be configured and the fallback enabled) |
+| `"captchaSolver": "2captcha", "captchaApiKey": "..."` | That provider with **your** key, for this request only and at most one solve — works even when the server-side fallback is disabled. `CAPTCHA_MAX_EXTERNAL_SOLVES` does not apply |
+| `captchaApiKey` without `captchaSolver` | Rejected with a validation error |
+
+A per-request key is never written to the logs, stored, or returned in a response or error message.
+
+**Metrics:** `/metrics` exposes per-provider counters once a provider has been used: `flaresolverr_captcha_attempts_total`, `flaresolverr_captcha_tasks_total` (billable tasks created), `flaresolverr_captcha_successes_total`, `flaresolverr_captcha_failures_total`, `flaresolverr_captcha_cost_usd_total` and `flaresolverr_captcha_solve_seconds_total`, each labelled `provider="..."`.
 
 **Example configuration:**
 ```yaml
@@ -555,6 +587,7 @@ environment:
   - CAPTCHA_FALLBACK_ENABLED=true
   - TWOCAPTCHA_API_KEY=your-2captcha-api-key
   - CAPTCHA_NATIVE_ATTEMPTS=2
+  - CAPTCHA_MAX_EXTERNAL_SOLVES=1
 ```
 
 ### Selectors Settings

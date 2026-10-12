@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Per-request cap on paid captcha solves** - `CAPTCHA_MAX_EXTERNAL_SOLVES` (default `1`, maximum `3`, `0` buys nothing) limits how many tasks one request may create at external providers, counted across Turnstile and hCaptcha and across every pass of the solve loop.
+- **Per-request captcha provider and key** - `captchaSolver` and `captchaApiKey` were accepted and validated but never used. `captchaSolver: "none"` now forbids external solving for the request, a provider name selects among the server's providers, and `captchaSolver` with `captchaApiKey` uses the caller's own key for that request only, for at most one solve, even when the server-side fallback is disabled. `captchaApiKey` without `captchaSolver` is a validation error. The key is never logged, stored, or echoed.
+- **Captcha provider base URL overrides** - `TWOCAPTCHA_BASE_URL`, `CAPSOLVER_BASE_URL`, `ANTICAPTCHA_BASE_URL` and `NINEKW_BASE_URL`, for testing and self-hosted gateways. A malformed override disables the server-side fallback rather than falling back to the provider's real API.
+- **Captcha provider metrics** - `/metrics` exposes per-provider attempts, billable tasks, successes, failures, reported cost and solve time. The tracker existed but was never wired up.
+
+### Fixed
+- **Repeated paid solves for one request** - When a bought token did not clear the challenge, every later pass of the solve loop bought another one, from every configured provider, until the request timed out; hCaptcha was bought on every pass from the first. A request now buys at most its budget, a paid task that times out ends external solving for that request instead of moving on to the next provider, and no task is created in the last 10 seconds before the request's deadline, when its solution could no longer be collected.
+- **Paid tasks abandoned on one bad poll** - A single failed result poll (HTTP 502/429, an HTML error page, a dropped connection) abandoned a task that had already been paid for, and HTTP status codes were not checked at all. Polling now retries transient failures with backoff and gives up only after several in a row. Provider responses are read through a size limit.
+- **CapSolver billed for unsolvable managed challenges** - CapSolver was sent Cloudflare managed challenges without the challenge-page data it has no field for, so it returned (and charged for) a token the interstitial rejects. It now refuses a managed challenge before any request is made and the next provider is tried.
+- **anti-captcha reported as 2captcha** - Results, errors and metrics for anti-captcha.com carried the name "2captcha". anti-captcha is also sent the challenge-page parameters under its own field names (`cData`, `chlPageData`) and no longer a custom User-Agent, which its API rejects.
+- **hCaptcha solving** - The hCaptcha path bypassed the provider chain, spliced the provider's token unescaped into page JavaScript, and read the token from only one of the two fields providers use. It now goes through the chain and the request's budget, the token is passed as data, both `gRecaptchaResponse` and `token` are accepted, and a provider that answers "task type not supported" is skipped without spending budget.
+- **Wrong User-Agent sent to providers** - Providers were told the server's default User-Agent even when the request overrode it. They now get the one the page uses, and a warning is logged when a provider reports having solved with a different one.
+- **Token injection reported success when nothing happened** - Injection counted as successful whenever `window.turnstile` existed or any reCAPTCHA/hCaptcha field was on the page. It now succeeds only when a Turnstile (or hCaptcha) response field was filled or a callback actually ran.
+- **Turnstile parameters taken from unrelated elements** - `action` and `cData` came from the first element anywhere on the page with a `data-action`/`data-cdata` attribute and were overlaid on parameters captured from `turnstile.render()`. They now come from the widget's own element, and captured parameters are used as a set. Sitekey detection no longer accepts any URL containing the word "turnstile", hCaptcha/reCAPTCHA widgets, or their keys.
+- **First result poll delayed by two intervals** - The first poll happened after 10s/6s/20s instead of 5s/3s/10s.
+- **Out-of-process iframe capture lifecycle** - The raw CDP calls ignored the request's context, child sessions were never forgotten when their frame went away, and the listener goroutine was untracked. Auto-attach is now switched off again when capture ends, so a session page reused afterwards cannot hang on a paused cross-origin iframe.
+
+### Changed
+- `CAPTCHA_FALLBACK_ENABLED` remains `false` by default: no provider is contacted unless the fallback is enabled or a request supplies its own key.
+- With a budget of one, a request whose first provider fails after accepting the task no longer falls through to the next provider. Set `CAPTCHA_MAX_EXTERNAL_SOLVES=2` or `3` to keep that behaviour.
+
 ## [0.8.5] - 2026-10-11
 
 ### Fixed
