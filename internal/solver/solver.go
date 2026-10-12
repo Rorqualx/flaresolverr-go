@@ -446,6 +446,16 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	_ = usePooledBrowser // Used for logging/debugging if needed
 
+	// Run the request inside its own browser context. Pooled browsers are
+	// reused across callers, and cookies with an expiry, localStorage and cache
+	// all outlive a page: without this, one caller's cf_clearance and site
+	// cookies were sent on, and returned to, the next caller's request.
+	requestBrowser, disposeContext, ctxErr := browser.NewIsolatedContext(browserInstance, "")
+	if ctxErr != nil {
+		return nil, fmt.Errorf("failed to isolate request: %w", ctxErr)
+	}
+	defer disposeContext()
+
 	// Create timeout context for the solve operation
 	solveCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -458,7 +468,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	if opts.IsPost && opts.PostData != "" {
 		// Fix 2.10: Use stealth.Page for POST requests too - apply stealth before navigation
 		// The previous concern about conflicts was resolved by proper ordering
-		page, err = stealth.Page(browserInstance)
+		page, err = stealth.Page(requestBrowser)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create stealth page for POST: %w", err)
 		}
@@ -551,7 +561,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	// GET request path
 	// For GET requests, use stealth page
-	page, err = stealth.Page(browserInstance)
+	page, err = stealth.Page(requestBrowser)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stealth page: %w", err)
 	}

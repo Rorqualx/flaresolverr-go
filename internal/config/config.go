@@ -15,10 +15,16 @@ import (
 const (
 	maxBrowserPoolSize = 20
 	maxMaxSessions     = 10000
-	maxMaxMemoryMB     = 16384
-	maxTimeout         = 10 * time.Minute
-	maxRateLimitRPM    = 10000 // Maximum requests per minute per IP
-	minAPIKeyLength    = 16    // Minimum API key length for security
+
+	// defaultMaxSessions bounds concurrent sessions. Each one holds a page in
+	// its own browser context, measured at roughly 150MB resident on a
+	// script-heavy site, so the old default of 100 could need ~15GB.
+	defaultMaxSessions      = 20
+	sessionMemoryEstimateMB = 150
+	maxMaxMemoryMB          = 16384
+	maxTimeout              = 10 * time.Minute
+	maxRateLimitRPM         = 10000 // Maximum requests per minute per IP
+	minAPIKeyLength         = 16    // Minimum API key length for security
 )
 
 // Config holds all application configuration.
@@ -135,7 +141,7 @@ func Load() *Config {
 		// Sessions
 		SessionTTL:             getEnvDuration("SESSION_TTL", 30*time.Minute),
 		SessionCleanupInterval: getEnvDuration("SESSION_CLEANUP_INTERVAL", 1*time.Minute),
-		MaxSessions:            getEnvInt("MAX_SESSIONS", 100),
+		MaxSessions:            getEnvInt("MAX_SESSIONS", defaultMaxSessions),
 
 		ClearanceCacheEnabled: getEnvBool("CLEARANCE_CACHE_ENABLED", true),
 		ClearanceTTL:          getEnvDuration("CLEARANCE_TTL", 25*time.Minute),
@@ -290,14 +296,24 @@ func (c *Config) Validate() {
 
 	// Session validation with upper bound
 	if c.MaxSessions < 1 {
-		log.Warn().Int("max", c.MaxSessions).Msg("Invalid max sessions, using 100")
-		c.MaxSessions = 100
+		log.Warn().Int("max", c.MaxSessions).Int("default", defaultMaxSessions).Msg("Invalid max sessions, using default")
+		c.MaxSessions = defaultMaxSessions
 	} else if c.MaxSessions > maxMaxSessions {
 		log.Warn().
 			Int("sessions", c.MaxSessions).
 			Int("max", maxMaxSessions).
 			Msg("Max sessions too high, capping to maximum")
 		c.MaxSessions = maxMaxSessions
+	}
+
+	// Each session keeps a page open in its own browser context. Warn when the
+	// configured limit could not fit in the memory budget.
+	if estimate := c.MaxSessions * sessionMemoryEstimateMB; estimate > c.MaxMemoryMB {
+		log.Warn().
+			Int("max_sessions", c.MaxSessions).
+			Int("estimated_mb", estimate).
+			Int("max_memory_mb", c.MaxMemoryMB).
+			Msg("MAX_SESSIONS may exceed the memory budget (about 150MB per open session)")
 	}
 
 	// SessionTTL validation (minimum 1 minute, maximum 24 hours)

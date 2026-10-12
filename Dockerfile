@@ -91,7 +91,7 @@ ENV HEADLESS=false \
 # Session settings
 ENV SESSION_TTL=30m \
     SESSION_CLEANUP_INTERVAL=1m \
-    MAX_SESSIONS=100
+    MAX_SESSIONS=20
 
 # Timeout settings
 ENV DEFAULT_TIMEOUT=60s \

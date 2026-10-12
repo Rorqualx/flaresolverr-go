@@ -464,7 +464,7 @@ All configuration is done via environment variables.
 |----------|---------|-------------|
 | `SESSION_TTL` | `30m` | Session time-to-live |
 | `SESSION_CLEANUP_INTERVAL` | `1m` | Cleanup interval for expired sessions |
-| `MAX_SESSIONS` | `100` | Maximum concurrent sessions |
+| `MAX_SESSIONS` | `20` | Maximum concurrent sessions (about 150MB each while a page is open) |
 
 ### Timeout Settings
 

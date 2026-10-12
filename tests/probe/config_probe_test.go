@@ -357,8 +357,8 @@ func TestConfigValidate_MaxSessions(t *testing.T) {
 		maxSessions         int
 		expectedMaxSessions int
 	}{
-		{"zero_sessions", 0, 100},
-		{"negative_sessions", -1, 100},
+		{"zero_sessions", 0, 20},
+		{"negative_sessions", -1, 20},
 		{"valid_sessions", 50, 50},
 		{"default_sessions", 100, 100},
 		{"high_sessions", 1000, 1000},
