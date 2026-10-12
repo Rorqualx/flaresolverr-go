@@ -1041,11 +1041,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bypass profile dir: %w", err)
 	}
-	defer func() {
-		if rmErr := os.RemoveAll(userDataDir); rmErr != nil {
-			log.Warn().Err(rmErr).Str("dir", userDataDir).Msg("Failed to remove bypass profile dir")
-		}
-	}()
+	defer removeBypassProfile(userDataDir)
 
 	// Create stealth extension to inject anti-detection patches without CDP.
 	// This applies the same stealth.go patches (webdriver, plugins, WebGL spoof,
@@ -3198,6 +3194,27 @@ func (s *Solver) pageSetup(opts *SolveOptions) browser.PageSetup {
 		AcceptLanguages: browser.AcceptLanguages(opts.Language),
 		Timezone:        resolveTimezone(opts),
 	}
+}
+
+// Removing the bypass profile is retried: a Chrome that has just been killed
+// can still be writing into it, and the removal then fails with "directory not
+// empty" and leaves the profile in the temp directory.
+const (
+	bypassProfileRemoveAttempts = 5
+	bypassProfileRemoveInterval = 200 * time.Millisecond
+)
+
+// removeBypassProfile deletes the profile directory of a reconnect bypass.
+func removeBypassProfile(dir string) {
+	var err error
+	for attempt := 0; attempt < bypassProfileRemoveAttempts; attempt++ {
+		if err = os.RemoveAll(dir); err == nil {
+			return
+		}
+		// Bounded by the attempt count; there is no caller left to cancel it.
+		sleepWithContext(context.Background(), bypassProfileRemoveInterval)
+	}
+	log.Warn().Err(err).Str("dir", dir).Msg("Failed to remove bypass profile dir")
 }
 
 // cleanupGrace is how long a request's page keeps answering after the solve

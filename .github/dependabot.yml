@@ -22,3 +22,8 @@ updates:
       interval: weekly
     commit-message:
       prefix: docker
+    ignore:
+      # The base image decides the Chromium version, which decides the browser
+      # fingerprint. It is bumped by hand after a probe run (see the Dockerfile).
+      - dependency-name: alpine
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

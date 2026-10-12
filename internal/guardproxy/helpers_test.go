@@ -291,14 +291,12 @@ func waitFor(t *testing.T, what string, condition func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// expectClosed asserts that conn yields no more bytes.
+// expectClosed asserts that the other side has closed conn.
 func expectClosed(t *testing.T, conn net.Conn) {
 	t.Helper()
-	buf := make([]byte, 1)
-	n, err := conn.Read(buf)
-	if n != 0 || err == nil {
-		t.Fatalf("connection still open: read %d bytes, err = %v", n, err)
-	}
+	// Bytes the proxy delivered before it closed (a response that was in
+	// flight) are still readable; the connection is closed when reading ends.
+	_, err := io.Copy(io.Discard, conn)
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		t.Fatalf("connection was not closed (read timed out)")
