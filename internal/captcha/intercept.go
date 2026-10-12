@@ -22,6 +22,7 @@
 package captcha
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 
@@ -111,12 +112,18 @@ var interceptors sync.Map // map[proto.TargetTargetID]*oopifState
 // main frame — are captured too.
 // Best-effort: failures are logged but never fatal — DOM/iframe/pierce extraction
 // remains as a fallback (see extraction.go).
-func InstallTurnstileInterceptor(page *rod.Page) {
+//
+// ctx bounds the capture: the OOPIF listener stops when ctx ends, even if
+// RemoveTurnstileInterceptor is never reached.
+func InstallTurnstileInterceptor(ctx context.Context, page *rod.Page) {
+	page = page.Context(ctx)
 	if _, err := page.EvalOnNewDocument(turnstileInterceptorJS); err != nil {
 		log.Debug().Err(err).Msg("Failed to register turnstile interceptor")
 		return
 	}
-	interceptors.Store(page.TargetID, installOOPIFCapture(page))
+	// A page instrumented twice must not leak its first listener.
+	RemoveTurnstileInterceptor(page)
+	interceptors.Store(page.TargetID, installOOPIFCapture(ctx, page))
 	log.Debug().Msg("Turnstile render interceptor installed (main frame + OOPIF auto-attach)")
 }
 
@@ -134,23 +141,26 @@ func loadState(page *rod.Page) (*oopifState, bool) {
 // turnstile.render(). It checks the main frame first, then any captured
 // out-of-process iframe (managed-challenge case). Returns (nil, false) if nothing
 // usable was captured.
-func ReadCapturedChallengeParams(page *rod.Page) (*ChallengeParams, bool) {
+func ReadCapturedChallengeParams(ctx context.Context, page *rod.Page) (*ChallengeParams, bool) {
 	st, ok := loadState(page)
 	if !ok {
 		return nil, false
 	}
-	if p, ok := readMainFrameParams(page); ok {
+	if p, ok := readMainFrameParams(ctx, page); ok {
 		return p, true
 	}
-	return st.params()
+	return st.params(ctx)
 }
 
 // readMainFrameParams reads window.__cfChallengeParams from the page's main frame.
-func readMainFrameParams(page *rod.Page) (*ChallengeParams, bool) {
+func readMainFrameParams(ctx context.Context, page *rod.Page) (*ChallengeParams, bool) {
+	ctx, cancel := context.WithTimeout(ctx, oopifCDPTimeout)
+	defer cancel()
+
 	res, err := (proto.RuntimeEvaluate{
 		Expression:    `JSON.stringify(window.__cfChallengeParams || null)`,
 		ReturnByValue: true,
-	}).Call(page)
+	}).Call(page.Context(ctx))
 	if err != nil || res == nil || res.Result == nil {
 		return nil, false
 	}
@@ -166,7 +176,7 @@ func readMainFrameParams(page *rod.Page) (*ChallengeParams, bool) {
 // Turnstile widget — writing the cf-turnstile-response textarea is not always
 // enough. It tries the main frame first, then any captured OOPIF child. Returns
 // true if the callback fired.
-func InjectCapturedCallback(page *rod.Page, token string) bool {
+func InjectCapturedCallback(ctx context.Context, page *rod.Page, token string) bool {
 	st, ok := loadState(page)
 	if !ok {
 		return false
@@ -178,12 +188,11 @@ func InjectCapturedCallback(page *rod.Page, token string) bool {
 	expr := `(() => { try { if (typeof window.__cfChallengeCallback === 'function') { window.__cfChallengeCallback(` +
 		string(tokenJSON) + `); return true; } } catch (e) {} return false; })()`
 
-	if res, err := (proto.RuntimeEvaluate{Expression: expr, ReturnByValue: true}).Call(page); err == nil &&
-		res != nil && res.Result != nil && res.Result.Value.Bool() {
+	if fired, err := evalWithContext(ctx, page, expr); err == nil && fired {
 		log.Debug().Msg("Delivered token via captured turnstile callback (main frame)")
 		return true
 	}
-	if st.injectCallback(expr) {
+	if st.injectCallback(ctx, expr) {
 		log.Debug().Msg("Delivered token via captured turnstile callback (OOPIF)")
 		return true
 	}

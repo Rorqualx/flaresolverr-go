@@ -500,7 +500,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		// challenges expose their sitekey/action/cData/chlPageData to the external
 		// solver. Only when an external solver chain can consume them.
 		if s.solverChain != nil {
-			captcha.InstallTurnstileInterceptor(page)
+			captcha.InstallTurnstileInterceptor(solveCtx, page)
 			defer captcha.RemoveTurnstileInterceptor(page)
 		}
 
@@ -603,7 +603,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	// challenges expose their sitekey/action/cData/chlPageData to the external
 	// solver. Only when an external solver chain can consume them.
 	if s.solverChain != nil {
-		captcha.InstallTurnstileInterceptor(page)
+		captcha.InstallTurnstileInterceptor(solveCtx, page)
 		defer captcha.RemoveTurnstileInterceptor(page)
 	}
 

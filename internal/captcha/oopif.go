@@ -31,7 +31,17 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const oopifCDPTimeout = 8 * time.Second
+const (
+	// oopifCDPTimeout bounds one raw CDP command.
+	oopifCDPTimeout = 8 * time.Second
+
+	// maxOOPIFChildren bounds how many child sessions are tracked per page. A
+	// challenge page has one or two; an ad-heavy page can attach dozens.
+	maxOOPIFChildren = 64
+
+	// oopifStopTimeout bounds how long stop waits for the listener to exit.
+	oopifStopTimeout = 2 * time.Second
+)
 
 // oopifAutoAttachParams attaches to directly-related targets (iframes/OOPIFs),
 // over a single flat connection, pausing each new target until we resume it.
@@ -41,21 +51,30 @@ var oopifAutoAttachParams = map[string]any{
 	"flatten":                true,
 }
 
+// oopifAutoAttachOff undoes oopifAutoAttachParams.
+var oopifAutoAttachOff = map[string]any{
+	"autoAttach":             false,
+	"waitForDebuggerOnStart": false,
+	"flatten":                true,
+}
+
 // oopifState tracks the browser-level auto-attach capture for one page's OOPIF
 // children. It is created per InstallTurnstileInterceptor and stopped by
 // RemoveTurnstileInterceptor.
 type oopifState struct {
 	browser     *rod.Browser
 	pageSession proto.TargetSessionID
-	cancel      func()
+	cancel      context.CancelFunc
+	done        chan struct{} // closed when the listener goroutine has exited
 
 	mu       sync.Mutex
 	children []proto.TargetSessionID
 }
 
-// rawCDP sends a session-scoped CDP command beneath go-rod with a bounded timeout.
-func rawCDP(b *rod.Browser, sid proto.TargetSessionID, method string, params interface{}) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), oopifCDPTimeout)
+// rawCDP sends a session-scoped CDP command beneath go-rod, bounded by ctx and
+// by a timeout of its own.
+func rawCDP(ctx context.Context, b *rod.Browser, sid proto.TargetSessionID, method string, params interface{}) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, oopifCDPTimeout)
 	defer cancel()
 	return b.Call(ctx, string(sid), method, params)
 }
@@ -63,7 +82,10 @@ func rawCDP(b *rod.Browser, sid proto.TargetSessionID, method string, params int
 // installOOPIFCapture enables auto-attach on the page session and starts the
 // browser-level listener. Always returns a non-nil state (with no listener if
 // setup fails) so the caller's presence check still works for the main frame.
-func installOOPIFCapture(page *rod.Page) *oopifState {
+//
+// The listener lives until stop() or until ctx ends, whichever is first, so a
+// request that is abandoned takes its listener with it.
+func installOOPIFCapture(ctx context.Context, page *rod.Page) *oopifState {
 	browser := page.Browser()
 	st := &oopifState{pageSession: page.SessionID}
 	if browser == nil {
@@ -71,18 +93,29 @@ func installOOPIFCapture(page *rod.Page) *oopifState {
 	}
 	st.browser = browser
 
-	if _, err := rawCDP(browser, page.SessionID, "Target.setAutoAttach", oopifAutoAttachParams); err != nil {
+	if _, err := rawCDP(ctx, browser, page.SessionID, "Target.setAutoAttach", oopifAutoAttachParams); err != nil {
 		log.Debug().Err(err).Msg("OOPIF capture: setAutoAttach on page session failed; main-frame capture only")
 		return st
 	}
 
-	lb, cancel := browser.WithCancel()
+	listenCtx, cancel := context.WithCancel(ctx)
 	st.cancel = cancel
-	wait := lb.EachEvent(func(e *proto.TargetAttachedToTarget, envelope proto.TargetSessionID) bool {
-		st.handleAttached(e, envelope)
-		return false // keep listening until cancel()
-	})
-	go wait()
+	st.done = make(chan struct{})
+
+	wait := browser.Context(listenCtx).EachEvent(
+		func(e *proto.TargetAttachedToTarget, envelope proto.TargetSessionID) bool {
+			st.handleAttached(listenCtx, e, envelope)
+			return false // keep listening until the context ends
+		},
+		func(e *proto.TargetDetachedFromTarget) bool {
+			st.untrack(e.SessionID)
+			return false
+		},
+	)
+	go func() {
+		defer close(st.done)
+		wait()
+	}()
 	return st
 }
 
@@ -102,6 +135,38 @@ func (st *oopifState) belongs(envelope proto.TargetSessionID) bool {
 	return false
 }
 
+// track remembers a child session. It reports false, and remembers nothing,
+// when the page already has maxOOPIFChildren live children.
+func (st *oopifState) track(child proto.TargetSessionID) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.children) >= maxOOPIFChildren {
+		return false
+	}
+	st.children = append(st.children, child)
+	return true
+}
+
+// untrack forgets a child session whose target has gone away, so later lookups
+// do not send commands to a dead session.
+func (st *oopifState) untrack(child proto.TargetSessionID) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i, c := range st.children {
+		if c == child {
+			st.children = append(st.children[:i], st.children[i+1:]...)
+			return
+		}
+	}
+}
+
+// snapshot returns a copy of the tracked child sessions.
+func (st *oopifState) snapshot() []proto.TargetSessionID {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return append([]proto.TargetSessionID(nil), st.children...)
+}
+
 // handleAttached registers the interceptor at document_start in a freshly-
 // attached, paused child and releases it. runIfWaitingForDebugger MUST always run
 // or the child hangs.
@@ -112,39 +177,38 @@ func (st *oopifState) belongs(envelope proto.TargetSessionID) bool {
 // We also do NOT recurse auto-attach into grandchildren — Cloudflare's managed-
 // challenge Turnstile is a DIRECT child of the main page, and recursing explodes
 // the paused-target count on pages full of nested ad iframes.
-func (st *oopifState) handleAttached(e *proto.TargetAttachedToTarget, envelope proto.TargetSessionID) {
+func (st *oopifState) handleAttached(ctx context.Context, e *proto.TargetAttachedToTarget, envelope proto.TargetSessionID) {
 	if e == nil || e.TargetInfo == nil || !st.belongs(envelope) {
 		return
 	}
 	child := e.SessionID
-	st.mu.Lock()
-	st.children = append(st.children, child)
-	st.mu.Unlock()
-
 	b := st.browser
-	// Page domain must be enabled for addScriptToEvaluateOnNewDocument to work.
-	_, _ = rawCDP(b, child, "Page.enable", nil)
-	if _, err := rawCDP(b, child, "Page.addScriptToEvaluateOnNewDocument",
-		map[string]any{"source": turnstileInterceptorJS}); err != nil {
-		log.Debug().Err(err).Msg("OOPIF capture: addScriptToEvaluateOnNewDocument failed")
+
+	if st.track(child) {
+		// Page domain must be enabled for addScriptToEvaluateOnNewDocument to work.
+		// Ignore error: the next call reports the failure that matters.
+		_, _ = rawCDP(ctx, b, child, "Page.enable", nil)
+		if _, err := rawCDP(ctx, b, child, "Page.addScriptToEvaluateOnNewDocument",
+			map[string]any{"source": turnstileInterceptorJS}); err != nil {
+			log.Debug().Err(err).Msg("OOPIF capture: addScriptToEvaluateOnNewDocument failed")
+		}
+	} else {
+		log.Debug().Int("limit", maxOOPIFChildren).Msg("OOPIF capture: child limit reached; releasing child without instrumenting it")
 	}
-	if _, err := rawCDP(b, child, "Runtime.runIfWaitingForDebugger", nil); err != nil {
+
+	if _, err := rawCDP(ctx, b, child, "Runtime.runIfWaitingForDebugger", nil); err != nil {
 		log.Debug().Err(err).Msg("OOPIF capture: runIfWaitingForDebugger failed (child may stay paused)")
 	}
 }
 
 // params returns the first captured render params (carrying a sitekey) found in
 // any tracked OOPIF child session.
-func (st *oopifState) params() (*ChallengeParams, bool) {
+func (st *oopifState) params(ctx context.Context) (*ChallengeParams, bool) {
 	if st == nil || st.browser == nil {
 		return nil, false
 	}
-	st.mu.Lock()
-	children := append([]proto.TargetSessionID(nil), st.children...)
-	st.mu.Unlock()
-
-	for _, child := range children {
-		if p, ok := readSessionChallengeParams(st.browser, child); ok {
+	for _, child := range st.snapshot() {
+		if p, ok := readSessionChallengeParams(ctx, st.browser, child); ok {
 			return p, true
 		}
 	}
@@ -153,16 +217,12 @@ func (st *oopifState) params() (*ChallengeParams, bool) {
 
 // injectCallback delivers a solved token to any OOPIF child that captured a
 // callback. Returns true if a child reported the callback fired.
-func (st *oopifState) injectCallback(expr string) bool {
+func (st *oopifState) injectCallback(ctx context.Context, expr string) bool {
 	if st == nil || st.browser == nil {
 		return false
 	}
-	st.mu.Lock()
-	children := append([]proto.TargetSessionID(nil), st.children...)
-	st.mu.Unlock()
-
-	for _, child := range children {
-		raw, err := rawCDP(st.browser, child, "Runtime.evaluate",
+	for _, child := range st.snapshot() {
+		raw, err := rawCDP(ctx, st.browser, child, "Runtime.evaluate",
 			map[string]any{"expression": expr, "returnByValue": true})
 		if err != nil {
 			continue
@@ -174,15 +234,35 @@ func (st *oopifState) injectCallback(expr string) bool {
 	return false
 }
 
+// stop ends the listener and waits, briefly, for its goroutine to exit.
 func (st *oopifState) stop() {
-	if st != nil && st.cancel != nil {
-		st.cancel()
+	if st == nil || st.cancel == nil {
+		return
+	}
+	st.cancel()
+
+	timer := time.NewTimer(oopifStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-st.done:
+	case <-timer.C:
+		log.Debug().Msg("OOPIF capture: listener did not exit in time")
+	}
+
+	// Turn auto-attach back off. With the listener gone nothing would release a
+	// child paused by waitForDebuggerOnStart, so a page that outlives this
+	// request (a session) would hang on its next cross-origin iframe. The
+	// request's context may already be over, hence a short one of our own.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), oopifStopTimeout)
+	defer cancel()
+	if _, err := rawCDP(cleanupCtx, st.browser, st.pageSession, "Target.setAutoAttach", oopifAutoAttachOff); err != nil {
+		log.Debug().Err(err).Msg("OOPIF capture: failed to disable auto-attach (page may already be closed)")
 	}
 }
 
 // readSessionChallengeParams evaluates window.__cfChallengeParams in a session.
-func readSessionChallengeParams(b *rod.Browser, sid proto.TargetSessionID) (*ChallengeParams, bool) {
-	raw, err := rawCDP(b, sid, "Runtime.evaluate", map[string]any{
+func readSessionChallengeParams(ctx context.Context, b *rod.Browser, sid proto.TargetSessionID) (*ChallengeParams, bool) {
+	raw, err := rawCDP(ctx, b, sid, "Runtime.evaluate", map[string]any{
 		"expression":    `JSON.stringify(window.__cfChallengeParams || null)`,
 		"returnByValue": true,
 	})

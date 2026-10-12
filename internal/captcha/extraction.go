@@ -119,7 +119,7 @@ func extractSitekeyFromOOPIFChildren(page *rod.Page) (string, error) {
 
 	// Try each child session
 	for _, child := range children {
-		result, err := rawCDP(st.browser, child, "Runtime.evaluate", map[string]any{
+		result, err := rawCDP(page.GetContext(), st.browser, child, "Runtime.evaluate", map[string]any{
 			"expression":    extractJS,
 			"returnByValue": true,
 		})

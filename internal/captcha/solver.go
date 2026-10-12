@@ -158,7 +158,7 @@ func (c *SolverChain) Solve(ctx context.Context, page *rod.Page, pageURL, userAg
 	// Prefer parameters captured live from the turnstile.render() call (managed
 	// challenges expose sitekey/action/cData/chlPageData only there, never as DOM
 	// attributes). Fall back to DOM/iframe extraction for embedded widgets.
-	captured, hasCaptured := ReadCapturedChallengeParams(page)
+	captured, hasCaptured := ReadCapturedChallengeParams(ctx, page)
 
 	var sitekey string
 	if hasCaptured && captured.SiteKey != "" {
@@ -234,7 +234,7 @@ func (c *SolverChain) Solve(ctx context.Context, page *rod.Page, pageURL, userAg
 		injected := false
 		// Managed challenges complete through the captured render() callback;
 		// try that first, then fall back to the generic textarea/callback methods.
-		if InjectCapturedCallback(page, result.Token) {
+		if InjectCapturedCallback(ctx, page, result.Token) {
 			injected = true
 		} else if err := InjectTurnstileToken(ctx, page, result.Token); err != nil {
 			log.Warn().Err(err).Msg("Failed to inject token, returning token anyway")
