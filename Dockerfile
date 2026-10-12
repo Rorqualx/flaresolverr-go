@@ -60,9 +60,22 @@ RUN apk add --no-cache \
     at-spi2-core \
     cups-libs \
     libdrm \
-    libxkbcommon \
-    # Optional packages that may not exist on all architectures
-    && apk add --no-cache chromium-swiftshader mesa-vulkan-swrast libva libva-glx 2>/dev/null || true
+    libxkbcommon
+
+# Optional packages that may not exist on all architectures. Kept in a separate
+# RUN, installed one at a time: a trailing `|| true` on the required install
+# above would also hide a missing chromium, and a single `apk add` of the whole
+# list installs nothing if any one package is unavailable.
+RUN for pkg in chromium-swiftshader mesa-vulkan-swrast libva libva-glx; do \
+        if apk add --no-cache "$pkg" >/dev/null 2>&1; then \
+            echo "optional package installed: $pkg"; \
+        else \
+            echo "WARNING: optional package unavailable on this architecture, skipped: $pkg"; \
+        fi; \
+    done
+
+# Fail the build if the browser this image exists to run cannot start
+RUN chromium-browser --version
 
 # Create non-root user
 RUN addgroup -g 1000 flaresolverr && \
@@ -132,9 +145,11 @@ USER flaresolverr
 # Expose ports (main API and metrics)
 EXPOSE 8191 8192
 
-# Health check
+# Health check. 127.0.0.1 rather than localhost: busybox wget uses the first
+# address it resolves, and that can be ::1 while the server listens on IPv4.
+# Shell form so PORT is read at run time.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8191/health || exit 1
+    CMD wget -q -T 5 --spider "http://127.0.0.1:${PORT:-8191}/health" || exit 1
 
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
