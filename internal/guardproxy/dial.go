@@ -7,12 +7,17 @@ import (
 	"net"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/Rorqualx/flaresolverr-go/internal/security"
 )
 
-// maxDialAttempts bounds how many of a name's validated addresses are tried.
-const maxDialAttempts = 4
+const (
+	// maxDialAttempts bounds how many of a name's validated addresses are tried.
+	maxDialAttempts = 4
+	// minDialAttempt is the least time one of those attempts is given.
+	minDialAttempt = 2 * time.Second
+)
 
 // Errors for a destination reached through an upstream proxy.
 var (
@@ -32,6 +37,10 @@ type originDialer interface {
 	// proxyHeader returns header lines to add to a plain request sent in
 	// absolute form, or nil.
 	proxyHeader() []byte
+
+	// noteAuthFailure records that an upstream proxy refused the credentials
+	// on a request forwarded in absolute form.
+	noteAuthFailure()
 }
 
 // directDialer connects straight to destinations it has validated itself.
@@ -39,6 +48,9 @@ type directDialer struct {
 	resolver   Resolver
 	dial       DialFunc
 	validateIP func(net.IP) error
+
+	// minAttempt is the least time one dial attempt is given.
+	minAttempt time.Duration
 }
 
 // newDirectDialer builds the dialer for a guard with no upstream proxy.
@@ -55,7 +67,7 @@ func newDirectDialer(opts Options) *directDialer {
 		}
 		dial = dialer.DialContext
 	}
-	return &directDialer{resolver: opts.Resolver, dial: dial, validateIP: opts.ValidateIP}
+	return &directDialer{resolver: opts.Resolver, dial: dial, validateIP: opts.ValidateIP, minAttempt: minDialAttempt}
 }
 
 // checkSocketAddress validates the ip:port a socket is about to connect to.
@@ -82,14 +94,16 @@ func (d *directDialer) open(ctx context.Context, dest destination, _ bool) (net.
 		return nil, false, err
 	}
 
+	attempts := len(addresses)
+	if attempts > maxDialAttempts {
+		attempts = maxDialAttempts
+	}
+
 	var lastErr error
-	for i, ip := range addresses {
-		if i >= maxDialAttempts {
-			break
-		}
+	for i, ip := range addresses[:attempts] {
 		// The literal that was validated is what gets dialed: the name is
 		// never handed to anything that could resolve it again.
-		conn, err := d.dial(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(dest.port)))
+		conn, err := d.dialAttempt(ctx, attempts-i, net.JoinHostPort(ip.String(), strconv.Itoa(dest.port)))
 		if err == nil {
 			return conn, false, nil
 		}
@@ -104,10 +118,30 @@ func (d *directDialer) open(ctx context.Context, dest destination, _ bool) (net.
 	return nil, false, fmt.Errorf("%w: %v", ErrDial, lastErr)
 }
 
+// dialAttempt dials address with a share of the time ctx has left, so that
+// one unresponsive address (an unroutable IPv6 answer, typically) cannot use
+// up the whole budget before the next one is tried.
+func (d *directDialer) dialAttempt(ctx context.Context, attemptsLeft int, address string) (net.Conn, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok || attemptsLeft <= 1 {
+		return d.dial(ctx, "tcp", address)
+	}
+	share := time.Until(deadline) / time.Duration(attemptsLeft)
+	if share < d.minAttempt {
+		share = d.minAttempt
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, share)
+	defer cancel()
+	return d.dial(attemptCtx, "tcp", address)
+}
+
 // proxyHeader implements originDialer: a direct connection needs none.
 func (d *directDialer) proxyHeader() []byte {
 	return nil
 }
+
+// noteAuthFailure implements originDialer: there is no upstream to refuse.
+func (d *directDialer) noteAuthFailure() {}
 
 // resolve returns the addresses host may be reached at, every one of them
 // validated. The name is looked up exactly once.

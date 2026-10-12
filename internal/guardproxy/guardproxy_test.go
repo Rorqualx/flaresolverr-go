@@ -671,6 +671,43 @@ func TestDialFallsBackToNextValidatedAddress(t *testing.T) {
 	}
 }
 
+func TestDialDoesNotSpendItsBudgetOnOneAddress(t *testing.T) {
+	origin := newRawServer(t, func(conn net.Conn) {
+		_, _ = io.Copy(io.Discard, conn)
+	})
+	network := newFakeNetwork()
+	network.route(otherPublicIP+":443", origin.addr())
+
+	// The first answer never responds (an unroutable address); the second
+	// works. The first must be given up on with time to spare.
+	env := newTestEnv(t, func(o *Options) {
+		o.DialTimeout = 2 * time.Second
+		o.Dial = func(ctx context.Context, kind, address string) (net.Conn, error) {
+			if address == publicIP+":443" {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return network.dial(ctx, kind, address)
+		}
+	})
+	direct, ok := env.proxy.origin.(*directDialer)
+	if !ok {
+		t.Fatalf("origin dialer is %T, want *directDialer", env.proxy.origin)
+	}
+	direct.minAttempt = 50 * time.Millisecond
+	env.resolver.set("multi.test", []string{publicIP, otherPublicIP})
+
+	conn := env.connect(t)
+	started := time.Now()
+	resp := roundTrip(t, conn, bufio.NewReader(conn), "CONNECT multi.test:443 HTTP/1.1\r\n\r\n")
+	if resp.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.status)
+	}
+	if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+		t.Errorf("connected after %v: the dead address used up most of the budget", elapsed)
+	}
+}
+
 func TestConnectionLimit(t *testing.T) {
 	origin := newRawServer(t, func(conn net.Conn) {
 		_, _ = io.Copy(io.Discard, conn)

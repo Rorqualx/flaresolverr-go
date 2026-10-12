@@ -25,6 +25,7 @@ package guardproxy
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -86,6 +87,10 @@ type Options struct {
 	IdleTimeout    time.Duration // no bytes in either direction
 	HeaderTimeout  time.Duration // receiving one request head
 	MaxHeaderBytes int           // size of one request head
+
+	// UpstreamRootCAs verifies an https upstream proxy's certificate. Nil
+	// means the system roots.
+	UpstreamRootCAs *x509.CertPool
 }
 
 // withDefaults returns o with every unset field filled in.

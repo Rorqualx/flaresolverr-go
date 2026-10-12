@@ -83,7 +83,10 @@ type Pool struct {
 	// released when that browser is cleaned up.
 	guard        *guardproxy.Manager
 	defaultRoute *EgressRoute
-	routes       sync.Map // map[*rod.Browser]*EgressRoute
+	// operatorProxies holds the proxy URLs from PROXY_URL and PROXY_LIST,
+	// which the guard may reach at private addresses.
+	operatorProxies map[string]bool
+	routes          sync.Map // map[*rod.Browser]*EgressRoute
 
 	// Statistics for monitoring
 	stats PoolStats
@@ -280,6 +283,7 @@ func (p *Pool) startEgressGuard(options guardproxy.Options) error {
 		return fmt.Errorf("failed to start the egress guard: %w", err)
 	}
 	p.guard = guard
+	p.operatorProxies = operatorProxyURLs(p.config)
 
 	route, err := p.GuardRoute(nil)
 	if err != nil {

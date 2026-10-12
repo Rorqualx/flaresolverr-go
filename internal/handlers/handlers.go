@@ -670,6 +670,14 @@ func (h *Handler) handleRequest(w http.ResponseWriter, ctx context.Context, req 
 			h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
 			return
 		}
+		// The egress guard chains to the proxy itself and cannot do so for
+		// every scheme Chrome accepts.
+		if h.pool.EgressGuardEnabled() {
+			if err := h.pool.CheckGuardProxy(req.Proxy); err != nil {
+				h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
+				return
+			}
+		}
 	}
 
 	// Validate proxy credentials size
@@ -1012,6 +1020,12 @@ func (h *Handler) handleSessionCreate(w http.ResponseWriter, ctx context.Context
 			log.Warn().Err(err).Msg("Session proxy URL validation failed")
 			h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
 			return
+		}
+		if h.pool.EgressGuardEnabled() {
+			if err := h.pool.CheckGuardProxy(req.Proxy); err != nil {
+				h.writeError(w, fmt.Sprintf("Invalid proxy URL: %v", err), startTime)
+				return
+			}
 		}
 		proxyURL = req.Proxy.URL
 		sessionProxy = req.Proxy

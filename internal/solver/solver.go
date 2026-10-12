@@ -467,6 +467,21 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	if guarded && opts.Proxy != nil && opts.Proxy.URL != "" {
 		contextProxy = opts.Proxy
 	}
+	if guarded {
+		// Chrome only reports that its tunnel failed. The guard knows when
+		// that was the upstream proxy refusing the credentials, so say so.
+		route, routeErr := s.pool.GuardRoute(contextProxy)
+		if routeErr != nil {
+			return nil, fmt.Errorf("failed to route the request: %w", routeErr)
+		}
+		defer route.Release()
+		authFailures := route.UpstreamAuthFailures()
+		defer func() {
+			if err != nil && route.UpstreamAuthFailures() > authFailures {
+				err = fmt.Errorf("the proxy rejected the supplied credentials: %w", err)
+			}
+		}()
+	}
 
 	if !guarded && opts.Proxy != nil && opts.Proxy.URL != "" {
 		// Per-request proxy: spawn dedicated browser with this proxy

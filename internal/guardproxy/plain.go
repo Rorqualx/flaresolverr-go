@@ -1,6 +1,7 @@
 package guardproxy
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -105,7 +106,25 @@ func (p *Proxy) link(client *clientConn, dest destination, act *activity) (*orig
 	go func() {
 		defer p.wg.Done()
 		defer close(link.done)
-		p.relay(client.Conn, conn, conn, act)
+
+		var response byteReader = conn
+		if absoluteForm {
+			// The first answer on a connection to an upstream proxy may be
+			// its refusal of our credentials. That must not reach Chrome as a
+			// proxy challenge: Chrome would ask for credentials it was never
+			// meant to have.
+			reader := bufio.NewReader(conn)
+			if p.upstreamDeniedAuth(reader, conn) {
+				p.origin.noteAuthFailure()
+				writeRefusal(client.Conn, 502, upstreamAuthReason)
+				// Ignore error: serveConn closes it again
+				_ = client.Close()
+				return
+			}
+			response = reader
+		}
+
+		p.relay(client.Conn, response, conn, act)
 		if !link.retired.Load() {
 			// The destination ended the response by closing; the client
 			// learns that the same way.
@@ -114,6 +133,20 @@ func (p *Proxy) link(client *clientConn, dest destination, act *activity) (*orig
 		}
 	}()
 	return link, nil
+}
+
+// upstreamDeniedAuth reports whether the response waiting on conn starts with
+// a 407 status line. Nothing is consumed from reader.
+func (p *Proxy) upstreamDeniedAuth(reader *bufio.Reader, conn net.Conn) bool {
+	if err := conn.SetReadDeadline(time.Now().Add(p.opts.IdleTimeout)); err != nil {
+		return false
+	}
+	const statusLinePrefix = len("HTTP/1.1 407")
+	prefix, err := reader.Peek(statusLinePrefix)
+	if err != nil {
+		return false // the relay reports whatever is wrong with the connection
+	}
+	return bytes.HasPrefix(prefix, []byte("HTTP/1.")) && bytes.HasSuffix(prefix, []byte(" 407"))
 }
 
 // finished reports whether the response relay for the link has ended.
@@ -266,6 +299,10 @@ func (p *Proxy) refuseBadRequest(conn net.Conn, err error) {
 	}
 }
 
+// upstreamAuthReason is what the client is told when the upstream proxy does
+// not accept the credentials the guard was given for it.
+const upstreamAuthReason = "The upstream proxy rejected the configured credentials"
+
 // refusalFor maps an error from opening a destination to the status and the
 // reason the client is given. The reason never includes address details
 // beyond what the client itself asked for.
@@ -274,7 +311,7 @@ func refusalFor(err error) (status int, reason string) {
 	case errors.Is(err, ErrBlocked):
 		return 403, "Blocked by the egress guard: the destination is not a public address"
 	case errors.Is(err, ErrUpstreamAuth):
-		return 502, "The upstream proxy rejected the configured credentials"
+		return 502, upstreamAuthReason
 	case errors.Is(err, ErrUpstream):
 		return 502, "The upstream proxy refused or failed the connection"
 	case errors.Is(err, ErrResolve):
