@@ -72,6 +72,10 @@ type Pool struct {
 	// fill the container's writable layer over time (GitHub issue #6).
 	launchers sync.Map // map[*rod.Browser]*launcher.Launcher
 
+	// readMemory samples the service's memory usage for monitorMemory.
+	// Replaceable in tests.
+	readMemory memoryReader
+
 	// Statistics for monitoring
 	stats PoolStats
 }
@@ -193,6 +197,7 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 		browsers:   make([]*browserEntry, 0, cfg.BrowserPoolSize),
 		stopCh:     make(chan struct{}),
 		recycleSem: make(chan struct{}, 4), // Issue #11: Limit concurrent recycles to 4
+		readMemory: systemMemoryReader,
 	}
 
 	// Pre-warm the pool by launching all browsers
@@ -1008,12 +1013,13 @@ func (p *Pool) reapLauncher(l *launcher.Launcher) {
 	}
 }
 
-// monitorMemory periodically checks memory usage and triggers recycling if needed.
+// monitorMemory periodically samples the service's real memory usage and
+// recycles idle browsers when it exceeds MAX_MEMORY_MB. See memory.go.
 func (p *Pool) monitorMemory() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(memoryCheckInterval)
 	defer ticker.Stop()
 
-	maxBytes := uint64(p.config.MaxMemoryMB) * 1024 * 1024
+	var lastRecycle time.Time
 
 	for {
 		select {
@@ -1025,22 +1031,11 @@ func (p *Pool) monitorMemory() {
 				return
 			}
 
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-
-			log.Debug().
-				Uint64("alloc_mb", m.Alloc/1024/1024).
-				Uint64("sys_mb", m.Sys/1024/1024).
-				Int("max_mb", p.config.MaxMemoryMB).
-				Msg("Memory stats")
-
-			if m.Alloc > maxBytes {
-				log.Warn().
-					Uint64("current_mb", m.Alloc/1024/1024).
-					Int("max_mb", p.config.MaxMemoryMB).
-					Msg("Memory threshold exceeded, recycling browsers")
-
-				p.recycleAll()
+			var supported bool
+			lastRecycle, supported = p.checkMemory(time.Now(), lastRecycle)
+			if !supported {
+				log.Debug().Msg("Memory usage cannot be measured on this platform, memory monitor disabled")
+				return
 			}
 		}
 	}
