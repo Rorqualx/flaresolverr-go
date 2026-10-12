@@ -187,3 +187,53 @@ func TestCheckMemory(t *testing.T) {
 		}
 	})
 }
+
+func TestParseCgroupLimit(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   string
+		want   uint64
+		wantOK bool
+	}{
+		{name: "cgroup v2 limit", data: "2147483648\n", want: 2147483648, wantOK: true},
+		{name: "cgroup v2 no limit", data: "max\n"},
+		{name: "cgroup v1 no limit", data: "9223372036854771712\n"},
+		{name: "zero", data: "0\n"},
+		{name: "empty", data: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseCgroupLimit([]byte(tt.data))
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("parseCgroupLimit() = %d, %v, want %d, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestEffectiveMemoryLimitMB(t *testing.T) {
+	const gib = 1024 * 1024 * 1024
+	tests := []struct {
+		name        string
+		configured  int
+		limitBytes  uint64
+		hasLimit    bool
+		want        uint64
+		wantClamped bool
+	}{
+		{name: "no container limit", configured: 4096, want: 4096},
+		{name: "container limit above the budget", configured: 4096, limitBytes: 8 * gib, hasLimit: true, want: 4096},
+		{name: "container limit below the budget", configured: 4096, limitBytes: 2 * gib, hasLimit: true, want: 1843, wantClamped: true},
+		{name: "budget inside the headroom", configured: 1800, limitBytes: 2 * gib, hasLimit: true, want: 1800},
+		{name: "budget equal to the container limit", configured: 2048, limitBytes: 2 * gib, hasLimit: true, want: 1843, wantClamped: true},
+		{name: "negative budget", configured: -1, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, clamped := effectiveMemoryLimitMB(tt.configured, tt.limitBytes, tt.hasLimit)
+			if got != tt.want || clamped != tt.wantClamped {
+				t.Errorf("effectiveMemoryLimitMB() = %d, %v, want %d, %v", got, clamped, tt.want, tt.wantClamped)
+			}
+		})
+	}
+}

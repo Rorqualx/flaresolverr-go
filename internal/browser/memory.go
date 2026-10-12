@@ -21,6 +21,11 @@ const (
 	// memoryCheckInterval is how often memory usage is sampled.
 	memoryCheckInterval = 30 * time.Second
 
+	// containerLimitPercent is the share of the container's own memory limit
+	// that MAX_MEMORY_MB may reach. The kernel kills the container at 100%, so
+	// recycling has to start before that to be of any use.
+	containerLimitPercent = 90
+
 	// memoryRecycleCooldown is the minimum time between two memory-pressure
 	// recycles. Recycling only frees what idle pool browsers were holding; if
 	// usage is still over the limit afterwards (open sessions, requests in
@@ -38,6 +43,37 @@ type memorySample struct {
 // the platform offers no way to measure it.
 type memoryReader func() (sample memorySample, ok bool)
 
+// effectiveMemoryLimitMB returns the threshold the monitor acts on: the
+// configured MAX_MEMORY_MB, lowered to containerLimitPercent of the
+// container's memory limit when the container has one and it is smaller.
+// clamped reports whether it was lowered.
+func effectiveMemoryLimitMB(configuredMB int, containerLimitBytes uint64, hasContainerLimit bool) (limitMB uint64, clamped bool) {
+	configured := uint64(max(configuredMB, 0))
+	if !hasContainerLimit {
+		return configured, false
+	}
+	ceiling := containerLimitBytes / (1024 * 1024) * containerLimitPercent / 100
+	if ceiling == 0 || configured <= ceiling {
+		return configured, false
+	}
+	return ceiling, true
+}
+
+// resolveMemoryLimit works out the monitor's threshold once, at startup, and
+// says so when the container's own limit forced it below MAX_MEMORY_MB.
+func resolveMemoryLimit(configuredMB int) uint64 {
+	containerLimit, hasLimit := containerMemoryLimit()
+	limitMB, clamped := effectiveMemoryLimitMB(configuredMB, containerLimit, hasLimit)
+	if clamped {
+		log.Warn().
+			Int("max_memory_mb", configuredMB).
+			Uint64("container_limit_mb", containerLimit/(1024*1024)).
+			Uint64("effective_mb", limitMB).
+			Msg("MAX_MEMORY_MB is above what the container's memory limit allows; recycling browsers at the lower value. Raise the container's memory limit to use the full budget")
+	}
+	return limitMB
+}
+
 // checkMemory takes one sample and recycles idle browsers if usage is over the
 // limit and the cooldown has passed. lastRecycle is the time of the previous
 // memory-pressure recycle (zero if none). It returns the updated lastRecycle
@@ -49,7 +85,10 @@ func (p *Pool) checkMemory(now time.Time, lastRecycle time.Time) (time.Time, boo
 	}
 
 	usedMB := sample.bytes / (1024 * 1024)
-	limitMB := uint64(p.config.MaxMemoryMB)
+	limitMB := p.memoryLimitMB
+	if limitMB == 0 {
+		limitMB = uint64(max(p.config.MaxMemoryMB, 0))
+	}
 
 	log.Debug().
 		Uint64("used_mb", usedMB).
@@ -80,6 +119,21 @@ func (p *Pool) checkMemory(now time.Time, lastRecycle time.Time) (time.Time, boo
 	// when released, so no request or session loses its browser.
 	p.recycleAll()
 	return now, true
+}
+
+// unlimitedCgroupMemory is the smallest value treated as "no limit". cgroup v2
+// writes "max"; cgroup v1 writes a number close to the largest page-aligned
+// int64, far above any real machine.
+const unlimitedCgroupMemory = 1 << 60
+
+// parseCgroupLimit reads a cgroup memory limit file. ok is false when the
+// file says there is no limit or cannot be read as a number.
+func parseCgroupLimit(data []byte) (limitBytes uint64, ok bool) {
+	limit, err := strconv.ParseUint(string(bytes.TrimSpace(data)), 10, 64)
+	if err != nil || limit == 0 || limit >= unlimitedCgroupMemory {
+		return 0, false
+	}
+	return limit, true
 }
 
 // parseCgroupWorkingSet computes working-set memory from a cgroup's usage and

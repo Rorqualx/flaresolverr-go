@@ -8,10 +8,10 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-rod/rod v0.116.2
 	github.com/go-rod/stealth v0.4.9
-	github.com/rs/zerolog v1.32.0
+	github.com/rs/zerolog v1.35.1
 	github.com/ysmood/gson v0.7.3
 	golang.org/x/net v0.60.0
-	golang.org/x/sync v0.23.0
+	golang.org/x/sync v0.24.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -24,7 +24,7 @@ require (
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect

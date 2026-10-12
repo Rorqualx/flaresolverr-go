@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-12
+
+### Changed
+- **`MAX_MEMORY_MB` defaults to 4096** (was 2048), so the default `MAX_SESSIONS=20` fits in the budget and the startup warning about it is gone. If the container has its own memory limit below `MAX_MEMORY_MB`, browsers are recycled at 90% of that limit instead and a warning says so at startup: a budget above the container limit could never be reached, the kernel would stop the container first. To use the full budget, give the container at least that much memory.
+
+### Dependencies
+- Go modules: `golang.org/x/net` 0.60.0, `golang.org/x/sync` 0.24.0, `github.com/rs/zerolog` 1.35.1, `github.com/fsnotify/fsnotify` 1.10.1.
+- CI actions: `actions/checkout` 7.0.1, `actions/setup-go` 7.0.0, `docker/metadata-action` 6.2.0, `docker/login-action` 4.6.0, `codecov/codecov-action` 7.1.1. `golangci-lint-action` stays on v4: v9 needs golangci-lint v2, which this project has not moved to.
+
 ## [0.11.0] - 2026-10-12
 
 ### Changed (may need action on upgrade)
