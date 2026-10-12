@@ -212,7 +212,9 @@ flaresolverr-go/
 │   │   ├── egress.go             # Routing browsers and contexts through the egress guard
 │   │   ├── stealth.go            # Stealth script, UA and viewport overrides
 │   │   ├── stealth_extension.go  # Stealth as a Chrome extension (reconnect bypass)
-│   │   ├── fingerprint.go        # Fingerprint profiles
+│   │   ├── page_setup.go         # The one page setup every request path uses
+│   │   ├── user_agent.go         # User agent override: platform, client hints, language
+│   │   ├── memory.go             # Container memory reading for MAX_MEMORY_MB
 │   │   ├── timezone.go           # Timezone override (CDP)
 │   │   ├── proxy.go              # Proxy authentication over CDP
 │   │   ├── proxy_extension.go    # Proxy authentication as an extension
@@ -987,7 +989,7 @@ func (p *Pool) Acquire() *rod.Browser {
 | `types/` | 90% | Validation logic |
 | `config/` | 80% | Loading, defaults |
 | `browser/` | 70% | Pool acquire/release |
-| `sessions/` | 80% | Create/destroy, TTL |
+| `session/` | 80% | Create/destroy, TTL |
 | `solver/` | 70% | Detection, extraction |
 | `handlers/` | 80% | All endpoints |
 
