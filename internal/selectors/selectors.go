@@ -22,6 +22,17 @@ type Selectors struct {
 	TurnstileFramePattern string   `yaml:"turnstile_frame_pattern"`
 	ShadowHosts           []string `yaml:"shadow_hosts"`
 	ShadowInnerSelectors  []string `yaml:"shadow_inner_selectors"`
+
+	// Challenge-in-progress detection
+	ChallengeTitles    []string `yaml:"challenge_titles"`    // Lowercase substrings of the page title
+	ChallengeSelectors []string `yaml:"challenge_selectors"` // CSS selectors, checked in order
+
+	// Turnstile widget location
+	TurnstileTriggerSelectors   []string `yaml:"turnstile_trigger_selectors"`   // Challenge selectors that start Turnstile solving
+	TurnstileWidgetSelectors    []string `yaml:"turnstile_widget_selectors"`    // The widget; the first is the one inspected
+	TurnstileClickSelectors     []string `yaml:"turnstile_click_selectors"`     // Elements to click, in order of preference
+	TurnstileContainerSelectors []string `yaml:"turnstile_container_selectors"` // Containers for a positional click
+	TurnstileLandmarkSelector   string   `yaml:"turnstile_landmark_selector"`   // The hidden response input
 }
 
 var (
@@ -122,5 +133,47 @@ func defaultSelectors() *Selectors {
 			"[aria-checked]",
 			"label input",
 		},
+		ChallengeTitles: []string{
+			"just a moment",
+			"checking your browser",
+			"ddos-guard",
+			"please wait",
+			"attention required",
+		},
+		ChallengeSelectors: []string{
+			"#cf-challenge-running",
+			".ray_id",
+			"#turnstile-wrapper",
+			".cf-turnstile",
+			"#cf-wrapper",
+			"#challenge-running",
+			"#challenge-stage",
+			"#cf-spinner-please-wait",
+			"#cf-spinner-redirecting",
+			"iframe[src*='challenges.cloudflare.com']",
+		},
+		TurnstileTriggerSelectors: []string{
+			"#turnstile-wrapper",
+			".cf-turnstile",
+			"iframe[src*='challenges.cloudflare.com']",
+			"#cf-challenge-running",
+			"#challenge-stage",
+		},
+		TurnstileWidgetSelectors: []string{
+			".cf-turnstile",
+			"#turnstile-wrapper",
+		},
+		TurnstileClickSelectors: []string{
+			".cf-turnstile iframe",
+			"[data-sitekey] iframe",
+			".cf-turnstile",
+			"[data-sitekey]",
+		},
+		TurnstileContainerSelectors: []string{
+			"#turnstile-wrapper",
+			".cf-turnstile",
+			"[data-sitekey]",
+		},
+		TurnstileLandmarkSelector: "input[name='cf-turnstile-response']",
 	}
 }

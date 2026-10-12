@@ -21,7 +21,7 @@ This project is fully API-compatible with the original FlareSolverr. You can rep
 - **Memory Management** - Active memory monitoring with automatic browser recycling
 - **Session Support** - TTL-based session management with per-request TTL override, keepalive command, and automatic cleanup
 - **Cloudflare Bypass** - Solves JavaScript challenges and Turnstile CAPTCHAs
-- **Anti-Fingerprinting** - 20 composable stealth patches with configurable fingerprint profiles (default, Windows, macOS, minimal)
+- **Anti-Fingerprinting** - The same browser fingerprint on every request, stateless or session, with a per-request timezone and User-Agent
 - **Per-Session Chrome Flags** - Custom window size, language, timezone, and Chrome flags per session with dedicated browser instances
 - **Human-Like Behavior** - Bezier curve mouse movements, randomized timing, and natural scroll patterns
 - **Two-Phase CDP Bypass** - Bypasses Cloudflare's managed challenge loop by launching a clean Chrome without CDP for challenge resolution
@@ -208,7 +208,7 @@ curl -X POST http://localhost:8191/v1 \
 | `keepaliveTtl` | int | No | New TTL in minutes for `sessions.keepalive` (0 = just touch, max 1440) |
 | `cookieExtractDelay` | int | No | Seconds to wait before extracting cookies (0-30). Captures late-set JS cookies |
 | `browserFlags` | object | No | Per-session Chrome flag overrides (`sessions.create` only). See below |
-| `fingerprint` | object | No | Per-request browser fingerprint customization. See below |
+| `fingerprint` | object | No | Only `overrides.timezone` is honored; fingerprint profiles have been removed. See below |
 
 #### Cookie Object
 
@@ -278,53 +278,21 @@ curl -X POST http://localhost:8191/v1 \
 
 #### Fingerprint Object
 
-Per-request browser fingerprint customization. Controls which stealth patches apply and what values they report.
+Fingerprint profiles have been removed. They never took effect on stateless requests, and every request now presents the same browser whether or not it uses a session.
+
+The `fingerprint` field is still accepted, so existing clients keep working, but only one option in it does anything:
 
 ```json
 {
-  "profile": "desktop-chrome-windows",
-  "overrides": {
-    "timezone": "Asia/Tokyo",
-    "screenWidth": 1920,
-    "screenHeight": 1080
-  },
-  "disablePatches": ["canvas", "audio"]
+  "overrides": { "timezone": "Asia/Tokyo" }
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `profile` | string | Builtin profile name (see below) |
-| `overrides` | object | Override individual fingerprint dimensions |
-| `disablePatches` | array | Stealth patches to skip by name |
+| `overrides.timezone` | string | IANA timezone ID for this request, applied through the browser's own timezone emulation. Takes priority over `TZ` and a session's `browserFlags.timezone` |
 
-**Builtin Profiles:**
-
-| Profile | Description |
-|---------|-------------|
-| `default` | All patches enabled, standard 1920x1080, 8GB memory, 4 cores |
-| `desktop-chrome-windows` | Windows UA, NVIDIA WebGL, 16GB memory, 8 cores |
-| `desktop-chrome-mac` | macOS UA, Apple M1 WebGL, 2560x1440, 16GB, 10 cores |
-| `minimal` | Only essential patches (webdriver, plugins, chrome-runtime) |
-
-**Override Keys:** `timezone`, `locale`, `screenWidth`, `screenHeight`, `deviceMemory`, `hardwareConcurrency`, `webglVendor`, `webglRenderer`, `canvasNoiseSeed`
-
-**Available Patches:** `webrtc`, `webdriver`, `plugins`, `languages`, `chrome-runtime`, `permissions`, `connection`, `hardware-concurrency`, `device-memory`, `tostring`, `webgl`, `notifications`, `canvas`, `audio`, `battery`, `speech`, `fonts`, `timezone`, `screen-position`, `device-pixel-ratio`
-
-**Example**: Request with Windows fingerprint and Tokyo timezone:
-```bash
-curl -X POST http://localhost:8191/v1 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "cmd": "request.get",
-    "url": "https://example.com",
-    "maxTimeout": 60000,
-    "fingerprint": {
-      "profile": "desktop-chrome-windows",
-      "overrides": {"timezone": "Asia/Tokyo"}
-    }
-  }'
-```
+`profile`, `disablePatches` and every other override are ignored; the server logs one warning per request naming them. To change the User-Agent, use the top-level `userAgent` field: the client hints and `navigator.platform` follow it.
 
 ### Response Format
 

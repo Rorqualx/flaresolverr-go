@@ -86,7 +86,7 @@ func (s *Scroller) ScrollToElement(ctx context.Context, element *rod.Element) er
 		return err
 	}
 
-	// Calculate element center Y position
+	// The quad is relative to the viewport, not to the page.
 	quad := shape.Quads[0]
 	elementCenterY := (quad[1] + quad[3] + quad[5] + quad[7]) / 4
 
@@ -94,31 +94,47 @@ func (s *Scroller) ScrollToElement(ctx context.Context, element *rod.Element) er
 	currentScrollY := layoutMetrics.VisualViewport.PageY
 	viewportHeight := layoutMetrics.VisualViewport.ClientHeight
 
-	// Calculate if element is in view
-	viewportTop := currentScrollY
-	viewportBottom := currentScrollY + viewportHeight
-
 	// Check if element is already in view (with margin)
-	if elementCenterY >= viewportTop+s.config.ScrollMargin &&
-		elementCenterY <= viewportBottom-s.config.ScrollMargin {
+	if inViewport(elementCenterY, elementCenterY, viewportHeight, s.config.ScrollMargin) {
 		log.Debug().Msg("Element already in view, no scroll needed")
 		return nil
 	}
 
-	// Calculate target scroll position (center element in viewport)
-	targetScrollY := elementCenterY - viewportHeight/2
-
-	// Clamp to valid scroll range
-	maxScrollY := layoutMetrics.ContentSize.Height - viewportHeight
-	if targetScrollY < 0 {
-		targetScrollY = 0
-	}
-	if targetScrollY > maxScrollY {
-		targetScrollY = maxScrollY
-	}
+	// Scroll so the element's center is in the middle of the viewport
+	target := targetScrollY(elementCenterY, currentScrollY, viewportHeight, layoutMetrics.ContentSize.Height)
 
 	// Perform smooth scroll
-	return s.smoothScrollTo(ctx, currentScrollY, targetScrollY)
+	return s.smoothScrollTo(ctx, currentScrollY, target)
+}
+
+// inViewport reports whether the span from top to bottom lies inside the
+// viewport, at least margin away from its top and bottom edges. top and bottom
+// are relative to the viewport, as element quads are: 0 is the viewport's top
+// edge, whatever the page's scroll position.
+func inViewport(top, bottom, viewportHeight, margin float64) bool {
+	return top >= margin && bottom <= viewportHeight-margin
+}
+
+// targetScrollY returns the page scroll position that puts a point in the
+// middle of the viewport. centerY is the point's position relative to the
+// viewport; scrollY is the current scroll position. The result is clamped to
+// the range the page can scroll.
+func targetScrollY(centerY, scrollY, viewportHeight, contentHeight float64) float64 {
+	return clampScrollY(scrollY+centerY-viewportHeight/2, viewportHeight, contentHeight)
+}
+
+// clampScrollY limits a scroll position to the range the page can scroll:
+// 0 to contentHeight-viewportHeight, or just 0 when the content is shorter
+// than the viewport.
+func clampScrollY(y, viewportHeight, contentHeight float64) float64 {
+	maxScrollY := contentHeight - viewportHeight
+	if y > maxScrollY {
+		y = maxScrollY
+	}
+	if y < 0 {
+		y = 0
+	}
+	return y
 }
 
 // ScrollBy scrolls the page by the specified delta with smooth animation.
@@ -130,18 +146,9 @@ func (s *Scroller) ScrollBy(ctx context.Context, deltaY float64) error {
 	}
 
 	currentScrollY := layoutMetrics.VisualViewport.PageY
-	targetScrollY := currentScrollY + deltaY
+	target := clampScrollY(currentScrollY+deltaY, layoutMetrics.VisualViewport.ClientHeight, layoutMetrics.ContentSize.Height)
 
-	// Clamp to valid range
-	maxScrollY := layoutMetrics.ContentSize.Height - layoutMetrics.VisualViewport.ClientHeight
-	if targetScrollY < 0 {
-		targetScrollY = 0
-	}
-	if targetScrollY > maxScrollY {
-		targetScrollY = maxScrollY
-	}
-
-	return s.smoothScrollTo(ctx, currentScrollY, targetScrollY)
+	return s.smoothScrollTo(ctx, currentScrollY, target)
 }
 
 // ScrollToTop smoothly scrolls to the top of the page.
@@ -217,8 +224,10 @@ func (s *Scroller) smoothScrollTo(ctx context.Context, fromY, toY float64) error
 		// Calculate current scroll position
 		currentY := fromY + (toY-fromY)*easedT
 
-		// Execute scroll via JavaScript
-		_, err := s.page.Eval(`window.scrollTo({top: arguments[0], behavior: 'instant'})`, currentY)
+		// Execute scroll via JavaScript. Eval calls what it is given as a
+		// function, so this must be one: a bare statement is not callable and
+		// every step failed.
+		_, err := s.page.Eval(`(y) => window.scrollTo({top: y, behavior: 'instant'})`, currentY)
 		if err != nil {
 			log.Debug().Err(err).Msg("Scroll step failed")
 			// Continue anyway, might still work
@@ -279,20 +288,13 @@ func (s *Scroller) EnsureElementVisible(ctx context.Context, element *rod.Elemen
 		return false, err
 	}
 
-	// Calculate element position
+	// The quad is relative to the viewport, not to the page.
 	quad := shape.Quads[0]
 	elementTop := quad[1]
 	elementBottom := quad[5]
 
-	// Get viewport bounds
-	viewportTop := layoutMetrics.VisualViewport.PageY
-	viewportBottom := viewportTop + layoutMetrics.VisualViewport.ClientHeight
-
 	// Check if element is fully visible
-	isVisible := elementTop >= viewportTop+s.config.ScrollMargin &&
-		elementBottom <= viewportBottom-s.config.ScrollMargin
-
-	if isVisible {
+	if inViewport(elementTop, elementBottom, layoutMetrics.VisualViewport.ClientHeight, s.config.ScrollMargin) {
 		return false, nil
 	}
 

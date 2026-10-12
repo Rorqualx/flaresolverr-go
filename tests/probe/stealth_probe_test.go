@@ -299,7 +299,7 @@ func TestSetUserAgent_ClientHintsMatch(t *testing.T) {
 
 	// Set a custom user agent
 	testUA := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-	if err := browser.SetUserAgent(page, testUA); err != nil {
+	if err := browser.SetUserAgent(page, testUA, ""); err != nil {
 		t.Fatalf("SetUserAgent failed: %v", err)
 	}
 
