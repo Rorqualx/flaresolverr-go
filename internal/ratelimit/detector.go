@@ -2,6 +2,7 @@
 package ratelimit
 
 import (
+	"net/http"
 	"regexp"
 	"strings"
 )
@@ -28,6 +29,12 @@ type ErrorPattern struct {
 	Category    ErrorCategory
 	BaseDelayMs int
 	Description string
+
+	// ErrorStatusOnly restricts the pattern to responses with an HTTP error
+	// status (>= 400). The generic phrases appear in the text and scripts of
+	// ordinary pages ("rateLimit" as a JS identifier, an "access denied" help
+	// article), so on a 2xx/3xx page they are not evidence of anything.
+	ErrorStatusOnly bool
 }
 
 // Info contains detected rate limit information.
@@ -103,32 +110,36 @@ var patterns = []ErrorPattern{
 
 	// Generic patterns (less specific, checked after Cloudflare codes)
 	{
-		Pattern:     regexp.MustCompile(`(?i)access\s{1,5}denied`),
-		ErrorCode:   "ACCESS_DENIED",
-		Category:    CategoryAccessDenied,
-		BaseDelayMs: 5000,
-		Description: "Generic access denied",
+		Pattern:         regexp.MustCompile(`(?i)access\s{1,5}denied`),
+		ErrorCode:       "ACCESS_DENIED",
+		Category:        CategoryAccessDenied,
+		BaseDelayMs:     5000,
+		Description:     "Generic access denied",
+		ErrorStatusOnly: true,
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)rate\s{0,3}limit`),
-		ErrorCode:   "RATE_LIMITED",
-		Category:    CategoryRateLimit,
-		BaseDelayMs: 10000,
-		Description: "Generic rate limit",
+		Pattern:         regexp.MustCompile(`(?i)rate\s{0,3}limit`),
+		ErrorCode:       "RATE_LIMITED",
+		Category:        CategoryRateLimit,
+		BaseDelayMs:     10000,
+		Description:     "Generic rate limit",
+		ErrorStatusOnly: true,
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)too\s{1,5}many\s{1,5}requests`),
-		ErrorCode:   "TOO_MANY_REQUESTS",
-		Category:    CategoryRateLimit,
-		BaseDelayMs: 10000,
-		Description: "Too many requests",
+		Pattern:         regexp.MustCompile(`(?i)too\s{1,5}many\s{1,5}requests`),
+		ErrorCode:       "TOO_MANY_REQUESTS",
+		Category:        CategoryRateLimit,
+		BaseDelayMs:     10000,
+		Description:     "Too many requests",
+		ErrorStatusOnly: true,
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)you\s{1,5}(have\s{1,5}been\s{1,5})?blocked`),
-		ErrorCode:   "BLOCKED",
-		Category:    CategoryAccessDenied,
-		BaseDelayMs: 15000,
-		Description: "Request blocked",
+		Pattern:         regexp.MustCompile(`(?i)you\s{1,5}(have\s{1,5}been\s{1,5})?blocked`),
+		ErrorCode:       "BLOCKED",
+		Category:        CategoryAccessDenied,
+		BaseDelayMs:     15000,
+		Description:     "Request blocked",
+		ErrorStatusOnly: true,
 	},
 	{
 		// More specific patterns for actual CAPTCHA challenges, not just script presence
@@ -174,6 +185,9 @@ func Detect(statusCode int, body string) Info {
 
 	// Check body patterns (may override HTTP status detection with more specific info)
 	for _, pattern := range patterns {
+		if pattern.ErrorStatusOnly && statusCode < http.StatusBadRequest {
+			continue
+		}
 		if pattern.Pattern.MatchString(body) {
 			info = Info{
 				Detected:       true,

@@ -72,6 +72,10 @@ type Pool struct {
 	// fill the container's writable layer over time (GitHub issue #6).
 	launchers sync.Map // map[*rod.Browser]*launcher.Launcher
 
+	// readMemory samples the service's memory usage for monitorMemory.
+	// Replaceable in tests.
+	readMemory memoryReader
+
 	// Statistics for monitoring
 	stats PoolStats
 }
@@ -129,6 +133,12 @@ func (p *Pool) GetControlURL(browser *rod.Browser) (string, bool) {
 // Used by the solver's two-phase bypass to launch a clean Chrome process.
 func (p *Pool) GetBrowserPath() string {
 	return p.config.BrowserPath
+}
+
+// SandboxEnabled reports whether browsers are launched with Chromium's own
+// sandbox (BROWSER_SANDBOX=true), i.e. without --no-sandbox.
+func (p *Pool) SandboxEnabled() bool {
+	return p.config.BrowserSandbox
 }
 
 // DefaultProxyURL returns the proxy every pooled browser is launched with
@@ -193,6 +203,7 @@ func NewPool(cfg *config.Config) (*Pool, error) {
 		browsers:   make([]*browserEntry, 0, cfg.BrowserPoolSize),
 		stopCh:     make(chan struct{}),
 		recycleSem: make(chan struct{}, 4), // Issue #11: Limit concurrent recycles to 4
+		readMemory: systemMemoryReader,
 	}
 
 	// Pre-warm the pool by launching all browsers
@@ -296,8 +307,12 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	// ========================================
 	// Container Security Flags
 	// ========================================
-	l = l.Set("no-sandbox").
-		Set("disable-setuid-sandbox").
+	// Chromium's sandbox is off unless BROWSER_SANDBOX=true: the default Docker
+	// runtime grants neither the user namespaces nor the syscalls it needs.
+	// go-rod adds --no-sandbox by itself when it detects a container, so the
+	// flag has to be removed explicitly when the sandbox is wanted.
+	l = l.NoSandbox(!p.config.BrowserSandbox)
+	l = l.Set("disable-setuid-sandbox").
 		Set("disable-dev-shm-usage")
 
 	// ========================================
@@ -417,6 +432,12 @@ func (p *Pool) createLauncher(proxyURL string) *launcher.Launcher {
 	if isARM() {
 		l = l.Set("disable-gpu-compositing")
 		log.Debug().Msg("ARM detected: using software compositing")
+	}
+
+	// The sandbox forks renderers from the zygote process; Chromium refuses to
+	// start with "Zygote cannot be disabled if sandbox is enabled" otherwise.
+	if p.config.BrowserSandbox {
+		l = l.Delete("no-zygote")
 	}
 
 	return l
@@ -1008,12 +1029,13 @@ func (p *Pool) reapLauncher(l *launcher.Launcher) {
 	}
 }
 
-// monitorMemory periodically checks memory usage and triggers recycling if needed.
+// monitorMemory periodically samples the service's real memory usage and
+// recycles idle browsers when it exceeds MAX_MEMORY_MB. See memory.go.
 func (p *Pool) monitorMemory() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(memoryCheckInterval)
 	defer ticker.Stop()
 
-	maxBytes := uint64(p.config.MaxMemoryMB) * 1024 * 1024
+	var lastRecycle time.Time
 
 	for {
 		select {
@@ -1025,22 +1047,11 @@ func (p *Pool) monitorMemory() {
 				return
 			}
 
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-
-			log.Debug().
-				Uint64("alloc_mb", m.Alloc/1024/1024).
-				Uint64("sys_mb", m.Sys/1024/1024).
-				Int("max_mb", p.config.MaxMemoryMB).
-				Msg("Memory stats")
-
-			if m.Alloc > maxBytes {
-				log.Warn().
-					Uint64("current_mb", m.Alloc/1024/1024).
-					Int("max_mb", p.config.MaxMemoryMB).
-					Msg("Memory threshold exceeded, recycling browsers")
-
-				p.recycleAll()
+			var supported bool
+			lastRecycle, supported = p.checkMemory(time.Now(), lastRecycle)
+			if !supported {
+				log.Debug().Msg("Memory usage cannot be measured on this platform, memory monitor disabled")
+				return
 			}
 		}
 	}

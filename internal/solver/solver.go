@@ -86,8 +86,11 @@ type SolveOptions struct {
 	Download bool
 	// FollowRedirects controls whether to follow HTTP redirects (default: true).
 	FollowRedirects *bool
-	// CaptchaSolver overrides the global captcha provider for this request.
+	// CaptchaSolver selects the external captcha provider for this request, or
+	// "none" to forbid external solving. Empty uses the server's providers.
 	CaptchaSolver string
+	// CaptchaApiKey is the caller's own key for CaptchaSolver. SECURITY: never
+	// log it or copy it onto anything that outlives the request.
 	CaptchaApiKey string //nolint:revive,stylecheck // JSON API compatibility
 	// UserAgent overrides the browser's User-Agent for this request.
 	UserAgent     string
@@ -107,6 +110,13 @@ type SolveOptions struct {
 	// SkipResponseValidation disables response URL validation (for testing only).
 	// WARNING: Do not enable in production - this disables SSRF protection.
 	SkipResponseValidation bool
+
+	// external is this request's allowance of external captcha solves. It is
+	// resolved once, on first use by the goroutine running the solve, so every
+	// pass of the solve loop draws on one budget. A copy of these options made
+	// after that shares the allowance.
+	externalResolved bool
+	external         *captcha.RequestSolver
 }
 
 // Solver handles Cloudflare challenge resolution.
@@ -207,12 +217,32 @@ func (s *Solver) getSelectors() *selectors.Selectors {
 	return selectors.Get()
 }
 
-// GetSolverChainMetrics returns metrics from the solver chain.
-func (s *Solver) GetSolverChainMetrics() map[string]interface{} {
-	if s.solverChain == nil {
+// externalSolver returns the request's external-solve allowance: which
+// providers it may use and how many paid tasks it may still create. The result
+// is nil-safe and buys nothing when no solver chain is configured.
+func (s *Solver) externalSolver(opts *SolveOptions) *captcha.RequestSolver {
+	if opts == nil {
 		return nil
 	}
-	return s.solverChain.GetMetrics()
+	if !opts.externalResolved {
+		opts.external = s.solverChain.NewRequest(captcha.RequestPolicy{
+			Solver: opts.CaptchaSolver,
+			APIKey: opts.CaptchaApiKey,
+		})
+		opts.externalResolved = true
+	}
+	return opts.external
+}
+
+// CaptchaStats returns the usage statistics of every external captcha provider
+// that has been asked for a solve, keyed by provider name. It is nil when no
+// solver chain, or no metrics tracker, is configured.
+func (s *Solver) CaptchaStats() map[string]captcha.ProviderStats {
+	metrics := s.solverChain.Metrics()
+	if metrics == nil {
+		return nil
+	}
+	return metrics.Snapshot()
 }
 
 // sleepWithContext sleeps for the specified duration or until context is canceled.
@@ -343,7 +373,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 		if r := recover(); r != nil {
 			log.Error().
 				Interface("panic", r).
-				Str("url", opts.URL).
+				Str("url", security.RedactURL(opts.URL)).
 				Msg("Panic recovered in Solve")
 			err = fmt.Errorf("unexpected error during solve: %v", r)
 		}
@@ -361,7 +391,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 	}
 
 	log.Info().
-		Str("url", opts.URL).
+		Str("url", security.RedactURL(opts.URL)).
 		Dur("timeout", timeout).
 		Bool("is_post", opts.IsPost).
 		Int("cookies_count", len(opts.Cookies)).
@@ -498,9 +528,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 		// Install the turnstile.render interceptor before navigation so managed
 		// challenges expose their sitekey/action/cData/chlPageData to the external
-		// solver. Only when an external solver chain can consume them.
-		if s.solverChain != nil {
-			captcha.InstallTurnstileInterceptor(page)
+		// solver. Only when this request may actually buy an external solve.
+		if s.externalSolver(opts).Active() {
+			captcha.InstallTurnstileInterceptor(solveCtx, page)
 			defer captcha.RemoveTurnstileInterceptor(page)
 		}
 
@@ -601,9 +631,9 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	// Install the turnstile.render interceptor before navigation so managed
 	// challenges expose their sitekey/action/cData/chlPageData to the external
-	// solver. Only when an external solver chain can consume them.
-	if s.solverChain != nil {
-		captcha.InstallTurnstileInterceptor(page)
+	// solver. Only when this request may actually buy an external solve.
+	if s.externalSolver(opts).Active() {
+		captcha.InstallTurnstileInterceptor(solveCtx, page)
 		defer captcha.RemoveTurnstileInterceptor(page)
 	}
 
@@ -670,7 +700,7 @@ func (s *Solver) Solve(ctx context.Context, opts *SolveOptions) (result *Result,
 
 	// Handle followRedirects=false — capture first response via JS fetch with redirect:manual
 	if opts.FollowRedirects != nil && !*opts.FollowRedirects {
-		log.Debug().Str("url", opts.URL).Msg("followRedirects=false: using fetch with redirect:manual")
+		log.Debug().Str("url", security.RedactURL(opts.URL)).Msg("followRedirects=false: using fetch with redirect:manual")
 
 		// JSON encoding yields a valid JS string literal for any URL
 		urlLiteral, err := json.Marshal(opts.URL)
@@ -825,7 +855,7 @@ func (s *Solver) applyPostSolveProcessing(ctx context.Context, page *rod.Page, o
 
 	// Download mode: re-fetch the URL via Fetch API and return base64
 	if opts.Download {
-		log.Info().Str("url", opts.URL).Msg("Download mode: fetching URL as binary via Fetch API")
+		log.Info().Str("url", security.RedactURL(opts.URL)).Msg("Download mode: fetching URL as binary via Fetch API")
 		// JSON encoding yields a valid JS string literal for any URL. (The old
 		// manual escaping doubled its own backslashes and broke on any quote.)
 		urlLiteral, marshalErr := json.Marshal(opts.URL)
@@ -893,76 +923,22 @@ func (s *Solver) applyPostSolveProcessing(ctx context.Context, page *rod.Page, o
 	}
 }
 
-// solveHCaptchaExternal uses external CAPTCHA solvers to solve an hCaptcha challenge.
-func (s *Solver) solveHCaptchaExternal(ctx context.Context, page *rod.Page, pageURL string) error {
-	if s.solverChain == nil {
-		return fmt.Errorf("no solver chain configured")
+// solveHCaptchaExternal buys an hCaptcha solution through the request's external
+// solver, which injects the token (escaped) into the page. It shares the
+// request's budget with solveTurnstileExternal.
+func (s *Solver) solveHCaptchaExternal(ctx context.Context, page *rod.Page, sp solveParams) error {
+	result, err := sp.external.SolveHCaptcha(ctx, page, sp.url, sp.userAgent)
+	if err != nil {
+		return fmt.Errorf("external hCaptcha solver failed: %w", err)
 	}
 
-	// Extract hCaptcha sitekey from the page
-	sitekey, err := page.Timeout(5 * time.Second).Eval(`() => {
-		// Try data-sitekey attribute
-		const el = document.querySelector('[data-sitekey]');
-		if (el) return el.getAttribute('data-sitekey');
-		// Try hcaptcha iframe src
-		const iframe = document.querySelector('iframe[src*="hcaptcha.com"]');
-		if (iframe) {
-			const url = new URL(iframe.src);
-			return url.searchParams.get('sitekey') || '';
-		}
-		return '';
-	}`)
-	if err != nil || sitekey.Value.Str() == "" {
-		return fmt.Errorf("could not extract hCaptcha sitekey")
-	}
-
-	sitekeyPreview := sitekey.Value.Str()
-	if len(sitekeyPreview) > 10 {
-		sitekeyPreview = sitekeyPreview[:10] + "..."
-	}
-	log.Info().Str("sitekey", sitekeyPreview).Msg("Extracted hCaptcha sitekey")
-
-	// Use the first configured provider that supports hCaptcha
-	// All 3 providers (2captcha, capsolver, anticaptcha) support HCaptchaTaskProxyless
-	for _, provider := range s.solverChain.GetProviders() {
-		// Type-assert to check if provider has SolveHCaptcha
-		type hcaptchaSolver interface {
-			SolveHCaptcha(ctx context.Context, req *captcha.HCaptchaRequest) (*captcha.CaptchaResult, error)
-		}
-		if hs, ok := provider.(hcaptchaSolver); ok {
-			result, err := hs.SolveHCaptcha(ctx, &captcha.HCaptchaRequest{
-				SiteKey:   sitekey.Value.Str(),
-				PageURL:   pageURL,
-				UserAgent: s.userAgent,
-			})
-			if err != nil {
-				log.Warn().Err(err).Str("provider", provider.Name()).Msg("hCaptcha solve failed")
-				continue
-			}
-
-			// Inject the token
-			_, injectErr := page.Eval(fmt.Sprintf(`() => {
-				// Set h-captcha-response textarea
-				const textarea = document.querySelector('[name="h-captcha-response"], [id="h-captcha-response"]');
-				if (textarea) { textarea.value = '%s'; textarea.dispatchEvent(new Event('input')); }
-				// Set g-recaptcha-response (hCaptcha uses this too)
-				const grecaptcha = document.querySelector('[name="g-recaptcha-response"]');
-				if (grecaptcha) { grecaptcha.value = '%s'; }
-				// Try to invoke callback
-				if (window.hcaptcha && window.hcaptcha.execute) {
-					try { window.hcaptcha.execute(); } catch(e) {}
-				}
-			}`, result.Token, result.Token))
-			if injectErr != nil {
-				log.Warn().Err(injectErr).Msg("Failed to inject hCaptcha token")
-			} else {
-				log.Info().Str("provider", result.Provider).Dur("solve_time", result.SolveTime).Msg("hCaptcha solved via external provider")
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("no provider could solve hCaptcha")
+	log.Info().
+		Str("provider", result.Provider).
+		Dur("solve_time", result.SolveTime).
+		Float64("cost", result.Cost).
+		Bool("injected", result.Injected).
+		Msg("hCaptcha solved via external provider")
+	return nil
 }
 
 // findBrowserBinary resolves the actual browser ELF/Mach-O binary, following
@@ -1096,7 +1072,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	defer stealthExt.Cleanup()
 
 	log.Info().
-		Str("url", opts.URL).
+		Str("url", security.RedactURL(opts.URL)).
 		Str("user_data_dir", userDataDir).
 		Str("stealth_ext", stealthExt.Dir()).
 		Msg("Starting two-phase CDP bypass")
@@ -1109,12 +1085,12 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	phase1Args := []string{
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--no-sandbox",
 		"--user-data-dir=" + userDataDir,
 		"--window-size=1920,1080",
 		"--force-device-scale-factor=1.25",     // Realistic DPI (Xvfb defaults to 1.0)
 		"--load-extension=" + stealthExt.Dir(), // Stealth patches without CDP
 	}
+	phase1Args = append(phase1Args, sandboxArgs(s.pool.SandboxEnabled())...)
 	if proxyServer != "" {
 		phase1Args = append(phase1Args, "--proxy-server="+proxyServer)
 	}
@@ -1176,11 +1152,11 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	phase2Args := []string{
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--no-sandbox",
 		"--user-data-dir=" + userDataDir,
 		"--remote-debugging-port=" + fmt.Sprintf("%d", debugPort),
 		"--window-size=1920,1080",
 	}
+	phase2Args = append(phase2Args, sandboxArgs(s.pool.SandboxEnabled())...)
 	if proxyServer != "" {
 		phase2Args = append(phase2Args, "--proxy-server="+proxyServer)
 	}
@@ -1241,7 +1217,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 			!strings.Contains(titleLower, "please wait") &&
 			!strings.Contains(titleLower, "performing security") {
 			targetPage = p
-			log.Info().Str("title", pInfo.Title).Str("url", pInfo.URL).Msg("Challenge resolved via two-phase bypass!")
+			log.Info().Str("title", pInfo.Title).Str("url", security.RedactURL(pInfo.URL)).Msg("Challenge resolved via two-phase bypass!")
 			break
 		}
 	}
@@ -1249,7 +1225,7 @@ func (s *Solver) solveWithReconnect(ctx context.Context, _ *rod.Browser, opts *S
 	if targetPage == nil {
 		for _, p := range pages {
 			if pInfo, err := p.Info(); err == nil {
-				log.Debug().Str("title", pInfo.Title).Str("url", pInfo.URL).Msg("Page found after Phase 2")
+				log.Debug().Str("title", pInfo.Title).Str("url", security.RedactURL(pInfo.URL)).Msg("Page found after Phase 2")
 			}
 		}
 		return nil, fmt.Errorf("challenge not resolved after two-phase bypass (found %d pages)", len(pages))
@@ -1314,7 +1290,7 @@ func (s *Solver) setCookies(page *rod.Page, cookies []types.RequestCookie, targe
 // Fix: Accept explicit context parameter for proper timeout/cancellation propagation.
 func (s *Solver) navigatePost(ctx context.Context, page *rod.Page, targetURL string, postData string) error {
 	log.Debug().
-		Str("url", targetURL).
+		Str("url", security.RedactURL(targetURL)).
 		Int("post_data_len", len(postData)).
 		Msg("Performing POST request")
 
@@ -1446,7 +1422,7 @@ func (s *Solver) buildFormFieldsJS(postData string) (string, error) {
 // Fix: Accept explicit context parameter for proper timeout/cancellation propagation.
 func (s *Solver) navigatePostJSON(ctx context.Context, page *rod.Page, targetURL string, jsonData string, headers map[string]string) error {
 	log.Debug().
-		Str("url", targetURL).
+		Str("url", security.RedactURL(targetURL)).
 		Int("json_data_len", len(jsonData)).
 		Int("headers_count", len(headers)).
 		Msg("Performing JSON POST request via Fetch API")
@@ -1673,10 +1649,18 @@ type solveParams struct {
 	// allowEarlyBypass lets the loop give up early on a stuck Turnstile so the
 	// caller can try the reconnect bypass. Only the stateless GET path has one.
 	allowEarlyBypass bool
+
+	// external is the request's allowance of paid external captcha solves. Nil,
+	// or out of budget, means the loop buys nothing.
+	external *captcha.RequestSolver
 }
 
 // cookieSnapshotTimeout bounds reading the cookie jar before navigation.
 const cookieSnapshotTimeout = 5 * time.Second
+
+// tokenInjectionEffectWait is how long the loop gives a page to react to an
+// externally solved token before it looks at the page again.
+const tokenInjectionEffectWait = 5 * time.Second
 
 // errEarlyBypass is returned by solveLoop when native Turnstile solving is
 // exhausted and the caller asked to be handed control early.
@@ -1699,6 +1683,7 @@ func (s *Solver) newSolveParams(opts *SolveOptions, networkCapture *NetworkCaptu
 		cookieExtractDelay: opts.CookieExtractDelay,
 		userAgent:          s.effectiveUserAgent(opts),
 		knownClearance:     knownClearance,
+		external:           s.externalSolver(opts),
 	}
 }
 
@@ -1861,12 +1846,16 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) 
 
 			// Try external solver fallback before the early bypass so that
 			// configured providers (2Captcha, CapSolver, etc.) get a chance.
-			if s.solverChain != nil && s.solverChain.ShouldFallback(turnstileAttempts) {
+			// ShouldFallback is false once the request's budget is spent, so a
+			// challenge that survives a bought token is not bought again.
+			externalWasActive := sp.external.Active()
+			if sp.external.ShouldFallback(turnstileAttempts) {
 				log.Info().
 					Int("native_attempts", turnstileAttempts).
+					Int("budget_remaining", sp.external.Remaining()).
 					Msg("Native Turnstile solving exhausted, trying external solver")
 
-				if err := s.solveTurnstileExternal(ctx, page, url); err != nil {
+				if err := s.solveTurnstileExternal(ctx, page, sp); err != nil {
 					log.Warn().Err(err).Msg("External solver fallback failed")
 				} else {
 					continue
@@ -1874,11 +1863,11 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) 
 			}
 
 			// Early two-phase bypass: bail to CDP disconnect/reconnect approach.
-			// When an external solver chain is configured, raise the threshold
+			// When this request could buy an external solve, raise the threshold
 			// so the external provider has at least one shot before we bail.
 			earlyBypassThreshold := 2
-			if s.solverChain != nil && s.solverChain.IsEnabled() {
-				earlyBypassThreshold = s.solverChain.NativeAttempts() + 1
+			if externalWasActive {
+				earlyBypassThreshold = sp.external.NativeAttempts() + 1
 			}
 			if sp.allowEarlyBypass && turnstileAttempts >= earlyBypassThreshold && ctx.Err() == nil {
 				log.Info().
@@ -1889,9 +1878,9 @@ func (s *Solver) solveLoop(ctx context.Context, page *rod.Page, sp solveParams) 
 		}
 
 		// If hCaptcha is detected, try external solving
-		if html != "" && s.detectChallenge(html) == ChallengeHCaptcha && s.solverChain != nil {
+		if html != "" && sp.external.CanSolveHCaptcha() && s.detectChallenge(html) == ChallengeHCaptcha {
 			log.Info().Msg("hCaptcha detected, attempting external solver")
-			if err := s.solveHCaptchaExternal(ctx, page, url); err != nil {
+			if err := s.solveHCaptchaExternal(ctx, page, sp); err != nil {
 				log.Warn().Err(err).Msg("hCaptcha external solve failed")
 			}
 		}
@@ -2428,14 +2417,13 @@ func (s *Solver) solveTurnstilePositional(ctx context.Context, page *rod.Page) e
 // This method is called after native solving methods have been exhausted.
 //
 // Detection risk: LOW - uses legitimate CAPTCHA solving service
-func (s *Solver) solveTurnstileExternal(ctx context.Context, page *rod.Page, pageURL string) error {
-	if s.solverChain == nil {
-		return fmt.Errorf("solver chain not configured")
-	}
-
+//
+// The provider is told the User-Agent the page is really using (sp.userAgent,
+// which honors a per-request override): Cloudflare binds the token to it.
+func (s *Solver) solveTurnstileExternal(ctx context.Context, page *rod.Page, sp solveParams) error {
 	log.Debug().Msg("Trying external CAPTCHA solver for Turnstile")
 
-	result, err := s.solverChain.Solve(ctx, page, pageURL, s.userAgent)
+	result, err := sp.external.SolveTurnstile(ctx, page, sp.url, sp.userAgent)
 	if err != nil {
 		return fmt.Errorf("external solver failed: %w", err)
 	}
@@ -2449,7 +2437,7 @@ func (s *Solver) solveTurnstileExternal(ctx context.Context, page *rod.Page, pag
 
 	// Wait for the page to process the injected token
 	if result.Injected {
-		if err := captcha.WaitForTokenInjectionEffect(ctx, page, 5*time.Second); err != nil {
+		if err := captcha.WaitForTokenInjectionEffect(ctx, page, tokenInjectionEffectWait); err != nil {
 			log.Debug().Err(err).Msg("Error waiting for token injection effect")
 		}
 	}
@@ -2719,14 +2707,14 @@ func (s *Solver) validateResponseURL(page *rod.Page, expectedIP net.IP, skipVali
 	if expectedIP != nil {
 		if err := security.ValidateURLWithPinnedIP(info.URL, expectedIP); err != nil {
 			log.Warn().
-				Str("url", info.URL).
+				Str("url", security.RedactURL(info.URL)).
 				Str("expected_ip", expectedIP.String()).
 				Err(err).
 				Msg("Response URL failed DNS pinning validation (possible DNS rebinding attack)")
 			return fmt.Errorf("DNS rebinding detected: %w", err)
 		}
 		log.Debug().
-			Str("url", info.URL).
+			Str("url", security.RedactURL(info.URL)).
 			Str("expected_ip", expectedIP.String()).
 			Msg("Response URL passed DNS pinning validation")
 		return nil
@@ -2735,7 +2723,7 @@ func (s *Solver) validateResponseURL(page *rod.Page, expectedIP net.IP, skipVali
 	// Fallback: Re-validate the response URL without pinning
 	if err := security.ValidateURL(info.URL); err != nil {
 		log.Warn().
-			Str("url", info.URL).
+			Str("url", security.RedactURL(info.URL)).
 			Err(err).
 			Msg("Response URL failed validation (possible DNS rebinding)")
 		return fmt.Errorf("response URL validation failed: %w", err)
@@ -2905,7 +2893,7 @@ func (s *Solver) buildResultWithHTML(ctx context.Context, page *rod.Page, html s
 	}
 
 	log.Info().
-		Str("url", currentURL).
+		Str("url", security.RedactURL(currentURL)).
 		Int("cookies_count", len(cookies)).
 		Int("html_length", len(html)).
 		Bool("html_truncated", htmlTruncated).
@@ -3223,7 +3211,7 @@ func (s *Solver) captureScreenshot(page *rod.Page) ([]byte, error) {
 // SolveWithPage solves a challenge using an existing page (for session support).
 func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveOptions) (*Result, error) {
 	log.Info().
-		Str("url", opts.URL).
+		Str("url", security.RedactURL(opts.URL)).
 		Bool("disable_media", opts.DisableMedia).
 		Int("wait_seconds", opts.WaitInSeconds).
 		Msg("Starting solve with existing page")
@@ -3254,7 +3242,7 @@ func (s *Solver) SolveWithPage(ctx context.Context, page *rod.Page, opts *SolveO
 			}
 		}
 	} else {
-		log.Debug().Str("url", pageInfo.URL).Msg("Skipping stealth on reused session page")
+		log.Debug().Str("url", security.RedactURL(pageInfo.URL)).Msg("Skipping stealth on reused session page")
 	}
 
 	// Set up media blocking if requested
@@ -3395,6 +3383,6 @@ func (s *Solver) buildBodylessErrorResult(ctx context.Context, page *rod.Page, s
 	}
 	// The page itself is on Chrome's internal error document
 	result.URL = sp.url
-	log.Info().Int("status_code", result.StatusCode).Str("url", sp.url).Msg("Server returned an error status with an empty body")
+	log.Info().Int("status_code", result.StatusCode).Str("url", security.RedactURL(sp.url)).Msg("Server returned an error status with an empty body")
 	return result, nil
 }

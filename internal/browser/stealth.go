@@ -508,89 +508,142 @@ const stealthScript = `
     // ========================================
     // 12. Canvas fingerprinting protection
     // ========================================
-    // Add subtle noise to canvas APIs to prevent fingerprinting
-    // while maintaining visual consistency for the same session.
+    // Add subtle noise to what canvas read-back APIs return, so the canvas
+    // fingerprint differs between documents while staying stable within one.
     // Patches: toDataURL, toBlob, getImageData, WebGL readPixels
+    //
+    // Invariants (the previous version broke all three, which made the noise
+    // itself detectable and corrupted page canvases):
+    //   - Reads are idempotent: reading an untouched canvas twice gives
+    //     identical results. The noise for a pixel depends only on the pixel's
+    //     position in the canvas, its own value and the seed, never on how
+    //     often or through which rectangle it was read.
+    //   - The page's canvas is never written to. toDataURL/toBlob encode a
+    //     private copy.
+    //   - Noise is applied exactly once per read: the copy is read with the
+    //     original getImageData, not the patched one.
+    //   - Transparent pixels are never given a color.
     // Skip on about:blank as canvas APIs may not be fully initialized
     if (!isAboutBlank) try {
-        // Generate session-consistent seed if not already set
-        if (!window.__canvasSeed) {
-            window.__canvasSeed = Math.floor(Math.random() * 256);
+        // Per-document seed in 1..255. Zero is excluded: it is falsy, so a
+        // "not set" check would re-roll it between reads.
+        if (!(window.__canvasSeed >= 1 && window.__canvasSeed <= 255)) {
+            window.__canvasSeed = 1 + Math.floor(Math.random() * 255);
         }
         const canvasSeed = window.__canvasSeed;
 
-        // Helper function to apply consistent noise to pixel data
-        // Uses seed to generate deterministic noise based on position
-        const applyNoiseToImageData = function(data, width, height, seed) {
-            // Apply noise to a subset of pixels (every 7th pixel to minimize visual impact)
-            const step = 7;
-            for (let i = 0; i < data.length; i += 4 * step) {
-                // Generate position-based noise using seed
-                const pixelIndex = i / 4;
-                const noise = ((pixelIndex * 31 + seed) % 5) - 2; // Range: -2 to +2
+        // Noise is confined to the top-left region of a canvas. Fingerprinting
+        // canvases are far smaller than this; the bound keeps the cost of
+        // reading a large canvas constant.
+        const NOISE_REGION = 512;
 
-                // Apply noise to RGB channels (not alpha)
-                data[i] = Math.max(0, Math.min(255, data[i] + noise));         // R
-                data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + noise)); // G
-                data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + noise)); // B
+        // Deterministic noise for one canvas pixel: 0 for most pixels, else a
+        // value in [-2, 2].
+        const noiseAt = function(x, y) {
+            const h = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(canvasSeed, 83492791)) >>> 0;
+            if (h % 7 !== 0) return 0;
+            return ((h >>> 8) % 5) - 2;
+        };
+
+        // Apply noise to RGBA data covering the canvas rectangle whose top-left
+        // corner is (originX, originY). width/height are the data's dimensions.
+        const applyNoiseToImageData = function(data, originX, originY, width, height) {
+            const startX = Math.max(0, -originX);
+            const startY = Math.max(0, -originY);
+            const endX = Math.min(width, NOISE_REGION - originX);
+            const endY = Math.min(height, NOISE_REGION - originY);
+            for (let y = startY; y < endY; y++) {
+                for (let x = startX; x < endX; x++) {
+                    const noise = noiseAt(originX + x, originY + y);
+                    if (noise === 0) continue;
+                    const i = (y * width + x) * 4;
+                    // Fully transparent pixels stay exactly (0, 0, 0, 0): color
+                    // in a transparent pixel is impossible for a real canvas
+                    // and is a well-known test for canvas noise.
+                    if (data[i + 3] === 0) continue;
+                    // RGB channels only, not alpha
+                    data[i] = Math.max(0, Math.min(255, data[i] + noise));
+                    data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + noise));
+                    data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + noise));
+                }
             }
         };
 
+        const alreadyPatched = HTMLCanvasElement.prototype.toDataURL._stealth === true;
+
+        // Originals, captured before anything is patched
+        const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+        const originalGetContext = HTMLCanvasElement.prototype.getContext;
+        const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+        const originalPutImageData = CanvasRenderingContext2D.prototype.putImageData;
+        const originalDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+
+        // Returns a private copy of the canvas with noise applied, or null if
+        // the canvas cannot be copied (zero size, tainted, no 2d support).
+        // It never calls getContext on the source: on a canvas that has no
+        // context yet, that would create a 2d one and make a later
+        // getContext('webgl') return null.
+        const noisedCopy = function(source) {
+            const width = source.width;
+            const height = source.height;
+            if (!(width > 0 && height > 0)) return null;
+
+            const copy = document.createElement('canvas');
+            copy.width = width;
+            copy.height = height;
+            // CPU-backed: the copy is read back immediately and then discarded
+            const copyCtx = originalGetContext.call(copy, '2d', { willReadFrequently: true });
+            if (!copyCtx) return null;
+            originalDrawImage.call(copyCtx, source, 0, 0);
+
+            const regionWidth = Math.min(width, NOISE_REGION);
+            const regionHeight = Math.min(height, NOISE_REGION);
+            const imageData = originalGetImageData.call(copyCtx, 0, 0, regionWidth, regionHeight);
+            applyNoiseToImageData(imageData.data, 0, 0, regionWidth, regionHeight);
+            originalPutImageData.call(copyCtx, imageData, 0, 0);
+            return copy;
+        };
+
         // 12a. Patch toDataURL
-        const canvasToDataURL = HTMLCanvasElement.prototype.toDataURL;
-        if (typeof canvasToDataURL === 'function' && !canvasToDataURL._stealth) {
-            const originalToDataURL = canvasToDataURL;
+        if (!alreadyPatched && typeof originalToDataURL === 'function') {
             HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+                let copy = null;
                 try {
-                    const ctx = this.getContext('2d');
-                    if (ctx && this.width > 0 && this.height > 0) {
-                        // Apply noise to multiple pixels
-                        const width = Math.min(this.width, 16);
-                        const height = Math.min(this.height, 16);
-                        const imageData = ctx.getImageData(0, 0, width, height);
-                        applyNoiseToImageData(imageData.data, width, height, canvasSeed);
-                        ctx.putImageData(imageData, 0, 0);
-                    }
+                    copy = noisedCopy(this);
                 } catch (e) {
-                    // Ignore canvas access errors (e.g., cross-origin tainted canvas)
+                    // Tainted or otherwise unreadable canvas: let the original
+                    // call report it exactly as it would have
                 }
-                return originalToDataURL.call(this, type, quality);
+                return originalToDataURL.call(copy || this, type, quality);
             };
             HTMLCanvasElement.prototype.toDataURL._stealth = true;
         }
 
         // 12b. Patch toBlob
-        const canvasToBlob = HTMLCanvasElement.prototype.toBlob;
-        if (typeof canvasToBlob === 'function' && !canvasToBlob._stealth) {
-            const originalToBlob = canvasToBlob;
+        if (!alreadyPatched && typeof originalToBlob === 'function') {
             HTMLCanvasElement.prototype.toBlob = function(callback, type, quality) {
+                let copy = null;
                 try {
-                    const ctx = this.getContext('2d');
-                    if (ctx && this.width > 0 && this.height > 0) {
-                        // Apply noise to multiple pixels
-                        const width = Math.min(this.width, 16);
-                        const height = Math.min(this.height, 16);
-                        const imageData = ctx.getImageData(0, 0, width, height);
-                        applyNoiseToImageData(imageData.data, width, height, canvasSeed);
-                        ctx.putImageData(imageData, 0, 0);
-                    }
+                    copy = noisedCopy(this);
                 } catch (e) {
-                    // Ignore canvas access errors
+                    // See toDataURL
                 }
-                return originalToBlob.call(this, callback, type, quality);
+                return originalToBlob.call(copy || this, callback, type, quality);
             };
             HTMLCanvasElement.prototype.toBlob._stealth = true;
         }
 
         // 12c. Patch getImageData on CanvasRenderingContext2D
-        const ctxGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-        if (typeof ctxGetImageData === 'function' && !ctxGetImageData._stealth) {
-            const originalGetImageData = ctxGetImageData;
+        if (!alreadyPatched && typeof originalGetImageData === 'function') {
             CanvasRenderingContext2D.prototype.getImageData = function(sx, sy, sw, sh, settings) {
                 const imageData = originalGetImageData.call(this, sx, sy, sw, sh, settings);
                 try {
-                    // Apply noise to returned data
-                    applyNoiseToImageData(imageData.data, sw, sh, canvasSeed);
+                    // The returned ImageData is a fresh copy; the canvas itself
+                    // is untouched. A negative sw/sh extends the rectangle up/left.
+                    const originX = Math.trunc(sw < 0 ? sx + sw : sx);
+                    const originY = Math.trunc(sh < 0 ? sy + sh : sy);
+                    applyNoiseToImageData(imageData.data, originX, originY, imageData.width, imageData.height);
                 } catch (e) {
                     // Ignore errors
                 }

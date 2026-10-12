@@ -32,7 +32,9 @@ paths:
   /health:
     get:
       summary: Health check
-      description: Returns server health and pool statistics
+      description: >-
+        Returns liveness and browser pool counters. Never requires an API key,
+        so it reports nothing about which sites the server has been used for.
       responses:
         "200":
           description: Health status
@@ -44,13 +46,61 @@ paths:
                   status:
                     type: string
                     enum: [ok]
+                  message:
+                    type: string
+                  version:
+                    type: string
+                  userAgent:
+                    type: string
                   pool:
                     type: object
+
+  /stats:
+    get:
+      summary: Detailed statistics
+      description: >-
+        Returns the /health fields plus per-domain request statistics and
+        selector reload state. Requires the API key when API key
+        authentication is enabled.
+      responses:
+        "200":
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  version:
+                    type: string
+                  pool:
+                    type: object
+                  domainStats:
+                    type: object
+                    description: Per-domain request counts, latency and suggested delay
+                  defaults:
+                    type: object
+                    properties:
+                      minDelayMs:
+                        type: integer
+                      maxDelayMs:
+                        type: integer
+                  selectorsStats:
+                    type: object
+        "401":
+          description: Missing or invalid API key
 
   /v1:
     post:
       summary: Execute command
-      description: Main API endpoint for all FlareSolverr commands
+      description: >-
+        Main API endpoint for all FlareSolverr commands. The request must send
+        Content-Type application/json (415 otherwise, unless
+        STRICT_CONTENT_TYPE=false). Requests whose Host header is not an
+        accepted name for this server, or that carry an Origin header not
+        listed in CORS_ALLOWED_ORIGINS, are refused with 403.
       requestBody:
         required: true
         content:
@@ -64,6 +114,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response"
+        "403":
+          description: Host or Origin not allowed
+        "415":
+          description: Content-Type is not application/json
 
 components:
   schemas:
@@ -135,11 +189,23 @@ components:
           description: Follow HTTP redirects (default true)
         captchaSolver:
           type: string
-          description: Per-request captcha provider override
-          enum: ["2captcha", "capsolver", "none"]
+          description: >-
+            External captcha provider for this request. A provider name selects
+            that provider among the ones the server has configured (the
+            server-side fallback must be enabled), or, together with
+            captchaApiKey, uses that provider with the caller's own key.
+            "none" forbids external solving for this request.
+          enum: ["2captcha", "capsolver", "anticaptcha", "9kw", "none"]
         captchaApiKey:
           type: string
-          description: Per-request captcha API key
+          maxLength: 256
+          writeOnly: true
+          description: >-
+            The caller's own API key for the provider named in captchaSolver.
+            It is used for this request only, for at most one paid solve, and
+            works even when the server-side fallback is disabled. Requires
+            captchaSolver (other than "none"); sending it alone is a validation
+            error. It is never logged, stored, or echoed in a response.
         userAgent:
           type: string
           description: Override User-Agent for this request

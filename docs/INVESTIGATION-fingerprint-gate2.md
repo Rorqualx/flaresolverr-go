@@ -42,13 +42,20 @@ innerHeight` (no browser chrome → headless tell). Custom path adds an offset b
 isn't on the main path.
 
 ## Solution (implemented)
-1. **Wire custom stealth onto GET/POST paths** — call `ApplyStealthToPage` after
-   `stealth.Page()` so the Linux-correct WebGL + geometry patches apply to every
-   request, not just sessions. Our `getParameter` wrapper registers after
-   go-rod/stealth's, so it wins.
-2. **Add coherent screen/window geometry override** to `stealth.go`: derive a
+1. **Surgical corrections on every request path** — `browser.ApplyGate2Corrections`
+   (internal/browser/stealth.go) is called after `stealth.Page()` on the GET and
+   POST paths, and after the custom stealth script on the session path. It
+   applies only the Linux-correct WebGL renderer and the geometry override below.
+   Its `getParameter` wrapper registers after go-rod/stealth's, so it wins.
+2. **Coherent screen/window geometry override**: derive a
    `screen`/`avail*`/`outerWidth/Height` set from the real viewport so
    `inner < outer < avail < screen` always holds (kills B and C) without lying
    about `innerWidth/Height` (which CF can cross-check via media queries).
+
+**What was tried first and reverted:** layering the full custom script
+(`ApplyStealthToPage`) over go-rod/stealth on the GET/POST paths. Re-probing
+bot.sannysoft.com showed it regressed go-rod/stealth's `navigator.webdriver`
+and `navigator.plugins` patches, which is why the corrections above are
+deliberately minimal. The session path still uses the full custom script.
 
 Re-probe after deploy validates the fixes (see commit).

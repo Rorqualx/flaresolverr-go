@@ -89,6 +89,39 @@ type SolverPreferences struct {
 	DisableMethods    []string `json:"disableMethods,omitempty"`    // Methods to skip for this domain
 }
 
+// clone returns a deep copy, or nil for a nil receiver. Snapshots handed out
+// of the stats lock must not alias state that is still being written.
+func (p *SolverPreferences) clone() *SolverPreferences {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	if p.NativeAttempts != nil {
+		v := *p.NativeAttempts
+		out.NativeAttempts = &v
+	}
+	if p.TimeoutOverrideMs != nil {
+		v := *p.TimeoutOverrideMs
+		out.TimeoutOverrideMs = &v
+	}
+	if p.DisableMethods != nil {
+		out.DisableMethods = append([]string(nil), p.DisableMethods...)
+	}
+	return &out
+}
+
+// cloneCounts returns a copy of a per-provider counter map (nil stays nil).
+func cloneCounts(in map[string]int64) map[string]int64 {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 // DomainStats tracks request statistics for a single domain.
 type DomainStats struct {
 	mu sync.RWMutex
@@ -176,7 +209,7 @@ func (s *DomainStats) ToJSON(minDelay, maxDelay int) DomainStatsJSON {
 		LastRateLimited:  s.LastRateLimited,
 		SuggestedDelayMs: s.suggestedDelayMs(minDelay, maxDelay),
 		CrawlDelay:       s.CrawlDelay,
-		SolverPrefs:      s.SolverPrefs,
+		SolverPrefs:      s.SolverPrefs.clone(),
 	}
 
 	// Include solve stats if there are any attempts
@@ -193,8 +226,8 @@ func (s *DomainStats) ToJSON(minDelay, maxDelay int) DomainStatsJSON {
 			NativeSuccesses:   s.SolveStats.NativeSuccesses,
 			NativeAvgTimeMs:   nativeAvgTime,
 			NativeSuccessRate: nativeSuccessRate,
-			ExternalAttempts:  s.SolveStats.ExternalAttempts,
-			ExternalSuccesses: s.SolveStats.ExternalSuccesses,
+			ExternalAttempts:  cloneCounts(s.SolveStats.ExternalAttempts),
+			ExternalSuccesses: cloneCounts(s.SolveStats.ExternalSuccesses),
 			LastSuccessMethod: s.SolveStats.LastSuccessMethod,
 			LastSuccessTime:   s.SolveStats.LastSuccessTime,
 		}

@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-12
+
+This release changes defaults that can affect existing setups. Read "Changed (may need action on upgrade)" first.
+
+### Changed (build and release)
+- **Releases are gated on tests** - The GitHub release and the Docker image are now two jobs of one `Release` workflow, and both wait for the CI workflow (lint, tests, build) to pass on the tagged commit. They used to start on the tag without running any tests. The separate `Docker` workflow is gone.
+- **`latest` only moves for full releases** - A pre-release tag such as `v0.9.0-rc.1` now publishes only its own version tag; before, every tag moved `latest`. The bare major image tag (`0`) is no longer published while the project is 0.x; `0.8`-style and exact version tags are unchanged.
+- **Release assets are signed and attested** - After a release is published, a follow-up job attests the build provenance of the archives, signs `checksums.txt` with cosign (keyless; the bundle is uploaded as `checksums.txt.sigstore.json`) and uploads an SPDX SBOM per archive. The job only adds files and cannot fail a release. Verify with `gh attestation verify <archive> --repo Rorqualx/flaresolverr-go` or `cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-regexp '^https://github.com/Rorqualx/flaresolverr-go/' --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt`.
+- **CI hardening** - All GitHub Actions are pinned to commit SHAs, workflows run with read-only permissions unless a job needs more, and Dependabot tracks actions, Go modules and Docker base images. The lint job now fails the build instead of being advisory.
+- **Repository layout** - `CLAUDE.md`'s directory structure and file-placement table now describe the real tree. The two old audit reports moved to `docs/audits/` (marked historical), the October 2026 review research is filed under `docs/research/`, and a `SECURITY.md` describes how to report a vulnerability and what the no-sandbox default means.
+
+### Fixed (container)
+- **Container would not restart after being killed** - A container stopped with `docker kill` (or by an OOM kill or power loss) kept the previous Xvfb's lock file, and on the next start Xvfb refused to run with "Server is already active for display 99", so the container crash-looped until it was recreated. The entrypoint now removes the stale lock and socket before starting Xvfb. Reproduced before the fix; ten kill/start cycles in a row come up healthy after it.
+- **Xvfb was not supervised** - If Xvfb died while the server was running, browsers lost their display and nothing recovered. The container now exits (code 137) so the restart policy replaces it. Startup also waits for the X socket instead of sleeping one second.
+- **A failed Chromium install could produce a working build** - The Dockerfile's `|| true`, meant for optional packages, also covered the required install, so a missing `chromium` package would have shipped an image with no browser. Required and optional packages are installed separately, optional ones one at a time with a visible message when skipped, and the build runs `chromium-browser --version`. The set of installed packages is unchanged.
+- **Health check ignored `PORT` and could use IPv6** - The health check in the image and in `docker-compose.yml` hardcoded port 8191 and `localhost`. It now uses `127.0.0.1` and the configured `PORT`, with a 5-second timeout.
+- **`make docker` targets** - They pointed at a `deployments/` directory that does not exist.
+
+### Added (container)
+- **`BROWSER_SANDBOX`** - Set to `true` to run Chromium with its own sandbox instead of `--no-sandbox`. Off by default, so nothing changes unless you set it: the default Docker runtime blocks the user namespaces the sandbox needs, and the server then fails at startup with "No usable sandbox!". It needs a seccomp profile that allows user namespaces or `--cap-add SYS_ADMIN`; see "Chromium sandbox" in the README.
+- **`cap_drop: ALL` in `docker-compose.yml`** - The container runs correctly with no Linux capabilities.
+
+### Changed (application)
+- **`MAX_MEMORY_MB` now measures the whole service** - The memory monitor used to compare the limit against the Go heap, which is a few megabytes and never reached it. It now reads the container's cgroup working set (v2, then v1), or the resident memory of the process tree outside a container. When usage is over the limit, idle browsers are recycled at most once every 5 minutes; browsers in use are replaced when released. The default stays 2048. On non-Linux hosts the monitor is disabled.
+- **Quitting the dashboard stops the server** - Pressing `q` or `ctrl+c` in the TUI now shuts the service down cleanly.
+- **Generic rate-limit phrases only count on error responses** - Body text such as "rate limit", "too many requests", "access denied" or "blocked" is only reported as a rate limit when the page's HTTP status is 400 or above. Cloudflare error codes (1015 and the others) are still reported at any status. Pages that merely mention these phrases no longer come back with `rateLimited: true`.
+- **Remote selectors must use https** - `SELECTORS_REMOTE_URL` with a plain `http://` address is refused with an error (loopback addresses excepted) and the built-in selectors are used.
+- **Removed the unused `configs/selectors.yaml`** - The selectors the service loads are embedded from `internal/selectors/selectors.yaml`; override them with `SELECTORS_PATH`.
+
+### Fixed (application)
+- **Canvas reads are stable** - Reading a canvas with `toDataURL`, `toBlob` or `getImageData` no longer changes the canvas. Two reads of an untouched canvas now return the same result, and a canvas read before `getContext('webgl')` can still get a WebGL context.
+- **Port conflicts are reported before any browser starts** - The listen port is bound first, so a port that is already in use fails immediately and leaves no Chrome processes behind. A server failure after startup now closes the browser pool before exiting.
+- **`LOG_LEVEL` is case-insensitive** - `DEBUG`, `Debug` and `debug` all work, and `warning` is accepted for `warn`.
+- **Logs keep reaching `LOG_FILE` while the dashboard is open** - The dashboard no longer disables logging globally.
+- **Dashboard no longer crashes in a very narrow terminal**
+- **Selector overrides keep the captcha section** - A selectors file that omits `captcha` now inherits the built-in captcha patterns.
+- **Empty selector patterns are rejected** - An empty or whitespace-only pattern, which would match every page, now fails validation, so that file is not loaded.
+- **Selector hot-reload survives editors that save by rename** - Saving the selectors file with vim, or replacing it atomically, no longer stops hot-reload.
+- **Data races** - Fixed races on a session's TTL, on the selectors reload timer, and on the maps returned by the stats endpoint.
+
+### Changed (may need action on upgrade)
+- **Requests by hostname may be refused** - The `Host` header must now be an IP address, `localhost`, the machine's own hostname, a single-label name (such as the Compose service name in `http://flaresolverr:8191`), or a name listed in the new `ALLOWED_HOSTS`. Other names get `403`. This affects anyone reaching FlareSolverr through a dotted name: a reverse proxy at `solver.example.com`, or a Kubernetes name like `flaresolverr.default.svc`. The log line for a rejected request gives the exact `ALLOWED_HOSTS=...` setting to add. `ALLOWED_HOSTS=*` turns the check off.
+- **`POST` requests must send `Content-Type: application/json`** - Anything else gets `415`. Prowlarr, Jackett and the usual client libraries already send it; a hand-written `curl -d` needs `-H "Content-Type: application/json"`. `STRICT_CONTENT_TYPE=false` restores the old behaviour.
+- **Requests from web pages are refused** - A request carrying an `Origin` header that is not listed in `CORS_ALLOWED_ORIGINS` gets `403`, including preflights. Previously the request ran and only the CORS response headers were withheld.
+- **`/health` no longer includes `domainStats`, `defaults` or `selectorsStats`** - They moved to the new `GET /stats`, which requires the API key when one is enabled. `/health` stays open for health checks and now reports only status, version, user agent and pool counters.
+- **A session request's `maxTimeout` now includes time spent queued** - Requests on one session run one at a time. A request waiting for the session used to wait indefinitely and then get its full timeout; it now fails with "Session is busy" once its own `maxTimeout` has passed, and time spent waiting is deducted from the solve.
+- **`PROXY_URL` is validated at startup, not per request** - The server refuses to start if it is malformed or points at a cloud metadata address. A private or Docker-network `PROXY_URL` now works without `ALLOW_LOCAL_PROXIES=true`; before, it made every request fail with "Invalid proxy URL".
+
+### Security
+- **The API could be driven through a visitor's browser** - With the default setup (no API key, listening locally), any web page open on the same machine or network could `POST` to the API as `text/plain` with no preflight, and a DNS-rebinding page could also read the responses. The Host, Origin and Content-Type checks above close both.
+- **Rate limiting could be bypassed with `X-Forwarded-For`** - With `TRUST_PROXY=true` the limiter keyed on the leftmost header entry, which the client writes, and accepted arbitrary non-IP strings as keys. Set the new `TRUSTED_PROXIES` (CIDRs of your reverse proxies): the header is then believed only from those addresses and read right to left. Without it the old behaviour remains and a warning is logged at startup. Header values that are not IP addresses are never used as keys, and IPv6 clients are limited per /64 instead of per address.
+- **Credentials in logged URLs** - `user:password@` in a target URL was written to the log on every request.
+
+### Fixed (API)
+- **Requests had no overall deadline** - The handler ran on a context with no deadline. Each request now has one (its timeout, plus the reconnect bypass budget and the browser pool wait), kept just under the server's write timeout so the client always gets an answer. `sessions.create` is bounded at 90 seconds.
+
+### Added (captcha)
+- **Per-request cap on paid captcha solves** - `CAPTCHA_MAX_EXTERNAL_SOLVES` (default `1`, maximum `3`, `0` buys nothing) limits how many tasks one request may create at external providers, counted across Turnstile and hCaptcha and across every pass of the solve loop.
+- **Per-request captcha provider and key** - `captchaSolver` and `captchaApiKey` were accepted and validated but never used. `captchaSolver: "none"` now forbids external solving for the request, a provider name selects among the server's providers, and `captchaSolver` with `captchaApiKey` uses the caller's own key for that request only, for at most one solve, even when the server-side fallback is disabled. `captchaApiKey` without `captchaSolver` is a validation error. The key is never logged, stored, or echoed.
+- **Captcha provider base URL overrides** - `TWOCAPTCHA_BASE_URL`, `CAPSOLVER_BASE_URL`, `ANTICAPTCHA_BASE_URL` and `NINEKW_BASE_URL`, for testing and self-hosted gateways. A malformed override disables the server-side fallback rather than falling back to the provider's real API.
+- **Captcha provider metrics** - `/metrics` exposes per-provider attempts, billable tasks, successes, failures, reported cost and solve time. The tracker existed but was never wired up.
+
+### Fixed (captcha)
+- **Repeated paid solves for one request** - When a bought token did not clear the challenge, every later pass of the solve loop bought another one, from every configured provider, until the request timed out; hCaptcha was bought on every pass from the first. A request now buys at most its budget, a paid task that times out ends external solving for that request instead of moving on to the next provider, and no task is created in the last 10 seconds before the request's deadline, when its solution could no longer be collected.
+- **Paid tasks abandoned on one bad poll** - A single failed result poll (HTTP 502/429, an HTML error page, a dropped connection) abandoned a task that had already been paid for, and HTTP status codes were not checked at all. Polling now retries transient failures with backoff and gives up only after several in a row. Provider responses are read through a size limit.
+- **CapSolver billed for unsolvable managed challenges** - CapSolver was sent Cloudflare managed challenges without the challenge-page data it has no field for, so it returned (and charged for) a token the interstitial rejects. It now refuses a managed challenge before any request is made and the next provider is tried.
+- **anti-captcha reported as 2captcha** - Results, errors and metrics for anti-captcha.com carried the name "2captcha". anti-captcha is also sent the challenge-page parameters under its own field names (`cData`, `chlPageData`) and no longer a custom User-Agent, which its API rejects.
+- **hCaptcha solving** - The hCaptcha path bypassed the provider chain, spliced the provider's token unescaped into page JavaScript, and read the token from only one of the two fields providers use. It now goes through the chain and the request's budget, the token is passed as data, both `gRecaptchaResponse` and `token` are accepted, and a provider that answers "task type not supported" is skipped without spending budget.
+- **Wrong User-Agent sent to providers** - Providers were told the server's default User-Agent even when the request overrode it. They now get the one the page uses, and a warning is logged when a provider reports having solved with a different one.
+- **Token injection reported success when nothing happened** - Injection counted as successful whenever `window.turnstile` existed or any reCAPTCHA/hCaptcha field was on the page. It now succeeds only when a Turnstile (or hCaptcha) response field was filled or a callback actually ran.
+- **Turnstile parameters taken from unrelated elements** - `action` and `cData` came from the first element anywhere on the page with a `data-action`/`data-cdata` attribute and were overlaid on parameters captured from `turnstile.render()`. They now come from the widget's own element, and captured parameters are used as a set. Sitekey detection no longer accepts any URL containing the word "turnstile", hCaptcha/reCAPTCHA widgets, or their keys.
+- **First result poll delayed by two intervals** - The first poll happened after 10s/6s/20s instead of 5s/3s/10s.
+- **Out-of-process iframe capture lifecycle** - The raw CDP calls ignored the request's context, child sessions were never forgotten when their frame went away, and the listener goroutine was untracked. Auto-attach is now switched off again when capture ends, so a session page reused afterwards cannot hang on a paused cross-origin iframe.
+
+### Changed (captcha)
+- `CAPTCHA_FALLBACK_ENABLED` remains `false` by default: no provider is contacted unless the fallback is enabled or a request supplies its own key.
+- With a budget of one, a request whose first provider fails after accepting the task no longer falls through to the next provider. Set `CAPTCHA_MAX_EXTERNAL_SOLVES=2` or `3` to keep that behaviour.
+
 ## [0.8.5] - 2026-10-11
 
 ### Fixed

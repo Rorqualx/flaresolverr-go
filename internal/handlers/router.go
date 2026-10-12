@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -34,7 +35,10 @@ func (h *Handler) routeCommand(w http.ResponseWriter, r *http.Request, req *type
 	case types.CmdRequestPost:
 		h.handleRequest(w, r.Context(), req, true, startTime)
 	case types.CmdSessionsCreate:
-		h.handleSessionCreate(w, r.Context(), req, startTime)
+		// r.Context() carries no deadline; creating a session may launch a browser
+		ctx, cancel := context.WithTimeout(r.Context(), sessionCreateDeadline)
+		defer cancel()
+		h.handleSessionCreate(w, ctx, req, startTime)
 	case types.CmdSessionsList:
 		h.handleSessionList(w, startTime)
 	case types.CmdSessionsDestroy:

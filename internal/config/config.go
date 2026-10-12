@@ -2,6 +2,11 @@
 package config
 
 import (
+	"fmt"
+	"net/netip"
+
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +30,10 @@ const (
 	maxTimeout              = 10 * time.Minute
 	maxRateLimitRPM         = 10000 // Maximum requests per minute per IP
 	minAPIKeyLength         = 16    // Minimum API key length for security
+
+	// Paid external captcha solves one request may buy with the server's keys.
+	defaultCaptchaMaxExternalSolves = 1
+	maxCaptchaMaxExternalSolves     = 3
 )
 
 // Config holds all application configuration.
@@ -37,6 +46,10 @@ type Config struct {
 	// Browser settings
 	Headless    bool
 	BrowserPath string
+	// BrowserSandbox keeps Chromium's own sandbox on (omits --no-sandbox).
+	// Off by default: the sandbox needs user namespaces or a seccomp profile
+	// that the default Docker runtime does not grant.
+	BrowserSandbox bool
 
 	// Pool settings - CRITICAL for memory efficiency
 	BrowserPoolSize    int
@@ -87,8 +100,22 @@ type Config struct {
 	RateLimitRPM       int      // Requests per minute per IP
 	TrustProxy         bool     // Trust X-Forwarded-For headers (only enable behind a reverse proxy)
 	IgnoreCertErrors   bool     // Ignore TLS certificate errors (required for some proxies)
-	CORSAllowedOrigins []string // Allowed CORS origins (empty = allow all with warning)
-	AllowLocalProxies  bool     // Allow localhost/private IP proxies (default: true for backward compatibility)
+	CORSAllowedOrigins []string // Origins allowed to call the API from a browser (empty = none; any other Origin is rejected)
+	AllowLocalProxies  bool     // Allow localhost/private IP proxies in requests (default: false)
+
+	// TrustedProxies lists the reverse proxies (CIDRs) whose X-Forwarded-For is
+	// believed when TrustProxy is on (TRUSTED_PROXIES). Empty keeps the legacy
+	// behavior of believing the header from any peer.
+	TrustedProxies []netip.Prefix
+
+	// AllowedHosts lists extra hostnames accepted in the Host header
+	// (ALLOWED_HOSTS). IP literals, localhost, this machine's hostname and
+	// single-label names are always accepted; "*" disables the check.
+	AllowedHosts []string
+
+	// StrictContentType requires Content-Type: application/json on API requests
+	// (STRICT_CONTENT_TYPE, default true).
+	StrictContentType bool
 
 	// DNSRebindingProtection pins the response URL to the IP resolved at request
 	// time. Disable (DNS_REBINDING_PROTECTION=false) for sites that legitimately
@@ -109,6 +136,14 @@ type Config struct {
 	Captcha9kwAPIKey         string        // 9kw.eu API key (NINEKW_API_KEY) — hCaptcha/reCAPTCHA only, no Turnstile
 	CaptchaPrimaryProvider   string        // Primary provider: "2captcha", "capsolver", "anticaptcha", or "9kw" (default: "2captcha")
 	CaptchaSolverTimeout     time.Duration // Timeout for external solver API (default: 120s)
+	CaptchaMaxExternalSolves int           // Paid solves one request may buy with the server's keys (default: 1, max: 3, 0 buys nothing)
+
+	// Provider base URL overrides, for testing and self-hosted gateways.
+	// Empty selects the provider's public API.
+	Captcha2CaptchaBaseURL    string // TWOCAPTCHA_BASE_URL
+	CaptchaCapSolverBaseURL   string // CAPSOLVER_BASE_URL
+	CaptchaAntiCaptchaBaseURL string // ANTICAPTCHA_BASE_URL
+	Captcha9kwBaseURL         string // NINEKW_BASE_URL
 
 	// Selectors settings
 	SelectorsPath          string        // Path to external selectors.yaml override file
@@ -130,8 +165,9 @@ func Load() *Config {
 		Port: getEnvInt("PORT", 8191),
 
 		// Browser
-		Headless:    getEnvBool("HEADLESS", true),
-		BrowserPath: getEnvString("BROWSER_PATH", ""),
+		Headless:       getEnvBool("HEADLESS", true),
+		BrowserPath:    getEnvString("BROWSER_PATH", ""),
+		BrowserSandbox: getEnvBool("BROWSER_SANDBOX", false),
 
 		// Pool - These defaults are tuned for memory efficiency
 		BrowserPoolSize:    getEnvInt("BROWSER_POOL_SIZE", 3),
@@ -180,6 +216,9 @@ func Load() *Config {
 		IgnoreCertErrors:   getEnvBool("IGNORE_CERT_ERRORS", false),
 		CORSAllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", nil),
 		AllowLocalProxies:  getEnvBool("ALLOW_LOCAL_PROXIES", false), // Default false for security
+		TrustedProxies:     getEnvPrefixes("TRUSTED_PROXIES"),
+		AllowedHosts:       getEnvStringSlice("ALLOWED_HOSTS", nil),
+		StrictContentType:  getEnvBool("STRICT_CONTENT_TYPE", true),
 
 		DNSRebindingProtection: getEnvBool("DNS_REBINDING_PROTECTION", true), // Default true for security
 
@@ -196,6 +235,12 @@ func Load() *Config {
 		Captcha9kwAPIKey:         getEnvString("NINEKW_API_KEY", ""),
 		CaptchaPrimaryProvider:   getEnvString("CAPTCHA_PRIMARY_PROVIDER", "2captcha"),
 		CaptchaSolverTimeout:     getEnvDuration("CAPTCHA_SOLVER_TIMEOUT", 120*time.Second),
+		CaptchaMaxExternalSolves: getEnvInt("CAPTCHA_MAX_EXTERNAL_SOLVES", defaultCaptchaMaxExternalSolves),
+
+		Captcha2CaptchaBaseURL:    getEnvString("TWOCAPTCHA_BASE_URL", ""),
+		CaptchaCapSolverBaseURL:   getEnvString("CAPSOLVER_BASE_URL", ""),
+		CaptchaAntiCaptchaBaseURL: getEnvString("ANTICAPTCHA_BASE_URL", ""),
+		Captcha9kwBaseURL:         getEnvString("NINEKW_BASE_URL", ""),
 
 		// Selectors settings
 		SelectorsPath:          getEnvString("SELECTORS_PATH", ""),
@@ -394,7 +439,12 @@ func (c *Config) Validate() {
 		"trace": true, "debug": true, "info": true,
 		"warn": true, "error": true, "fatal": true,
 	}
-	if !validLogLevels[strings.ToLower(c.LogLevel)] {
+	// Normalise so LOG_LEVEL=DEBUG means debug everywhere the value is read
+	c.LogLevel = strings.ToLower(strings.TrimSpace(c.LogLevel))
+	if c.LogLevel == "warning" {
+		c.LogLevel = "warn"
+	}
+	if !validLogLevels[c.LogLevel] {
 		log.Warn().Str("level", c.LogLevel).Msg("Invalid log level, using 'info'")
 		c.LogLevel = "info"
 	}
@@ -406,9 +456,12 @@ func (c *Config) Validate() {
 			Msg("WARNING: pprof exposed on non-localhost address - this is a security risk")
 	}
 
-	// CORS security warning
+	// Forwarded-header trust warning
+	if c.TrustProxy && len(c.TrustedProxies) == 0 {
+		log.Warn().Msg("TRUST_PROXY is on without TRUSTED_PROXIES - X-Forwarded-For is believed from any client, so rate limiting can be bypassed by sending the header; set TRUSTED_PROXIES to your reverse proxy's address")
+	}
 	if len(c.CORSAllowedOrigins) == 0 {
-		log.Warn().Msg("CORS_ALLOWED_ORIGINS not set - allowing all origins (potential CSRF risk)")
+		log.Debug().Msg("CORS_ALLOWED_ORIGINS not set - requests from web pages (any Origin header) are rejected")
 	}
 
 	// Certificate validation warning
@@ -534,12 +587,17 @@ func (c *Config) Validate() {
 
 	// Remote selectors URL validation
 	if c.SelectorsRemoteURL != "" {
-		// Validate URL scheme
+		// Validate URL scheme. The selectors manager enforces https (plain http
+		// only for a loopback host); this catches anything that is not a URL.
 		if !strings.HasPrefix(c.SelectorsRemoteURL, "http://") && !strings.HasPrefix(c.SelectorsRemoteURL, "https://") {
 			log.Error().
 				Str("url", c.SelectorsRemoteURL).
-				Msg("SELECTORS_REMOTE_URL must use http:// or https:// scheme, ignoring")
+				Msg("SELECTORS_REMOTE_URL must be an https:// URL, ignoring")
 			c.SelectorsRemoteURL = ""
+		} else if strings.HasPrefix(c.SelectorsRemoteURL, "http://") {
+			log.Warn().
+				Str("url", c.SelectorsRemoteURL).
+				Msg("SELECTORS_REMOTE_URL uses plain http - it will be refused unless the host is loopback; use https")
 		}
 
 		// Warn if both file and remote are configured
@@ -716,6 +774,43 @@ func getEnvStringSlice(key string, defaultValue []string) []string {
 	return defaultValue
 }
 
+// getEnvPrefixes reads a comma-separated list of CIDRs (or bare IP addresses,
+// taken as a single-address prefix) from the environment. Invalid entries are
+// logged and skipped.
+func getEnvPrefixes(key string) []netip.Prefix {
+	var prefixes []netip.Prefix
+	for _, entry := range getEnvStringSlice(key, nil) {
+		prefix, err := parsePrefix(entry)
+		if err != nil {
+			log.Warn().Str("key", key).Str("value", entry).Msg("Invalid CIDR in environment variable, ignoring")
+			continue
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
+}
+
+// parsePrefix parses a CIDR, or a bare IP address as a one-address prefix.
+// IPv4-mapped IPv6 input is normalised to IPv4.
+func parsePrefix(entry string) (netip.Prefix, error) {
+	if prefix, err := netip.ParsePrefix(entry); err == nil {
+		if addr := prefix.Addr(); addr.Is4In6() {
+			bits := prefix.Bits() - 96
+			if bits < 0 {
+				return netip.Prefix{}, fmt.Errorf("prefix %q is too wide for an IPv4-mapped address", entry)
+			}
+			return netip.PrefixFrom(addr.Unmap(), bits).Masked(), nil
+		}
+		return prefix.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(entry)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("%q is not a CIDR or IP address", entry)
+	}
+	addr = addr.Unmap().WithZone("")
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
 // validateCaptchaConfig validates CAPTCHA solver configuration.
 func (c *Config) validateCaptchaConfig() {
 	// Validate native attempts (min 1, max 10)
@@ -758,6 +853,52 @@ func (c *Config) validateCaptchaConfig() {
 	}
 	c.CaptchaPrimaryProvider = strings.ToLower(c.CaptchaPrimaryProvider)
 
+	// Validate the per-request budget of paid solves (0 buys nothing).
+	if c.CaptchaMaxExternalSolves < 0 {
+		log.Warn().
+			Int("max_solves", c.CaptchaMaxExternalSolves).
+			Msg("CAPTCHA_MAX_EXTERNAL_SOLVES cannot be negative, using 0 (no external solves)")
+		c.CaptchaMaxExternalSolves = 0
+	} else if c.CaptchaMaxExternalSolves > maxCaptchaMaxExternalSolves {
+		log.Warn().
+			Int("max_solves", c.CaptchaMaxExternalSolves).
+			Int("max", maxCaptchaMaxExternalSolves).
+			Msg("CAPTCHA_MAX_EXTERNAL_SOLVES too high, capping")
+		c.CaptchaMaxExternalSolves = maxCaptchaMaxExternalSolves
+	}
+
+	// Validate provider base URL overrides. A malformed override must not fall
+	// back silently to the provider's public (paid) API with the server's keys,
+	// so it turns the server-side fallback off.
+	for _, override := range []struct {
+		env   string
+		value *string
+	}{
+		{"TWOCAPTCHA_BASE_URL", &c.Captcha2CaptchaBaseURL},
+		{"CAPSOLVER_BASE_URL", &c.CaptchaCapSolverBaseURL},
+		{"ANTICAPTCHA_BASE_URL", &c.CaptchaAntiCaptchaBaseURL},
+		{"NINEKW_BASE_URL", &c.Captcha9kwBaseURL},
+	} {
+		if *override.value == "" {
+			continue
+		}
+		cleaned, err := validateProviderBaseURL(*override.value)
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("setting", override.env).
+				Msg("Invalid captcha provider base URL; ignoring it and disabling the external CAPTCHA fallback")
+			*override.value = ""
+			c.CaptchaFallbackEnabled = false
+			continue
+		}
+		*override.value = cleaned
+		log.Warn().
+			Str("setting", override.env).
+			Str("base_url", cleaned).
+			Msg("Captcha provider base URL overridden; API keys for this provider are sent to this address")
+	}
+
 	// Warn if fallback enabled but no API keys configured
 	if c.CaptchaFallbackEnabled {
 		if c.Captcha2CaptchaAPIKey == "" && c.CaptchaCapSolverAPIKey == "" && c.CaptchaAntiCaptchaAPIKey == "" && c.Captcha9kwAPIKey == "" {
@@ -781,9 +922,35 @@ func (c *Config) validateCaptchaConfig() {
 				Strs("providers", configured).
 				Str("primary", c.CaptchaPrimaryProvider).
 				Int("native_attempts", c.CaptchaNativeAttempts).
+				Int("max_external_solves_per_request", c.CaptchaMaxExternalSolves).
 				Msg("External CAPTCHA solver fallback enabled")
+			if c.CaptchaMaxExternalSolves == 0 {
+				log.Warn().Msg("CAPTCHA_MAX_EXTERNAL_SOLVES is 0: the fallback is enabled but will never buy a solve")
+			}
 		}
 	}
+}
+
+// validateProviderBaseURL checks a captcha provider base URL override and
+// returns it without a trailing slash.
+func validateProviderBaseURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", errors.New("not a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("scheme must be http or https")
+	}
+	if u.Host == "" {
+		return "", errors.New("host is missing")
+	}
+	if u.User != nil {
+		return "", errors.New("must not contain credentials")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("must not contain a query or fragment")
+	}
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 // HasCaptchaFallback returns true if external CAPTCHA fallback is configured.

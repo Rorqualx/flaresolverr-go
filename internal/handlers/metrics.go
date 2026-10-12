@@ -55,6 +55,9 @@ func (h *Handler) handleMetrics(w http.ResponseWriter) {
 		}
 	}
 
+	// External captcha solver usage
+	h.writeCaptchaMetrics(&b)
+
 	w.Write([]byte(b.String()))
 }
 

@@ -54,7 +54,7 @@ func TestIntegration_FullSessionLifecycle(t *testing.T) {
 		t.Fatalf("Failed to acquire browser: %v", err)
 	}
 
-	sess, err := sessionMgr.Create("test-session-1", browser1)
+	sess, err := sessionMgr.Create("test-session-1", browser1, 0)
 	if err != nil {
 		pool.Release(browser1)
 		t.Fatalf("Failed to create session: %v", err)
@@ -338,7 +338,7 @@ func TestIntegration_SessionExpiration(t *testing.T) {
 		t.Fatalf("Failed to acquire browser: %v", err)
 	}
 
-	_, err = sessionMgr.Create("expiring-session", browser1)
+	_, err = sessionMgr.Create("expiring-session", browser1, 0)
 	if err != nil {
 		pool.Release(browser1)
 		t.Fatalf("Failed to create session: %v", err)
@@ -391,7 +391,7 @@ func TestIntegration_MaxSessionsLimit(t *testing.T) {
 			t.Fatalf("Failed to acquire browser %d: %v", i, err)
 		}
 
-		_, err = sessionMgr.Create("session-"+string(rune('A'+i)), browser1)
+		_, err = sessionMgr.Create("session-"+string(rune('A'+i)), browser1, 0)
 		if err != nil {
 			pool.Release(browser1)
 			t.Fatalf("Failed to create session %d: %v", i, err)
@@ -409,7 +409,7 @@ func TestIntegration_MaxSessionsLimit(t *testing.T) {
 		t.Fatalf("Failed to acquire browser 3: %v", err)
 	}
 
-	_, err = sessionMgr.Create("session-C", browser3)
+	_, err = sessionMgr.Create("session-C", browser3, 0)
 	if err == nil {
 		t.Error("Expected error when exceeding max sessions")
 	}
@@ -511,7 +511,7 @@ func TestIntegration_MultipleSessionsIndependent(t *testing.T) {
 			t.Fatalf("Failed to acquire browser %d: %v", i, err)
 		}
 
-		sess, err := sessionMgr.Create("session-"+string(rune('A'+i)), browser1)
+		sess, err := sessionMgr.Create("session-"+string(rune('A'+i)), browser1, 0)
 		if err != nil {
 			pool.Release(browser1)
 			t.Fatalf("Failed to create session %d: %v", i, err)

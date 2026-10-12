@@ -31,9 +31,9 @@ repos:
       - id: go-build
       - id: go-mod-tidy
 
-  # Golangci-lint
+  # Golangci-lint (same version CI runs; see .github/workflows/ci.yml)
   - repo: https://github.com/golangci/golangci-lint
-    rev: v1.55.2
+    rev: v1.64.8
     hooks:
       - id: golangci-lint
         args: ['--config', '.golangci.yml']

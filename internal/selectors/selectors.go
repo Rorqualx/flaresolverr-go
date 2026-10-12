@@ -90,6 +90,15 @@ func defaultSelectors() *Selectors {
 			"cf-challenge",
 			"cf_chl_prog",
 		},
+		Captcha: []string{
+			"hcaptcha.com",
+			"h-captcha",
+			"hcaptcha-checkbox",
+			"recaptcha",
+			"grecaptcha",
+			"g-recaptcha",
+			"recaptcha/api",
+		},
 		TurnstileSelectors: []string{
 			"input[type='checkbox']",
 			".cf-turnstile-response",

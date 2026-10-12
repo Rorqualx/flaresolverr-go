@@ -90,7 +90,8 @@ The API accepts POST requests with JSON body at both `/` and `/v1` endpoints. Al
 |----------|--------|-------------|
 | `/` | POST | Main API endpoint (legacy) |
 | `/v1` | POST | Main API endpoint (recommended) |
-| `/health` | GET | Health check with pool and domain stats |
+| `/health` | GET | Health check with pool counters (no API key needed) |
+| `/stats` | GET | Health fields plus per-domain statistics and selector reload state (API key required when enabled) |
 | `/metrics` | GET | Prometheus-compatible metrics |
 | `/docs` | GET | OpenAPI 3.0 specification (YAML) |
 
@@ -202,8 +203,8 @@ curl -X POST http://localhost:8191/v1 \
 | `userAgent` | string | No | Override User-Agent for this request |
 | `returnRawHtml` | bool | No | Return raw HTML before JavaScript renders |
 | `executeJs` | string | No | Custom JavaScript to execute after solving |
-| `captchaSolver` | string | No | Per-request captcha provider: `2captcha`, `capsolver`, `anticaptcha`, `9kw`, or `none` |
-| `captchaApiKey` | string | No | Per-request captcha API key |
+| `captchaSolver` | string | No | External captcha provider for this request: `2captcha`, `capsolver`, `anticaptcha` or `9kw` (one of the server's configured providers, unless `captchaApiKey` is given), or `none` to forbid external solving for this request |
+| `captchaApiKey` | string | No | Your own API key for `captchaSolver`. Used for this request only, for at most one paid solve, even when the server-side fallback is disabled. Requires `captchaSolver`. Never logged or stored |
 | `keepaliveTtl` | int | No | New TTL in minutes for `sessions.keepalive` (0 = just touch, max 1440) |
 | `cookieExtractDelay` | int | No | Seconds to wait before extracting cookies (0-30). Captures late-set JS cookies |
 | `browserFlags` | object | No | Per-session Chrome flag overrides (`sessions.create` only). See below |
@@ -491,13 +492,38 @@ All configuration is done via environment variables.
 |----------|---------|-------------|
 | `RATE_LIMIT_ENABLED` | `true` | Enable rate limiting |
 | `RATE_LIMIT_RPM` | `60` | Requests per minute per IP |
-| `TRUST_PROXY` | `false` | Trust X-Forwarded-For headers |
-| `CORS_ALLOWED_ORIGINS` | (all) | Comma-separated allowed origins |
-| `ALLOW_LOCAL_PROXIES` | `true` | Allow localhost/private IP proxies |
+| `TRUST_PROXY` | `false` | Use `X-Forwarded-For` / `X-Real-IP` for rate limiting. Only enable behind a reverse proxy, and set `TRUSTED_PROXIES` |
+| `TRUSTED_PROXIES` | (none) | Comma-separated CIDRs (or IPs) of your reverse proxies. With this set, forwarding headers are believed only from these addresses and `X-Forwarded-For` is read right to left. Without it, `TRUST_PROXY` believes the header from any client, which lets a client evade rate limiting |
+| `ALLOWED_HOSTS` | (none) | Extra hostnames accepted in the `Host` header, comma-separated (`.example.com` matches subdomains, `*` disables the check). IP addresses, `localhost`, the machine's hostname and single-label names such as a Compose service name are always accepted. See [Browser-borne request protection](#browser-borne-request-protection) |
+| `CORS_ALLOWED_ORIGINS` | (none) | Comma-separated web origins allowed to call the API from a browser. Requests carrying any other `Origin` header are rejected with 403 |
+| `STRICT_CONTENT_TYPE` | `true` | Require `Content-Type: application/json` on API requests (415 otherwise) |
+| `ALLOW_LOCAL_PROXIES` | `false` | Allow a `proxy` in an API request to point at localhost or a private address. Does not apply to `PROXY_URL`, which is trusted configuration |
 | `IGNORE_CERT_ERRORS` | `false` | Ignore TLS certificate errors |
 | `DNS_REBINDING_PROTECTION` | `true` | Pin response URL to the request-time IP. Set `false` for sites serving identical content across multiple TLDs/CDN IPs (SSRF protection stays on) |
 | `API_KEY_ENABLED` | `false` | Enable API key authentication |
 | `API_KEY` | (none) | Required API key (use 16+ chars) |
+| `BROWSER_SANDBOX` | `false` | Run Chromium with its own sandbox instead of `--no-sandbox`. Needs extra container permissions; see below |
+
+### Chromium sandbox
+
+By default Chromium runs with `--no-sandbox`, because the default Docker runtime does not allow what the sandbox needs. That means a browser exploit in a page you ask FlareSolverr to load is contained only by the container itself, so keep the container unprivileged (the bundled `docker-compose.yml` drops all capabilities and sets `no-new-privileges`) and do not point it at URLs from untrusted callers without `API_KEY_ENABLED`.
+
+`BROWSER_SANDBOX=true` turns Chromium's sandbox back on. It uses unprivileged user namespaces, which Docker's default seccomp profile blocks, so with the default runtime the server exits at startup with `No usable sandbox!`. One of these must also be set:
+
+| Docker option | Effect |
+|---|---|
+| `--security-opt seccomp=<profile>.json` | A seccomp profile that allows user namespaces. `seccomp=unconfined` also works but removes all syscall filtering |
+| `--cap-add SYS_ADMIN` | Works, but grants a broad capability; prefer a seccomp profile |
+
+Whether user namespaces are available also depends on the host (kernel settings and AppArmor), so test on the machine that will run it. Leave the setting off if the container does not start.
+
+### Browser-borne request protection
+
+FlareSolverr is normally run without an API key on an address only local software can reach. A web page open in a browser on that machine or network can reach it too, so the server refuses requests that a web page caused:
+
+- **Host check (DNS rebinding).** The `Host` header must be an IP address, `localhost`, the machine's own hostname, a single-label name (for example the Compose service name in `http://flaresolverr:8191`), or a name listed in `ALLOWED_HOSTS`. Anything else gets `403`, and the log line names the exact `ALLOWED_HOSTS=...` value that would allow it. If you reach FlareSolverr through a dotted name (a reverse proxy at `solver.example.com`, a Kubernetes name like `flaresolverr.default.svc`), set `ALLOWED_HOSTS`.
+- **Origin check (cross-site requests).** A request with an `Origin` header not listed in `CORS_ALLOWED_ORIGINS` gets `403`. Programs such as Prowlarr, Jackett and curl do not send `Origin`.
+- **JSON only.** `POST` requests must send `Content-Type: application/json`, or they get `415`. If you use `curl -d` by hand, add `-H "Content-Type: application/json"`. Set `STRICT_CONTENT_TYPE=false` to turn this off.
 
 ### API Key Authentication
 
@@ -527,16 +553,25 @@ environment:
 
 External CAPTCHA solver fallback for Turnstile and hCaptcha challenges that native solving cannot handle.
 
+**Nothing is ever bought unless you opt in.** With `CAPTCHA_FALLBACK_ENABLED` unset or `false`, FlareSolverr never contacts a paid provider, whatever keys are configured. The only other way a provider is contacted is a request that brings its own `captchaSolver` + `captchaApiKey`.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CAPTCHA_NATIVE_ATTEMPTS` | `3` | Native solve attempts before external fallback (1-10) |
-| `CAPTCHA_FALLBACK_ENABLED` | `false` | Enable external CAPTCHA solver fallback |
+| `CAPTCHA_FALLBACK_ENABLED` | `false` | Enable external CAPTCHA solver fallback with the server's keys |
+| `CAPTCHA_MAX_EXTERNAL_SOLVES` | `1` | Paid solves one request may buy with the server's keys (0-3). `0` buys nothing even when the fallback is enabled |
 | `TWOCAPTCHA_API_KEY` | (none) | 2Captcha API key |
-| `CAPSOLVER_API_KEY` | (none) | CapSolver API key |
+| `CAPSOLVER_API_KEY` | (none) | CapSolver API key (standalone Turnstile widgets and hCaptcha; **not** Cloudflare managed challenges) |
 | `ANTICAPTCHA_API_KEY` | (none) | anti-captcha.com API key |
 | `NINEKW_API_KEY` | (none) | 9kw.eu API key (hCaptcha/reCAPTCHA only — does **not** solve Cloudflare Turnstile) |
 | `CAPTCHA_PRIMARY_PROVIDER` | `2captcha` | Primary provider: `2captcha`, `capsolver`, `anticaptcha`, or `9kw` |
-| `CAPTCHA_SOLVER_TIMEOUT` | `120s` | Timeout for external solver API (30s-300s) |
+| `CAPTCHA_SOLVER_TIMEOUT` | `120s` | How long to wait for a provider to solve one task (30s-300s) |
+| `TWOCAPTCHA_BASE_URL` | (none) | Override the 2Captcha API base URL. For testing and self-hosted gateways |
+| `CAPSOLVER_BASE_URL` | (none) | Override the CapSolver API base URL. For testing and self-hosted gateways |
+| `ANTICAPTCHA_BASE_URL` | (none) | Override the anti-captcha.com API base URL. For testing and self-hosted gateways |
+| `NINEKW_BASE_URL` | (none) | Override the 9kw.eu endpoint URL. For testing and self-hosted gateways |
+
+The `*_BASE_URL` overrides must be `http` or `https` URLs without credentials or a query string. API keys for that provider — including a request's own `captchaApiKey` — are sent to the address you configure, so only point them at a gateway you control. A malformed override is ignored **and disables the server-side fallback**, so a typo cannot send your keys to the provider's real API.
 
 **Supported CAPTCHA types:**
 - **Turnstile** — Cloudflare's challenge widget (native + external solving)
@@ -547,7 +582,30 @@ External CAPTCHA solver fallback for Turnstile and hCaptcha challenges that nati
 2. If native solving fails after `CAPTCHA_NATIVE_ATTEMPTS`, it falls back to the external solver
 3. For hCaptcha, external solving is used directly (no native solving available)
 4. External solver extracts the sitekey, submits to the provider, and injects the token
-5. Per-request override: use `captchaSolver` and `captchaApiKey` fields in the request
+5. Providers are tried in order: `CAPTCHA_PRIMARY_PROVIDER` first, then the others alphabetically
+
+**What one request can cost:**
+- A request buys at most `CAPTCHA_MAX_EXTERNAL_SOLVES` solves (default 1), counted in tasks created at a provider, across Turnstile and hCaptcha and across every pass of the solve loop. If the challenge is still there after the bought token was injected, FlareSolverr goes back to native solving and does not buy again.
+- A provider that refuses the task outright (unsupported captcha type, rejected key, empty balance) costs nothing; the next provider is tried and the refusal is remembered for the rest of the request.
+- Once a task was created and then timed out, nothing more is bought for that request, from any provider.
+- No task is created when fewer than 10 seconds of the request's `maxTimeout` remain: the solution could not arrive in time. Native attempts run first and take time, so give requests that should fall back to a provider a generous `maxTimeout`.
+- If it is unclear whether a provider accepted a task (the create call was sent but answered with a 5xx, an error page, or nothing), the solve counts as spent. A create call that never left the server (DNS or connection failure) does not.
+- A flaky response while waiting for a solution (HTTP 429/5xx, an HTML error page) does not abandon the paid task: polling backs off and retries, giving up only after several failures in a row.
+- CapSolver is not sent Cloudflare managed challenges (the "Just a moment..." interstitial): its proxyless Turnstile task cannot carry the challenge-page data, so the solve would be paid for and rejected. With CapSolver as the only provider, managed challenges are not solved externally.
+
+**Per-request control** (see the `captchaSolver` and `captchaApiKey` request fields):
+
+| Request | Effect |
+|---------|--------|
+| neither field | The server's providers, if `CAPTCHA_FALLBACK_ENABLED=true` |
+| `"captchaSolver": "none"` | No external solving for this request |
+| `"captchaSolver": "anticaptcha"` | Only that provider, with the server's key (must be configured and the fallback enabled) |
+| `"captchaSolver": "2captcha", "captchaApiKey": "..."` | That provider with **your** key, for this request only and at most one solve — works even when the server-side fallback is disabled. `CAPTCHA_MAX_EXTERNAL_SOLVES` does not apply |
+| `captchaApiKey` without `captchaSolver` | Rejected with a validation error |
+
+A per-request key is never written to the logs, stored, or returned in a response or error message.
+
+**Metrics:** `/metrics` exposes per-provider counters once a provider has been used: `flaresolverr_captcha_attempts_total`, `flaresolverr_captcha_tasks_total` (billable tasks created), `flaresolverr_captcha_successes_total`, `flaresolverr_captcha_failures_total`, `flaresolverr_captcha_cost_usd_total` and `flaresolverr_captcha_solve_seconds_total`, each labelled `provider="..."`.
 
 **Example configuration:**
 ```yaml
@@ -555,6 +613,7 @@ environment:
   - CAPTCHA_FALLBACK_ENABLED=true
   - TWOCAPTCHA_API_KEY=your-2captcha-api-key
   - CAPTCHA_NATIVE_ATTEMPTS=2
+  - CAPTCHA_MAX_EXTERNAL_SOLVES=1
 ```
 
 ### Selectors Settings
@@ -629,6 +688,10 @@ services:
       - BROWSER_POOL_SIZE=3
       - MAX_TIMEOUT=300s
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 ```
 
 ## Migration from Python FlareSolverr
@@ -707,7 +770,19 @@ Returns:
     "released": 148,
     "recycled": 5,
     "errors": 2
-  },
+  }
+}
+```
+
+`/health` needs no API key, so it only reports liveness and pool counters. Per-domain statistics are on `/stats`, which requires the API key when one is enabled:
+
+```bash
+curl http://localhost:8191/stats
+```
+
+Returns the `/health` fields plus:
+```json
+{
   "domainStats": {
     "example.com": {
       "requestCount": 45,

@@ -19,10 +19,7 @@ package captcha
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -51,6 +48,11 @@ const (
 
 	// Default solve budget when none is supplied.
 	nineKwDefaultTimeout = 180 * time.Second
+
+	nineKwName = "9kw"
+
+	// nineKwNoUser is the answer 9kw gives when no worker picked the task up.
+	nineKwNoUser = "ERROR NO USER"
 )
 
 // NineKwSolver implements CaptchaSolver for the 9kw.eu API.
@@ -63,8 +65,8 @@ type NineKwSolver struct {
 }
 
 func init() {
-	Register("9kw", func(apiKey string, timeout time.Duration) CaptchaSolver {
-		return NewNineKwSolver(NineKwConfig{APIKey: apiKey, Timeout: timeout})
+	Register(nineKwName, func(opts ProviderOptions) CaptchaSolver {
+		return NewNineKwSolver(NineKwConfig(opts))
 	})
 }
 
@@ -72,7 +74,7 @@ func init() {
 type NineKwConfig struct {
 	APIKey       string
 	Timeout      time.Duration
-	BaseURL      string        // Override for testing
+	BaseURL      string        // Override for testing and self-hosted gateways
 	PollInterval time.Duration // Override for testing (default: nineKwPollInterval)
 }
 
@@ -106,7 +108,7 @@ func NewNineKwSolver(cfg NineKwConfig) *NineKwSolver {
 
 // Name returns the provider name.
 func (s *NineKwSolver) Name() string {
-	return "9kw"
+	return nineKwName
 }
 
 // IsConfigured returns true if the API key is set.
@@ -115,9 +117,10 @@ func (s *NineKwSolver) IsConfigured() bool {
 }
 
 // nineKwSubmitResponse is the JSON response from usercaptchaupload (json=1).
+// 9kw has sent the id as both a JSON number and a string.
 type nineKwSubmitResponse struct {
-	CaptchaID string `json:"captchaid"`
-	Error     string `json:"error"`
+	CaptchaID flexString `json:"captchaid"`
+	Error     flexString `json:"error"`
 }
 
 // nineKwResultResponse is the JSON response from usercaptchacorrectdata (json=1).
@@ -125,46 +128,52 @@ type nineKwSubmitResponse struct {
 // carries the solved token once ready, or the sentinel "ERROR NO USER" when no
 // worker is available.
 type nineKwResultResponse struct {
-	Answer   string `json:"answer"`
-	Message  string `json:"message"`
-	TryAgain int    `json:"try_again"`
-	Error    string `json:"error"`
+	Answer   string     `json:"answer"`
+	Message  string     `json:"message"`
+	TryAgain flexString `json:"try_again"`
+	Error    flexString `json:"error"`
 }
 
 // nineKwBalanceResponse is the JSON response from usercaptchaguthaben (json=1).
-// 9kw has historically returned credits as either a JSON number or a string, so
-// it is decoded leniently via json.Number.
+// 9kw has historically returned credits as either a JSON number or a string.
 type nineKwBalanceResponse struct {
-	Credits json.Number `json:"credits"`
-	Error   string      `json:"error"`
+	Credits flexString `json:"credits"`
+	Error   flexString `json:"error"`
 }
 
 // SolveTurnstile is unsupported by 9kw — it has no Turnstile solving capability.
 // Returning a rejected error (rather than blocking) lets SolverChain fall through
-// to a Turnstile-capable provider.
+// to a Turnstile-capable provider. Nothing is sent to 9kw, so no budget is spent.
 func (s *NineKwSolver) SolveTurnstile(_ context.Context, _ *TurnstileRequest) (*TurnstileResult, error) {
-	return nil, types.NewCaptchaRejectedError(s.Name(), "UNSUPPORTED", "9kw does not support Cloudflare Turnstile")
+	return nil, notCreated(types.NewCaptchaRejectedError(nineKwName, "UNSUPPORTED", "9kw does not support Cloudflare Turnstile"))
 }
 
 // SolveHCaptcha solves an hCaptcha challenge using the 9kw human solving pool.
 func (s *NineKwSolver) SolveHCaptcha(ctx context.Context, req *HCaptchaRequest) (*CaptchaResult, error) {
 	if !s.IsConfigured() {
-		return nil, fmt.Errorf("9kw API key not configured")
+		return nil, notCreated(fmt.Errorf("%s API key not configured", nineKwName))
 	}
 
 	startTime := time.Now()
 
 	captchaID, err := s.submit(ctx, nineKwSourceHCaptcha, req.SiteKey, req.PageURL, req.UserAgent)
 	if err != nil {
-		return nil, fmt.Errorf("failed to submit hCaptcha: %w", err)
+		return nil, err
 	}
 
 	log.Debug().
 		Str("captcha_id", captchaID).
-		Str("sitekey", req.SiteKey[:min(10, len(req.SiteKey))]+"...").
+		Str("sitekey", sitekeyPreview(req.SiteKey)).
 		Msg("9kw hCaptcha task created")
 
-	token, err := s.poll(ctx, captchaID)
+	token, err := pollTask(ctx, pollConfig{
+		provider: nineKwName,
+		taskID:   captchaID,
+		timeout:  s.timeout,
+		interval: s.pollInterval,
+	}, func(pollCtx context.Context) (string, bool, error) {
+		return s.fetchResult(pollCtx, captchaID)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -173,11 +182,12 @@ func (s *NineKwSolver) SolveHCaptcha(ctx context.Context, req *HCaptchaRequest) 
 		Token:     token,
 		SolveTime: time.Since(startTime),
 		Cost:      0, // 9kw bills in credits, not USD
-		Provider:  s.Name(),
+		Provider:  nineKwName,
 	}, nil
 }
 
 // submit uploads an interactive (token) captcha and returns the 9kw captcha id.
+// A definitive refusal is returned as a "not created" error.
 func (s *NineKwSolver) submit(ctx context.Context, oldsource, sitekey, pageURL, userAgent string) (string, error) {
 	params := s.authParams()
 	params.Set("action", nineKwActionUpload)
@@ -191,55 +201,17 @@ func (s *NineKwSolver) submit(ctx context.Context, oldsource, sitekey, pageURL, 
 		params.Set("useragent", userAgent)
 	}
 
-	body, err := s.doRequest(ctx, params)
-	if err != nil {
-		return "", err
-	}
-
 	var resp nineKwSubmitResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse 9kw submit response: %w", err)
+	if err := s.get(ctx, params, &resp); err != nil {
+		return "", createFailure(fmt.Errorf("%s: failed to submit captcha: %w", nineKwName, err))
 	}
 	if resp.Error != "" {
-		return "", s.handleError(resp.Error, "")
+		return "", notCreated(s.handleError(string(resp.Error), ""))
 	}
 	if resp.CaptchaID == "" {
-		return "", fmt.Errorf("9kw returned no captcha id")
+		return "", notCreated(fmt.Errorf("%s returned no captcha id", nineKwName))
 	}
-	return resp.CaptchaID, nil
-}
-
-// poll retrieves the solved token, blocking until ready, the budget expires, or
-// the context is canceled.
-func (s *NineKwSolver) poll(ctx context.Context, captchaID string) (string, error) {
-	pollCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(s.pollInterval)
-	defer ticker.Stop()
-
-	// Initial delay before the first poll — a human has to pick the task up first.
-	select {
-	case <-pollCtx.Done():
-		return "", types.NewCaptchaTimeoutError(s.Name(), captchaID)
-	case <-ticker.C:
-	}
-
-	for {
-		select {
-		case <-pollCtx.Done():
-			return "", types.NewCaptchaTimeoutError(s.Name(), captchaID)
-		case <-ticker.C:
-			token, ready, err := s.fetchResult(pollCtx, captchaID)
-			if err != nil {
-				return "", err
-			}
-			if ready {
-				return token, nil
-			}
-			log.Debug().Str("captcha_id", captchaID).Msg("9kw task still processing")
-		}
-	}
+	return string(resp.CaptchaID), nil
 }
 
 // fetchResult performs a single result poll. ready is false (with nil error) when
@@ -249,24 +221,19 @@ func (s *NineKwSolver) fetchResult(ctx context.Context, captchaID string) (token
 	params.Set("action", nineKwActionResult)
 	params.Set("id", captchaID)
 
-	body, err := s.doRequest(ctx, params)
-	if err != nil {
+	var resp nineKwResultResponse
+	if err := s.get(ctx, params, &resp); err != nil {
 		return "", false, err
 	}
-
-	var resp nineKwResultResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", false, fmt.Errorf("failed to parse 9kw result response: %w", err)
-	}
 	if resp.Error != "" {
-		return "", false, s.handleError(resp.Error, captchaID)
+		return "", false, s.handleError(string(resp.Error), captchaID)
+	}
+	if resp.Answer == nineKwNoUser {
+		return "", false, types.NewCaptchaRejectedError(nineKwName, "NO_USER", "no 9kw workers available")
 	}
 	// Still being worked on.
-	if resp.TryAgain == 1 || resp.Answer == "" {
+	if resp.TryAgain.float() != 0 || resp.Answer == "" {
 		return "", false, nil
-	}
-	if resp.Answer == "ERROR NO USER" {
-		return "", false, types.NewCaptchaRejectedError(s.Name(), "NO_USER", "no 9kw workers available")
 	}
 	return resp.Answer, true, nil
 }
@@ -274,27 +241,22 @@ func (s *NineKwSolver) fetchResult(ctx context.Context, captchaID string) (token
 // Balance retrieves the current credit balance. 9kw reports credits, not USD.
 func (s *NineKwSolver) Balance(ctx context.Context) (float64, error) {
 	if !s.IsConfigured() {
-		return 0, fmt.Errorf("9kw API key not configured")
+		return 0, fmt.Errorf("%s API key not configured", nineKwName)
 	}
 
 	params := s.authParams()
 	params.Set("action", nineKwActionBalance)
 
-	body, err := s.doRequest(ctx, params)
-	if err != nil {
-		return 0, err
-	}
-
 	var resp nineKwBalanceResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse 9kw balance response: %w", err)
+	if err := s.get(ctx, params, &resp); err != nil {
+		return 0, fmt.Errorf("%s: failed to get balance: %w", nineKwName, err)
 	}
 	if resp.Error != "" {
-		return 0, s.handleError(resp.Error, "")
+		return 0, s.handleError(string(resp.Error), "")
 	}
-	credits, err := resp.Credits.Float64()
+	credits, err := strconv.ParseFloat(string(resp.Credits), 64)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse 9kw credits: %w", err)
+		return 0, fmt.Errorf("%s: failed to parse credits", nineKwName)
 	}
 	return credits, nil
 }
@@ -307,31 +269,10 @@ func (s *NineKwSolver) authParams() url.Values {
 	return params
 }
 
-// doRequest issues a GET against the 9kw CGI endpoint and returns the raw body.
-func (s *NineKwSolver) doRequest(ctx context.Context, params url.Values) ([]byte, error) {
-	reqURL := s.baseURL + "?" + params.Encode()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := s.httpClient.Do(httpReq)
-	if err != nil {
-		// SECURITY: *url.Error embeds the full request URL, which carries the
-		// API key as a query parameter. Keep only the underlying cause.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			err = urlErr.Err
-		}
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	return respBody, nil
+// get issues a GET against the 9kw CGI endpoint and decodes the JSON response.
+// The request URL carries the API key; doJSON keeps it out of every error.
+func (s *NineKwSolver) get(ctx context.Context, params url.Values, out interface{}) error {
+	return doJSON(ctx, s.httpClient, http.MethodGet, s.baseURL+"?"+params.Encode(), nil, out)
 }
 
 // handleError converts a 9kw error string (format: "NNNN message") into a typed
@@ -340,15 +281,15 @@ func (s *NineKwSolver) doRequest(ctx context.Context, params url.Values) ([]byte
 func (s *NineKwSolver) handleError(errStr, captchaID string) error {
 	switch {
 	case strings.Contains(errStr, "0011"), strings.Contains(errStr, "0024"): // balance / not enough credits
-		return types.NewCaptchaBalanceError(s.Name())
+		return types.NewCaptchaBalanceError(nineKwName)
 	case strings.Contains(errStr, "0003"): // active API key not found
-		return types.NewCaptchaRejectedError(s.Name(), "0003", "invalid API key")
+		return types.NewCaptchaRejectedError(nineKwName, "0003", "invalid API key")
 	default:
 		return &types.CaptchaError{
-			Provider: s.Name(),
+			Provider: nineKwName,
 			TaskID:   captchaID,
 			Code:     "",
-			Message:  fmt.Sprintf("9kw error: %s", errStr),
+			Message:  fmt.Sprintf("9kw error: %s", providerMessage(errStr, "unknown", s.apiKey)),
 			Err:      types.ErrCaptchaSolverRejected,
 		}
 	}
