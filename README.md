@@ -90,7 +90,8 @@ The API accepts POST requests with JSON body at both `/` and `/v1` endpoints. Al
 |----------|--------|-------------|
 | `/` | POST | Main API endpoint (legacy) |
 | `/v1` | POST | Main API endpoint (recommended) |
-| `/health` | GET | Health check with pool and domain stats |
+| `/health` | GET | Health check with pool counters (no API key needed) |
+| `/stats` | GET | Health fields plus per-domain statistics and selector reload state (API key required when enabled) |
 | `/metrics` | GET | Prometheus-compatible metrics |
 | `/docs` | GET | OpenAPI 3.0 specification (YAML) |
 
@@ -491,13 +492,24 @@ All configuration is done via environment variables.
 |----------|---------|-------------|
 | `RATE_LIMIT_ENABLED` | `true` | Enable rate limiting |
 | `RATE_LIMIT_RPM` | `60` | Requests per minute per IP |
-| `TRUST_PROXY` | `false` | Trust X-Forwarded-For headers |
-| `CORS_ALLOWED_ORIGINS` | (all) | Comma-separated allowed origins |
-| `ALLOW_LOCAL_PROXIES` | `true` | Allow localhost/private IP proxies |
+| `TRUST_PROXY` | `false` | Use `X-Forwarded-For` / `X-Real-IP` for rate limiting. Only enable behind a reverse proxy, and set `TRUSTED_PROXIES` |
+| `TRUSTED_PROXIES` | (none) | Comma-separated CIDRs (or IPs) of your reverse proxies. With this set, forwarding headers are believed only from these addresses and `X-Forwarded-For` is read right to left. Without it, `TRUST_PROXY` believes the header from any client, which lets a client evade rate limiting |
+| `ALLOWED_HOSTS` | (none) | Extra hostnames accepted in the `Host` header, comma-separated (`.example.com` matches subdomains, `*` disables the check). IP addresses, `localhost`, the machine's hostname and single-label names such as a Compose service name are always accepted. See [Browser-borne request protection](#browser-borne-request-protection) |
+| `CORS_ALLOWED_ORIGINS` | (none) | Comma-separated web origins allowed to call the API from a browser. Requests carrying any other `Origin` header are rejected with 403 |
+| `STRICT_CONTENT_TYPE` | `true` | Require `Content-Type: application/json` on API requests (415 otherwise) |
+| `ALLOW_LOCAL_PROXIES` | `false` | Allow a `proxy` in an API request to point at localhost or a private address. Does not apply to `PROXY_URL`, which is trusted configuration |
 | `IGNORE_CERT_ERRORS` | `false` | Ignore TLS certificate errors |
 | `DNS_REBINDING_PROTECTION` | `true` | Pin response URL to the request-time IP. Set `false` for sites serving identical content across multiple TLDs/CDN IPs (SSRF protection stays on) |
 | `API_KEY_ENABLED` | `false` | Enable API key authentication |
 | `API_KEY` | (none) | Required API key (use 16+ chars) |
+
+### Browser-borne request protection
+
+FlareSolverr is normally run without an API key on an address only local software can reach. A web page open in a browser on that machine or network can reach it too, so the server refuses requests that a web page caused:
+
+- **Host check (DNS rebinding).** The `Host` header must be an IP address, `localhost`, the machine's own hostname, a single-label name (for example the Compose service name in `http://flaresolverr:8191`), or a name listed in `ALLOWED_HOSTS`. Anything else gets `403`, and the log line names the exact `ALLOWED_HOSTS=...` value that would allow it. If you reach FlareSolverr through a dotted name (a reverse proxy at `solver.example.com`, a Kubernetes name like `flaresolverr.default.svc`), set `ALLOWED_HOSTS`.
+- **Origin check (cross-site requests).** A request with an `Origin` header not listed in `CORS_ALLOWED_ORIGINS` gets `403`. Programs such as Prowlarr, Jackett and curl do not send `Origin`.
+- **JSON only.** `POST` requests must send `Content-Type: application/json`, or they get `415`. If you use `curl -d` by hand, add `-H "Content-Type: application/json"`. Set `STRICT_CONTENT_TYPE=false` to turn this off.
 
 ### API Key Authentication
 
@@ -707,7 +719,19 @@ Returns:
     "released": 148,
     "recycled": 5,
     "errors": 2
-  },
+  }
+}
+```
+
+`/health` needs no API key, so it only reports liveness and pool counters. Per-domain statistics are on `/stats`, which requires the API key when one is enabled:
+
+```bash
+curl http://localhost:8191/stats
+```
+
+Returns the `/health` fields plus:
+```json
+{
   "domainStats": {
     "example.com": {
       "requestCount": 45,
