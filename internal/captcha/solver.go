@@ -155,41 +155,30 @@ func (c *SolverChain) Solve(ctx context.Context, page *rod.Page, pageURL, userAg
 
 	startTime := time.Now()
 
-	// Prefer parameters captured live from the turnstile.render() call (managed
-	// challenges expose sitekey/action/cData/chlPageData only there, never as DOM
-	// attributes). Fall back to DOM/iframe extraction for embedded widgets.
+	// Parameters captured live from the turnstile.render() call are used as a
+	// set (managed challenges expose sitekey/action/cData/chlPageData only
+	// there). Only when nothing was captured is the DOM consulted, and then
+	// action and cData come from the same widget element as the sitekey.
+	req := &TurnstileRequest{PageURL: pageURL, UserAgent: userAgent}
 	captured, hasCaptured := ReadCapturedChallengeParams(ctx, page)
-
-	var sitekey string
 	if hasCaptured && captured.SiteKey != "" {
-		sitekey = captured.SiteKey
 		log.Debug().Str("source", "render_intercept").Msg("Using intercepted Turnstile params")
+		req.SiteKey = captured.SiteKey
+		req.Action = captured.Action
+		req.CData = captured.CData
+		req.PageData = captured.PageData
 	} else {
-		var err error
-		sitekey, err = ExtractTurnstileSitekey(page)
+		hasCaptured = false
+		widget, err := ExtractTurnstileWidget(ctx, page)
 		if err != nil {
 			log.Debug().Err(err).Msg("Failed to extract Turnstile sitekey")
 			return nil, fmt.Errorf("failed to extract sitekey: %w", err)
 		}
+		req.SiteKey = widget.SiteKey
+		req.Action = widget.Action
+		req.CData = widget.CData
 	}
-
-	req := &TurnstileRequest{
-		SiteKey:   sitekey,
-		PageURL:   pageURL,
-		UserAgent: userAgent,
-		Action:    ExtractTurnstileAction(page),
-		CData:     ExtractTurnstileCData(page),
-	}
-	// Captured render() params win over DOM scraping when present.
-	if hasCaptured {
-		if captured.Action != "" {
-			req.Action = captured.Action
-		}
-		if captured.CData != "" {
-			req.CData = captured.CData
-		}
-		req.PageData = captured.PageData
-	}
+	sitekey := req.SiteKey
 
 	log.Info().
 		Str("sitekey", sitekey[:min(10, len(sitekey))]+"...").
@@ -274,7 +263,7 @@ func (c *SolverChain) SolveHCaptcha(ctx context.Context, page *rod.Page, pageURL
 	startTime := time.Now()
 
 	// Extract hCaptcha sitekey from page
-	sitekey, err := ExtractHCaptchaSitekey(page)
+	sitekey, err := ExtractHCaptchaSitekey(ctx, page)
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to extract hCaptcha sitekey")
 		return nil, fmt.Errorf("failed to extract hCaptcha sitekey: %w", err)
