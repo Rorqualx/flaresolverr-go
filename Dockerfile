@@ -1,5 +1,5 @@
 # Build stage - use BUILDPLATFORM for native compilation speed
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 # Target architecture arguments for cross-compilation
 ARG TARGETPLATFORM
