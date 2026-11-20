@@ -431,6 +431,13 @@ func TestSetCookies_SetsCorrectly(t *testing.T) {
 	if err := page.Navigate(server.URL + "/html"); err != nil {
 		t.Fatalf("Navigation failed: %v", err)
 	}
+	// Navigate returns once navigation is initiated, not once it commits.
+	// GetCookies resolves to page.Cookies(nil), which scopes the lookup to the
+	// page's CURRENT URL; if that is still about:blank the 127.0.0.1 cookie set
+	// below does not match and the assertion fails intermittently.
+	if err := page.WaitLoad(); err != nil {
+		t.Fatalf("WaitLoad failed: %v", err)
+	}
 
 	// Set a cookie
 	cookies := []*proto.NetworkCookieParam{
