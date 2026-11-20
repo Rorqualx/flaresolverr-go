@@ -14,7 +14,7 @@ import (
 
 // TestSolver_NavigateAndExtract tests basic navigation and HTML extraction.
 func TestSolver_NavigateAndExtract(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -65,7 +65,7 @@ func TestSolver_NavigateAndExtract(t *testing.T) {
 
 // TestSolver_CookieExtraction tests that cookies are captured from responses.
 func TestSolver_CookieExtraction(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -115,7 +115,7 @@ func TestSolver_CookieExtraction(t *testing.T) {
 
 // TestSolver_TimeoutRespected tests that timeout parameter is respected.
 func TestSolver_TimeoutRespected(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -160,7 +160,7 @@ func TestSolver_TimeoutRespected(t *testing.T) {
 
 // TestSolver_ScreenshotCapture tests screenshot capture functionality.
 func TestSolver_ScreenshotCapture(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -207,7 +207,7 @@ func TestSolver_ScreenshotCapture(t *testing.T) {
 
 // TestSolver_HTMLTruncation tests that large HTML is truncated.
 func TestSolver_HTMLTruncation(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -254,7 +254,7 @@ func TestSolver_HTMLTruncation(t *testing.T) {
 
 // TestSolver_POSTFormSubmission tests POST request handling.
 func TestSolver_POSTFormSubmission(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -301,7 +301,7 @@ func TestSolver_POSTFormSubmission(t *testing.T) {
 
 // TestSolver_InvalidTimeout tests that invalid timeout is rejected.
 func TestSolver_InvalidTimeout(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -349,7 +349,7 @@ func TestSolver_InvalidTimeout(t *testing.T) {
 
 // TestSolver_CookiesPassedToRequest tests that cookies are passed in requests.
 func TestSolver_CookiesPassedToRequest(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -407,7 +407,7 @@ func TestSolver_CookiesPassedToRequest(t *testing.T) {
 
 // TestSolver_UserAgentSet tests that user agent is set correctly.
 func TestSolver_UserAgentSet(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -449,7 +449,7 @@ func TestSolver_UserAgentSet(t *testing.T) {
 
 // TestSolver_URLRedirect tests handling of HTTP redirects.
 func TestSolver_URLRedirect(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -495,7 +495,7 @@ func TestSolver_URLRedirect(t *testing.T) {
 
 // TestSolver_WaitInSeconds tests the waitInSeconds option.
 func TestSolver_WaitInSeconds(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -539,7 +539,7 @@ func TestSolver_WaitInSeconds(t *testing.T) {
 
 // TestSolver_DisableMedia tests the media blocking option.
 func TestSolver_DisableMedia(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -584,7 +584,7 @@ func TestSolver_DisableMedia(t *testing.T) {
 // that never returns cannot keep the request, or its pooled browser, forever:
 // the request comes back, and the single browser serves the next request.
 func TestSolver_StuckScriptDoesNotHoldBrowser(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",

@@ -57,7 +57,9 @@ jobs:
         run: go run github.com/go-rod/rod/lib/utils/get-browser
 
       - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+        # -timeout: tests/probe drives a real browser per test, so the package
+        # needs more than Go's 600s per-package default.
+        run: go test -v -race -timeout 20m -coverprofile=coverage.out ./...
 
       - name: Upload coverage
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

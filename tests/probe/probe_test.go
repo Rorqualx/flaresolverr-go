@@ -12,15 +12,31 @@ import (
 	"time"
 )
 
-// skipCI skips browser tests in CI/short mode.
-// Browser tests require a real Chrome/Chromium installation.
-func skipCI(t *testing.T) {
+// skipBrowser skips a test that needs a local Chrome/Chromium but nothing else:
+// it drives the browser against the local httptest server only.
+//
+// These DO run in CI. ci.yml pre-downloads Chromium for exactly this reason,
+// and the internal/* packages already launch browsers there.
+func skipBrowser(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("Skipping browser test in short mode (-short flag)")
+	}
+}
+
+// skipExternal skips a test that reaches the public internet -- live Cloudflare
+// targets, captcha provider demos, major sites.
+//
+// These are skipped in CI: they are slow, rate-limited and depend on
+// third-party availability, so a failure there would say nothing about the
+// change under test. Run them locally with `make test-probe`.
+func skipExternal(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("Skipping browser test in short mode (-short flag)")
 	}
 	if os.Getenv("CI") != "" {
-		t.Skip("Skipping browser test in CI environment")
+		t.Skip("Skipping external-network test in CI environment")
 	}
 }
 

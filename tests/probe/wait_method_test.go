@@ -15,7 +15,7 @@ import (
 )
 
 func TestWaitMethod_NowSecure(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -109,7 +109,7 @@ func TestWaitMethod_NowSecure(t *testing.T) {
 }
 
 func TestWaitMethod_MultipleRuns(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",

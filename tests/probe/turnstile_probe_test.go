@@ -17,7 +17,7 @@ import (
 // TestTurnstile_NowSecure tests against nowsecure.nl which has Cloudflare protection.
 // This site is specifically designed for testing anti-bot detection.
 func TestTurnstile_NowSecure(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -100,7 +100,7 @@ func TestTurnstile_NowSecure(t *testing.T) {
 
 // TestTurnstile_CloudflareDemo tests against Cloudflare's official Turnstile demo.
 func TestTurnstile_CloudflareDemo(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -153,7 +153,7 @@ func TestTurnstile_CloudflareDemo(t *testing.T) {
 
 // TestTurnstile_ShadowDOMDirect tests the shadow DOM traversal directly.
 func TestTurnstile_ShadowDOMDirect(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -225,7 +225,7 @@ func TestTurnstile_ShadowDOMDirect(t *testing.T) {
 
 // TestTurnstile_WithHeadful runs the test with visible browser for debugging.
 func TestTurnstile_WithHeadful(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	// Skip unless explicitly requested
 	if testing.Short() {

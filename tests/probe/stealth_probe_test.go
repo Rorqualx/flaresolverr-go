@@ -39,7 +39,7 @@ func setupTestBrowser(t *testing.T) *rod.Browser {
 
 // TestApplyStealthToPage_WebdriverHidden tests that navigator.webdriver is hidden.
 func TestApplyStealthToPage_WebdriverHidden(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -70,7 +70,7 @@ func TestApplyStealthToPage_WebdriverHidden(t *testing.T) {
 
 // TestApplyStealthToPage_PluginsPopulated tests that navigator.plugins is populated.
 func TestApplyStealthToPage_PluginsPopulated(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -100,7 +100,7 @@ func TestApplyStealthToPage_PluginsPopulated(t *testing.T) {
 
 // TestApplyStealthToPage_ChromeRuntime tests that window.chrome.runtime is present.
 func TestApplyStealthToPage_ChromeRuntime(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -130,7 +130,7 @@ func TestApplyStealthToPage_ChromeRuntime(t *testing.T) {
 
 // TestApplyStealthToPage_LanguagesSet tests that navigator.languages is set.
 func TestApplyStealthToPage_LanguagesSet(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -161,7 +161,7 @@ func TestApplyStealthToPage_LanguagesSet(t *testing.T) {
 
 // TestApplyStealthToPage_HardwareConcurrency tests that navigator.hardwareConcurrency is set.
 func TestApplyStealthToPage_HardwareConcurrency(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -191,7 +191,7 @@ func TestApplyStealthToPage_HardwareConcurrency(t *testing.T) {
 
 // TestApplyStealthToPage_DeviceMemory tests that navigator.deviceMemory is set.
 func TestApplyStealthToPage_DeviceMemory(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -221,7 +221,7 @@ func TestApplyStealthToPage_DeviceMemory(t *testing.T) {
 
 // TestApplyStealthToPage_Idempotent tests that applying stealth twice doesn't cause errors.
 func TestApplyStealthToPage_Idempotent(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -255,7 +255,7 @@ func TestApplyStealthToPage_Idempotent(t *testing.T) {
 
 // TestBlockResources_CleanupPreventsLeak tests that BlockResources cleanup prevents goroutine leaks.
 func TestBlockResources_CleanupPreventsLeak(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -286,7 +286,7 @@ func TestBlockResources_CleanupPreventsLeak(t *testing.T) {
 
 // TestSetUserAgent_ClientHintsMatch tests that User-Agent and Client Hints match.
 func TestSetUserAgent_ClientHintsMatch(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -328,7 +328,7 @@ func TestSetUserAgent_ClientHintsMatch(t *testing.T) {
 
 // TestSetViewport_SetsCorrectSize tests that SetViewport sets the correct dimensions.
 func TestSetViewport_SetsCorrectSize(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -364,7 +364,7 @@ func TestSetViewport_SetsCorrectSize(t *testing.T) {
 
 // TestGetBrowserUserAgent_ReturnsString tests that GetBrowserUserAgent returns a valid string.
 func TestGetBrowserUserAgent_ReturnsString(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -392,7 +392,7 @@ func TestGetBrowserUserAgent_ReturnsString(t *testing.T) {
 
 // TestGetCookies_EmptyOnNewPage tests that GetCookies returns empty on a new page.
 func TestGetCookies_EmptyOnNewPage(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -415,7 +415,7 @@ func TestGetCookies_EmptyOnNewPage(t *testing.T) {
 
 // TestSetCookies_SetsCorrectly tests that SetCookies sets cookies correctly.
 func TestSetCookies_SetsCorrectly(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -474,7 +474,7 @@ func TestSetCookies_SetsCorrectly(t *testing.T) {
 
 // TestApplyStealthToPage_NotificationPermission tests that Notification.permission is 'default'.
 func TestApplyStealthToPage_NotificationPermission(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -521,7 +521,7 @@ func TestApplyStealthToPage_NotificationPermission(t *testing.T) {
 
 // TestBlockResources_ContextCancellation tests that BlockResources respects context cancellation.
 func TestBlockResources_ContextCancellation(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -549,7 +549,7 @@ func TestBlockResources_ContextCancellation(t *testing.T) {
 
 // TestApplyStealthToPage_BatteryAPI tests that Battery API returns consistent values.
 func TestApplyStealthToPage_BatteryAPI(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -632,7 +632,7 @@ func TestApplyStealthToPage_BatteryAPI(t *testing.T) {
 
 // TestApplyStealthToPage_SpeechSynthesisVoices tests that Speech Synthesis returns consistent voices.
 func TestApplyStealthToPage_SpeechSynthesisVoices(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -704,7 +704,7 @@ func TestApplyStealthToPage_SpeechSynthesisVoices(t *testing.T) {
 
 // TestApplyStealthToPage_FontEnumerationLimited tests that font enumeration is limited.
 func TestApplyStealthToPage_FontEnumerationLimited(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -768,7 +768,7 @@ func TestApplyStealthToPage_FontEnumerationLimited(t *testing.T) {
 
 // TestApplyStealthToPage_TimezoneConsistent tests that timezone APIs return consistent values.
 func TestApplyStealthToPage_TimezoneConsistent(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -851,7 +851,7 @@ func TestApplyStealthToPage_TimezoneConsistent(t *testing.T) {
 
 // TestCanvasToBlob_HasNoise tests that canvas toBlob is patched with noise.
 func TestCanvasToBlob_HasNoise(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -895,7 +895,7 @@ func TestCanvasToBlob_HasNoise(t *testing.T) {
 
 // TestCanvasGetImageData_HasNoise tests that getImageData is patched with noise.
 func TestCanvasGetImageData_HasNoise(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -935,7 +935,7 @@ func TestCanvasGetImageData_HasNoise(t *testing.T) {
 
 // TestWebGLReadPixels_HasNoise tests that WebGL readPixels is patched with noise.
 func TestWebGLReadPixels_HasNoise(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -989,7 +989,7 @@ func TestWebGLReadPixels_HasNoise(t *testing.T) {
 
 // TestCanvasNoise_SessionConsistent tests that canvas noise is consistent within a session.
 func TestCanvasNoise_SessionConsistent(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()
@@ -1058,7 +1058,7 @@ func TestCanvasNoise_SessionConsistent(t *testing.T) {
 
 // TestCanvasNoise_DifferentAcrossSessions tests that canvas fingerprints differ across sessions.
 func TestCanvasNoise_DifferentAcrossSessions(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	b := setupTestBrowser(t)
 	defer b.Close()

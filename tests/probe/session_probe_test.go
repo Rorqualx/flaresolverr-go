@@ -13,7 +13,7 @@ import (
 
 // TestSessionManager_TTLExpiration tests that sessions are removed after TTL expires.
 func TestSessionManager_TTLExpiration(t *testing.T) {
-	skipCI(t) // Requires browser
+	skipBrowser(t) // Requires browser
 
 	cfg := &config.Config{
 		SessionTTL:             100 * time.Millisecond, // Very short TTL for testing
