@@ -16,7 +16,7 @@ import (
 
 // TestPoolIsHealthy_HealthyBrowser tests that isHealthy returns true for a working browser.
 func TestPoolIsHealthy_HealthyBrowser(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -59,7 +59,7 @@ func TestPoolIsHealthy_HealthyBrowser(t *testing.T) {
 // TestPoolIsHealthy_ClosedBrowser tests health check behavior with a closed browser.
 // Note: This is a behavioral test - we test the pool's response to unhealthy browsers.
 func TestPoolIsHealthy_ClosedBrowser(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -103,7 +103,7 @@ func TestPoolIsHealthy_ClosedBrowser(t *testing.T) {
 
 // TestPoolHealthCheckRoutine_StopsOnClose tests that health check goroutine stops when pool closes.
 func TestPoolHealthCheckRoutine_StopsOnClose(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -139,7 +139,7 @@ func TestPoolHealthCheckRoutine_StopsOnClose(t *testing.T) {
 
 // TestPool_AcquireReleaseCycle tests the basic acquire/release cycle.
 func TestPool_AcquireReleaseCycle(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -194,7 +194,7 @@ func TestPool_AcquireReleaseCycle(t *testing.T) {
 
 // TestPool_AcquireTimeout tests that acquire times out when pool is exhausted.
 func TestPool_AcquireTimeout(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -238,7 +238,7 @@ func TestPool_AcquireTimeout(t *testing.T) {
 
 // TestPool_AcquireContextCancel tests that acquire respects context cancellation.
 func TestPool_AcquireContextCancel(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -280,7 +280,7 @@ func TestPool_AcquireContextCancel(t *testing.T) {
 
 // TestPool_Stats tests that pool statistics are tracked correctly.
 func TestPool_Stats(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -327,7 +327,7 @@ func TestPool_Stats(t *testing.T) {
 
 // TestPool_Size tests that Size returns the configured pool size.
 func TestPool_Size(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -351,7 +351,7 @@ func TestPool_Size(t *testing.T) {
 
 // TestPool_SpawnWithProxy tests spawning a browser with a proxy configuration.
 func TestPool_SpawnWithProxy(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -389,7 +389,7 @@ func TestPool_SpawnWithProxy(t *testing.T) {
 
 // TestPool_AcquireAfterClose tests that Acquire fails after Close.
 func TestPool_AcquireAfterClose(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -424,7 +424,7 @@ func TestPool_AcquireAfterClose(t *testing.T) {
 
 // TestPool_ReleaseNilBrowser tests that Release handles nil browser gracefully.
 func TestPool_ReleaseNilBrowser(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -447,7 +447,7 @@ func TestPool_ReleaseNilBrowser(t *testing.T) {
 
 // TestPool_AvailableAfterClose tests that Available returns 0 after Close.
 func TestPool_AvailableAfterClose(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -479,7 +479,7 @@ func TestPool_AvailableAfterClose(t *testing.T) {
 
 // TestPool_MultipleBrowsersWork tests that all browsers in pool are functional.
 func TestPool_MultipleBrowsersWork(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -538,7 +538,7 @@ func TestPool_MultipleBrowsersWork(t *testing.T) {
 
 // TestBrowser_DirectHealthCheck tests browser health directly using launcher.
 func TestBrowser_DirectHealthCheck(t *testing.T) {
-	skipCI(t)
+	skipBrowser(t)
 
 	l := launcher.New().
 		Headless(true).

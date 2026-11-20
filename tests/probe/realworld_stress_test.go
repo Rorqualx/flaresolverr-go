@@ -16,7 +16,7 @@ import (
 // TestRealWorld_MajorSites tests against major websites to verify compatibility.
 // These sites represent different traffic levels and protection mechanisms.
 func TestRealWorld_MajorSites(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	sites := []struct {
 		name    string
@@ -155,7 +155,7 @@ type testResult struct {
 
 // TestRealWorld_SequentialStress runs sequential requests to test stability.
 func TestRealWorld_SequentialStress(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	sites := []string{
 		"https://httpbin.org/html",
@@ -218,7 +218,7 @@ func TestRealWorld_SequentialStress(t *testing.T) {
 
 // TestRealWorld_CloudflareProtected tests against known Cloudflare-protected sites.
 func TestRealWorld_CloudflareProtected(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	// Sites known to use Cloudflare protection
 	sites := []string{
@@ -302,7 +302,7 @@ func TestRealWorld_CloudflareProtected(t *testing.T) {
 
 // TestRealWorld_RapidFire tests rapid sequential requests.
 func TestRealWorld_RapidFire(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",

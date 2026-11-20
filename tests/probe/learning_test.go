@@ -14,7 +14,7 @@ import (
 // TestTurnstile_MethodLearning runs multiple solve attempts and tracks method learning.
 // This test verifies that the system learns which methods work for a domain.
 func TestTurnstile_MethodLearning(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -123,7 +123,7 @@ func slicesEqual(a, b []string) bool {
 
 // TestTurnstile_MethodLearningQuick is a faster version that just verifies stats are being recorded.
 func TestTurnstile_MethodLearningQuick(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",

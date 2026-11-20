@@ -21,7 +21,7 @@ import (
 
 // TestCaptcha_SitekeyExtraction tests sitekey extraction from real Turnstile pages.
 func TestCaptcha_SitekeyExtraction(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -246,7 +246,7 @@ func TestCaptcha_MockExternalSolver(t *testing.T) {
 
 // TestCaptcha_RealExternalSolver tests real external solver if API key is available.
 func TestCaptcha_RealExternalSolver(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	apiKey := os.Getenv("TWOCAPTCHA_API_KEY")
 	if apiKey == "" {
@@ -329,7 +329,7 @@ func TestCaptcha_CapSolverMock(t *testing.T) {
 
 // TestCaptcha_SolverWithExternalFallback tests full solver integration.
 func TestCaptcha_SolverWithExternalFallback(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	// Create mock external solver
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -416,7 +416,7 @@ func TestCaptcha_SolverWithExternalFallback(t *testing.T) {
 
 // TestCaptcha_ConcurrentSolves stress tests concurrent solving.
 func TestCaptcha_ConcurrentSolves(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
@@ -478,7 +478,7 @@ func TestCaptcha_ConcurrentSolves(t *testing.T) {
 
 // TestCaptcha_MemoryStress tests memory usage under stress.
 func TestCaptcha_MemoryStress(t *testing.T) {
-	skipCI(t)
+	skipExternal(t)
 
 	cfg := &config.Config{
 		Host:               "127.0.0.1",
