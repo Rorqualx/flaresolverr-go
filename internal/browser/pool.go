@@ -547,6 +547,18 @@ func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod
 	launchCtx, launchCancel := context.WithTimeout(ctx, browserLaunchTimeout)
 	defer launchCancel()
 
+	// Hand the launcher the same deadline. Launch blocks in getURL() waiting for
+	// Chrome to print its DevTools URL, and that select watches the launcher's
+	// context, so cancelling it unblocks Launch -- which then kills the process
+	// itself, on the goroutine that owns it.
+	//
+	// This is why the timeout path below must NOT call l.Kill() directly: Kill
+	// reads l.pid while Launch is still writing it, an unsynchronized pair the
+	// race detector flags (CI run 44797189613). rod's Launch already does
+	// `defer l.ctxCancel()`, so the launcher context is dead once Launch
+	// returns either way -- passing ours changes nothing after launch.
+	l = l.Context(launchCtx)
+
 	type launchResult struct {
 		url string
 		err error
@@ -567,13 +579,14 @@ func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod
 		url = res.url
 	case <-launchCtx.Done():
 		// Launch is still blocked waiting for Chrome to report its debugging
-		// URL. Kill the process now: that is what unblocks Launch, and a hung
-		// Chrome left alive starves every later launch. Then reap again once
-		// Launch returns, in case the process only started after the first kill.
+		// URL. launchCtx is now done, so the launcher's context is too: getURL
+		// returns, Launch kills the process on its way out, and a hung Chrome
+		// is not left alive to starve every later launch. Reap the launcher
+		// once Launch has returned -- the channel receive orders our Kill in
+		// discardLauncher after Launch's own writes to l.
 		p.closeWg.Add(1)
 		go func() {
 			defer p.closeWg.Done()
-			l.Kill() // no-op if the process has not started yet
 			<-launched
 			p.discardLauncher(l)
 		}()
