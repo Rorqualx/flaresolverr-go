@@ -549,7 +549,7 @@ func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod
 
 	// Hand the launcher the same deadline. Launch blocks in getURL() waiting for
 	// Chrome to print its DevTools URL, and that select watches the launcher's
-	// context, so cancelling it unblocks Launch -- which then kills the process
+	// context, so canceling it unblocks Launch -- which then kills the process
 	// itself, on the goroutine that owns it.
 	//
 	// This is why the timeout path below must NOT call l.Kill() directly: Kill
