@@ -82,6 +82,12 @@ type Pool struct {
 	// configured value" (pools built directly in tests).
 	memoryLimitMB uint64
 
+	// launchTimeout bounds a single browser launch. Zero means
+	// browserLaunchTimeout (pools built directly in tests). It is a seam: a test
+	// can exercise the launch-timeout path in milliseconds instead of a minute.
+	// Production always gets the constant.
+	launchTimeout time.Duration
+
 	// Egress guard (EGRESS_GUARD). guard is nil when it is disabled.
 	// defaultRoute is the listener every pooled browser is launched with;
 	// routes holds the listener of each browser launched outside the pool,
@@ -229,6 +235,7 @@ func newPool(cfg *config.Config, guardOptions guardproxy.Options) (*Pool, error)
 		readMemory: systemMemoryReader,
 
 		memoryLimitMB: resolveMemoryLimit(cfg.MaxMemoryMB),
+		launchTimeout: browserLaunchTimeout,
 	}
 
 	if cfg.EgressGuard {
@@ -534,6 +541,16 @@ func (p *Pool) spawnBrowser(ctx context.Context) (*rod.Browser, error) {
 	return browser, nil
 }
 
+// launchTimeoutOrDefault is the deadline a single browser launch gets.
+// A zero field means the pool was built directly in a test, which must not be
+// read as "no time at all".
+func (p *Pool) launchTimeoutOrDefault() time.Duration {
+	if p.launchTimeout <= 0 {
+		return browserLaunchTimeout
+	}
+	return p.launchTimeout
+}
+
 // launchAndConnect starts the Chrome process for l and connects to it over CDP.
 // On every failure path the process is killed and its user-data dir removed.
 func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod.Browser, error) {
@@ -544,7 +561,8 @@ func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod
 		return nil, err
 	}
 
-	launchCtx, launchCancel := context.WithTimeout(ctx, browserLaunchTimeout)
+	timeout := p.launchTimeoutOrDefault()
+	launchCtx, launchCancel := context.WithTimeout(ctx, timeout)
 	defer launchCancel()
 
 	// Hand the launcher the same deadline. Launch blocks in getURL() waiting for
@@ -593,7 +611,7 @@ func (p *Pool) launchAndConnect(ctx context.Context, l *launcher.Launcher) (*rod
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("browser launch timed out after %v", browserLaunchTimeout)
+		return nil, fmt.Errorf("browser launch timed out after %v", timeout)
 	}
 
 	// Connect to the browser via CDP
